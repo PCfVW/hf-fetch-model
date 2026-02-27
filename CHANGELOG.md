@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — Phase 1: Progress & Filtering
+
+### Added
+
+- `FetchConfig` builder with `revision`, `token`, `filter` (glob), `exclude` (glob), `concurrency`, and `on_progress` callback
+- `download_with_config(repo_id, &config)` async API for configured downloads
+- `download_blocking()` and `download_with_config_blocking()` sync wrappers for non-async callers
+- `ProgressEvent` struct: `filename`, `bytes_downloaded`, `bytes_total`, `percent`, `files_remaining`
+- `Filter` presets: `safetensors()`, `gguf()`, `config_only()`
+- Optional `indicatif` feature gate with `IndicatifProgress` multi-bar helper
+- `FetchError::InvalidPattern` variant for malformed glob patterns
+- `globset` 0.4 dependency for file filtering
+- Filter and progress integration tests
+
+## [0.1.0] — Phase 0: Minimal Viable Download
+
 ### Added
 
 - `download(repo_id)` async function — downloads all files from a HuggingFace model repository using high-throughput mode

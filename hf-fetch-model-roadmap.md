@@ -3,7 +3,7 @@
 > An embeddable Rust library for downloading HuggingFace models with maximum throughput
 
 **Date:** February 27, 2026
-**Status:** Phase 0 complete
+**Status:** Phase 1 complete
 **Context:** During the development of plip-rs and candle-mi, model downloads were a recurring bottleneck. No existing Rust crate provides a fast, ergonomic, embeddable library for downloading HuggingFace model repositories. hf-fetch-model fills this gap, and candle-mi will use it as its download backend.
 
 ---
@@ -255,15 +255,15 @@ Every `.rs` source file must begin with an SPDX license identifier:
 **Goal:** Users can see download progress and select which files to download.
 
 **Deliverables:**
-- [ ] `FetchConfig` builder with `revision`, `token`, `filter` (glob), `exclude` (glob), `concurrency`
-- [ ] `ProgressEvent` struct and `on_progress` closure callback on `FetchConfig`
-- [ ] `ProgressEvent` fields: `filename`, `bytes_downloaded`, `bytes_total`, `percent`, `files_remaining`
-- [ ] Optional `indicatif` feature gate: multi-progress bar (per-file + overall)
-- [ ] `download_with_config()` public API
-- [ ] Common filter presets: `Filter::safetensors()`, `Filter::gguf()`, `Filter::config_only()`
-- [ ] Optional sync wrapper: `download_blocking()` and `download_with_config_blocking()` for non-async callers
+- [x] `FetchConfig` builder with `revision`, `token`, `filter` (glob), `exclude` (glob), `concurrency`
+- [x] `ProgressEvent` struct and `on_progress` closure callback on `FetchConfig`
+- [x] `ProgressEvent` fields: `filename`, `bytes_downloaded`, `bytes_total`, `percent`, `files_remaining`
+- [x] Optional `indicatif` feature gate: `IndicatifProgress` multi-progress bar (per-file + overall)
+- [x] `download_with_config()` public API
+- [x] Common filter presets: `Filter::safetensors()`, `Filter::gguf()`, `Filter::config_only()`
+- [x] Optional sync wrapper: `download_blocking()` and `download_with_config_blocking()` for non-async callers
 
-**Exit criteria:** Downloading a multi-shard model shows per-file progress bars and respects `.filter("*.safetensors")`.
+**Exit criteria:** Downloading a multi-shard model shows per-file progress bars and respects `.filter("*.safetensors")`. ✅ Met.
 
 ### Phase 2 — Reliability → `v0.3.0`
 
@@ -327,8 +327,8 @@ hf-fetch-model/
 │   ├── error.rs                # FetchError enum (thiserror)                              [Phase 0] ✓
 │   ├── repo.rs                 # Repo file listing via HF API                             [Phase 0] ✓
 │   ├── download.rs             # Orchestration: file downloads over hf-hub .high()        [Phase 0] ✓
-│   ├── config.rs               # FetchConfig builder, Filter, presets                     [Phase 1]
-│   ├── progress.rs             # ProgressEvent struct, indicatif implementation           [Phase 1]
+│   ├── config.rs               # FetchConfig builder, Filter, presets                     [Phase 1] ✓
+│   ├── progress.rs             # ProgressEvent struct, indicatif implementation           [Phase 1] ✓
 │   ├── checksum.rs             # SHA256 verification against HF metadata                  [Phase 2]
 │   └── retry.rs                # Exponential backoff + jitter logic                       [Phase 2]
 ├── src/bin/
@@ -336,7 +336,7 @@ hf-fetch-model/
 │                               # Installed as both `hf-fetch-model` and `hf-fm`
 ├── tests/
 │   ├── integration.rs          # Download julien-c/dummy-unknown, verify cache path       [Phase 0] ✓
-│   └── filter.rs               # Glob filtering tests                                    [Phase 1]
+│   └── filter.rs               # Glob filtering tests                                    [Phase 1] ✓
 ├── examples/
 │   ├── basic.rs                # Minimal download example                                 [Phase 4]
 │   └── progress.rs             # Download with indicatif progress bars                    [Phase 4]
@@ -361,12 +361,12 @@ path = "src/bin/main.rs"
 
 | Module | Phase | Status | Responsibility |
 |---|---|---|---|
-| `lib.rs` | 0–1 | ✓ Phase 0 | `download(repo_id: String)`; Phase 1: adds `download_with_config()`, sync wrappers; re-exports |
-| `error.rs` | 0–2 | ✓ Phase 0 | `FetchError` enum (`Api`, `Io`, `RepoNotFound`, `Auth`); Phase 2: adds checksum, timeout variants |
+| `lib.rs` | 0–1 | ✓ Phase 1 | `download()`, `download_with_config()`, `download_blocking()`, `download_with_config_blocking()`; re-exports |
+| `error.rs` | 0–2 | ✓ Phase 1 | `FetchError` enum (`Api`, `Io`, `RepoNotFound`, `Auth`, `InvalidPattern`); Phase 2: adds checksum, timeout variants |
 | `repo.rs` | 0 | ✓ | `list_repo_files()` via `info().siblings`; parse metadata (sizes, SHAs) |
-| `download.rs` | 0 | ✓ | `download_all_files()`: orchestrate file downloads using hf-hub `.get()` with `.high()` |
-| `config.rs` | 1 | — | `FetchConfig` builder: revision, filters, token, `on_progress` callback, concurrency |
-| `progress.rs` | 1 | — | `ProgressEvent` struct; optional `IndicatifProgress` behind `indicatif` feature gate |
+| `download.rs` | 0–1 | ✓ Phase 1 | `download_all_files()`: orchestrate file downloads with filtering and progress reporting |
+| `config.rs` | 1 | ✓ | `FetchConfig` builder: revision, filters, token, `on_progress` callback, concurrency; `Filter` presets |
+| `progress.rs` | 1 | ✓ | `ProgressEvent` struct; optional `IndicatifProgress` behind `indicatif` feature gate |
 | `checksum.rs` | 2 | — | Stream SHA256 during download; verify against repo metadata |
 | `retry.rs` | 2 | — | Exponential backoff + jitter; retry policy configuration |
 | `bin/main.rs` | 4 | — | CLI: `hf-fetch-model <repo> [--filter] [--exclude] [--revision] [--token] [--output-dir] [--concurrency]` (also installed as `hf-fm`) |
@@ -380,8 +380,8 @@ path = "src/bin/main.rs"
 | `hf-hub` (tokio feature) | 0.5 | HTTP downloads, cache, auth | 0 | ✓ |
 | `tokio` | 1 | Async runtime | 0 | ✓ |
 | `thiserror` | 2 | Error types | 0 | ✓ |
-| `glob` or `globset` | — | File filtering | 1 | — |
-| `indicatif` (optional) | — | Progress bars | 1 | — |
+| `globset` | 0.4 | File filtering | 1 | ✓ |
+| `indicatif` (optional) | 0.17 | Progress bars | 1 | ✓ |
 | `sha2` | — | Checksum verification | 2 | — |
 | `tracing` | — | Structured logging (candle-mi integration) | 3 | — |
 | `clap` | — | CLI argument parsing | 4 | — |
