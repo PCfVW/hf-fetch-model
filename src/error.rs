@@ -36,4 +36,13 @@ pub enum FetchError {
         /// Description of the authentication failure.
         reason: String,
     },
+
+    /// An invalid glob pattern was provided for filtering.
+    #[error("invalid glob pattern: {pattern}: {reason}")]
+    InvalidPattern {
+        /// The glob pattern that failed to parse.
+        pattern: String,
+        /// Description of the parse error.
+        reason: String,
+    },
 }
