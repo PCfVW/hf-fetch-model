@@ -37,19 +37,25 @@ pub async fn download_all_files(
 
     let files: Vec<_> = all_files
         .into_iter()
+        // BORROW: explicit .as_str() instead of Deref coercion
         .filter(|f| file_matches(f.filename.as_str(), include, exclude))
         .collect();
 
     let total = files.len();
     let mut last_path: Option<PathBuf> = None;
 
+    // TODO(Phase 2): use config.concurrency for parallel downloads.
     for (i, file) in files.iter().enumerate() {
         // BORROW: explicit .as_str() instead of Deref coercion
         let path = repo.get(file.filename.as_str()).await?;
 
         // Report progress for completed file.
         let remaining = total.saturating_sub(i + 1);
-        let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let file_size = tokio::fs::metadata(&path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        // BORROW: explicit .as_str() instead of Deref coercion
         let event = progress::completed_event(file.filename.as_str(), file_size, remaining);
 
         if let Some(cfg) = config {

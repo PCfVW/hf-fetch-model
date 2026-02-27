@@ -19,7 +19,7 @@ pub struct ProgressEvent {
     pub bytes_total: u64,
     /// Download percentage for this file (0.0–100.0).
     pub percent: f64,
-    /// Number of files still remaining (including the current one).
+    /// Number of files still remaining (after this one).
     pub files_remaining: usize,
 }
 
