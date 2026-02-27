@@ -232,7 +232,7 @@ Every `.rs` source file must begin with an SPDX license identifier:
 
 ## 4. Roadmap
 
-### Phase 0 — Minimal Viable Download (1–2 sessions)
+### Phase 0 — Minimal Viable Download → `v0.1.0`
 
 **Goal:** A working library crate that downloads an entire model repo faster than naive hf-hub usage.
 
@@ -250,7 +250,7 @@ Every `.rs` source file must begin with an SPDX license identifier:
 
 **Exit criteria:** `hf_fetch_model::download("some/small-model".to_owned()).await?` returns a valid cache path with all files present. ✅ Met.
 
-### Phase 1 — Progress & Filtering (1–2 sessions)
+### Phase 1 — Progress & Filtering → `v0.2.0`
 
 **Goal:** Users can see download progress and select which files to download.
 
@@ -265,7 +265,7 @@ Every `.rs` source file must begin with an SPDX license identifier:
 
 **Exit criteria:** Downloading a multi-shard model shows per-file progress bars and respects `.filter("*.safetensors")`.
 
-### Phase 2 — Reliability (1 session)
+### Phase 2 — Reliability → `v0.3.0`
 
 **Goal:** Downloads succeed on flaky connections and files are verified.
 
@@ -278,7 +278,7 @@ Every `.rs` source file must begin with an SPDX license identifier:
 
 **Exit criteria:** Killing the process mid-download and restarting completes without re-downloading finished files. Corrupted files are detected and re-fetched.
 
-### Phase 3 — candle-mi Integration (1 session)
+### Phase 3 — candle-mi Integration (no hf-fetch-model release)
 
 **Goal:** candle-mi users can download models with a single function call.
 
@@ -291,7 +291,7 @@ Every `.rs` source file must begin with an SPDX license identifier:
 
 **Exit criteria:** `candle_mi::download_model("google/gemma-2-2b-it".to_owned()).await?` downloads and returns the path, with progress visible via `tracing`.
 
-### Phase 4 — CLI & Publish (1 session)
+### Phase 4 — CLI & Publish → `v0.4.0`
 
 **Goal:** Standalone CLI tool and crates.io publication.
 
