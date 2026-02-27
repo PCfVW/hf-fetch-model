@@ -61,6 +61,7 @@ pub use config::{FetchConfig, FetchConfigBuilder, Filter};
 pub use error::{FetchError, FileFailure};
 pub use progress::ProgressEvent;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use hf_hub::{Repo, RepoType};
@@ -174,4 +175,110 @@ pub fn download_with_config_blocking(
         source: e,
     })?;
     rt.block_on(download_with_config(repo_id, config))
+}
+
+/// Downloads all files from a `HuggingFace` model repository and returns
+/// a filename → path map.
+///
+/// Each key is the relative filename within the repository (e.g.,
+/// `"config.json"`, `"model.safetensors"`), and each value is the
+/// absolute local path to the downloaded file.
+///
+/// For filtering, progress, and other options, use
+/// [`download_files_with_config()`].
+///
+/// # Arguments
+///
+/// * `repo_id` — The repository identifier (e.g., `"google/gemma-2-2b-it"`).
+///
+/// # Errors
+///
+/// * [`FetchError::Api`] — if the `HuggingFace` API or download fails.
+/// * [`FetchError::RepoNotFound`] — if the repository does not exist.
+/// * [`FetchError::Auth`] — if authentication is required but fails.
+pub async fn download_files(repo_id: String) -> Result<HashMap<String, PathBuf>, FetchError> {
+    let api = hf_hub::api::tokio::ApiBuilder::new()
+        .high()
+        .build()
+        .map_err(FetchError::Api)?;
+
+    let repo = api.model(repo_id.clone());
+    download::download_all_files_map(&repo, repo_id, None).await
+}
+
+/// Downloads files from a `HuggingFace` model repository using the given
+/// configuration and returns a filename → path map.
+///
+/// Each key is the relative filename within the repository (e.g.,
+/// `"config.json"`, `"model.safetensors"`), and each value is the
+/// absolute local path to the downloaded file.
+///
+/// # Arguments
+///
+/// * `repo_id` — The repository identifier (e.g., `"google/gemma-2-2b-it"`).
+/// * `config` — Download configuration (see [`FetchConfig::builder()`]).
+///
+/// # Errors
+///
+/// * [`FetchError::Api`] — if the `HuggingFace` API or download fails.
+/// * [`FetchError::RepoNotFound`] — if the repository does not exist.
+/// * [`FetchError::Auth`] — if authentication is required but fails.
+pub async fn download_files_with_config(
+    repo_id: String,
+    config: &FetchConfig,
+) -> Result<HashMap<String, PathBuf>, FetchError> {
+    let mut builder = hf_hub::api::tokio::ApiBuilder::new().high();
+
+    if let Some(ref token) = config.token {
+        // BORROW: explicit .clone() to pass owned String
+        builder = builder.with_token(Some(token.clone()));
+    }
+
+    let api = builder.build().map_err(FetchError::Api)?;
+
+    let hf_repo = match config.revision {
+        Some(ref rev) => {
+            // BORROW: explicit .clone() for owned String arguments
+            Repo::with_revision(repo_id.clone(), RepoType::Model, rev.clone())
+        }
+        None => Repo::new(repo_id.clone(), RepoType::Model),
+    };
+
+    let repo = api.repo(hf_repo);
+    download::download_all_files_map(&repo, repo_id, Some(config)).await
+}
+
+/// Blocking version of [`download_files()`] for non-async callers.
+///
+/// Creates a Tokio runtime internally. Do not call from within
+/// an existing async context (use [`download_files()`] instead).
+///
+/// # Errors
+///
+/// Same as [`download_files()`].
+pub fn download_files_blocking(repo_id: String) -> Result<HashMap<String, PathBuf>, FetchError> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+    rt.block_on(download_files(repo_id))
+}
+
+/// Blocking version of [`download_files_with_config()`] for non-async callers.
+///
+/// Creates a Tokio runtime internally. Do not call from within
+/// an existing async context (use [`download_files_with_config()`] instead).
+///
+/// # Errors
+///
+/// Same as [`download_files_with_config()`].
+pub fn download_files_with_config_blocking(
+    repo_id: String,
+    config: &FetchConfig,
+) -> Result<HashMap<String, PathBuf>, FetchError> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+    rt.block_on(download_files_with_config(repo_id, config))
 }

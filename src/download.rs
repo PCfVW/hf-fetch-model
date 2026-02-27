@@ -45,6 +45,42 @@ pub async fn download_all_files(
     repo_id: String,
     config: Option<&FetchConfig>,
 ) -> Result<PathBuf, FetchError> {
+    let file_map = download_all_files_map(repo, repo_id, config).await?;
+
+    // Extract the snapshot directory from any downloaded file path.
+    // All files in a repo share the same snapshot directory.
+    // hf-hub cache layout: .cache/huggingface/hub/models--org--name/snapshots/<sha>/file
+    let any_path = file_map
+        .into_values()
+        .next()
+        .ok_or_else(|| FetchError::RepoNotFound {
+            repo_id: String::from("(empty repository or all files filtered out)"),
+        })?;
+
+    let cache_dir = any_path
+        .parent()
+        .map_or_else(|| any_path.clone(), std::path::Path::to_path_buf);
+
+    Ok(cache_dir)
+}
+
+/// Downloads all files from a repository and returns a filename → path map.
+///
+/// Each key is the relative filename within the repository (e.g.,
+/// `"config.json"`, `"model.safetensors"`), and each value is the
+/// absolute local path to the downloaded file.
+///
+/// # Errors
+///
+/// Returns [`FetchError::PartialDownload`] if some files fail and others succeed.
+/// Returns [`FetchError::Api`] if the file listing fails.
+/// Returns [`FetchError::RepoNotFound`] if the repository does not exist.
+/// Returns [`FetchError::Timeout`] if the overall timeout is exceeded.
+pub async fn download_all_files_map(
+    repo: &ApiRepo,
+    repo_id: String,
+    config: Option<&FetchConfig>,
+) -> Result<HashMap<String, PathBuf>, FetchError> {
     let overall_start = tokio::time::Instant::now();
 
     // Fetch file list with basic metadata from hf-hub.
@@ -87,6 +123,7 @@ pub async fn download_all_files(
     let timeout_total = config.and_then(|c| c.timeout_total);
 
     let total = files.len();
+    let mut file_map: HashMap<String, PathBuf> = HashMap::with_capacity(total);
     let mut last_path: Option<PathBuf> = None;
     let mut failures: Vec<FileFailure> = Vec::new();
 
@@ -130,7 +167,9 @@ pub async fn download_all_files(
                     }
                 }
 
-                last_path = Some(path);
+                last_path = Some(path.clone());
+                // BORROW: explicit .clone() for owned String key
+                file_map.insert(file.filename.clone(), path);
             }
             Err(e) => {
                 failures.push(FileFailure {
@@ -150,20 +189,13 @@ pub async fn download_all_files(
         });
     }
 
-    // The cache directory is the parent of any downloaded file.
-    // All files in a repo share the same snapshot directory.
-    // We navigate up from any file to find the snapshot root.
-    let file_path = last_path.ok_or_else(|| FetchError::RepoNotFound {
-        repo_id: String::from("(empty repository or all files filtered out)"),
-    })?;
+    if file_map.is_empty() {
+        return Err(FetchError::RepoNotFound {
+            repo_id: String::from("(empty repository or all files filtered out)"),
+        });
+    }
 
-    // hf-hub cache layout: .cache/huggingface/hub/models--org--name/snapshots/<sha>/file
-    // We want to return the snapshot directory (parent of the file).
-    let cache_dir = file_path
-        .parent()
-        .map_or_else(|| file_path.clone(), std::path::Path::to_path_buf);
-
-    Ok(cache_dir)
+    Ok(file_map)
 }
 
 /// Downloads a single file with retry and timeout, then optionally verifies its checksum.

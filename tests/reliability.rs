@@ -112,6 +112,59 @@ async fn nonexistent_repo_returns_error() {
     }
 }
 
+#[tokio::test]
+async fn download_files_returns_file_map() {
+    let config = FetchConfig::builder()
+        .filter("*.json")
+        .filter("*.txt")
+        .filter("*.md")
+        .build()
+        .unwrap();
+
+    let files =
+        hf_fetch_model::download_files_with_config("julien-c/dummy-unknown".to_owned(), &config)
+            .await
+            .unwrap();
+
+    // The map should contain at least config.json (present in all HF repos).
+    assert!(!files.is_empty(), "file map should not be empty");
+
+    // Verify all returned paths exist on disk.
+    for (filename, path) in &files {
+        assert!(
+            path.exists(),
+            "file {filename} should exist at {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn download_files_blocking_returns_file_map() {
+    let config = FetchConfig::builder()
+        .filter("*.json")
+        .filter("*.txt")
+        .filter("*.md")
+        .build()
+        .unwrap();
+
+    let files = hf_fetch_model::download_files_with_config_blocking(
+        "julien-c/dummy-unknown".to_owned(),
+        &config,
+    )
+    .unwrap();
+
+    assert!(!files.is_empty(), "file map should not be empty");
+
+    for (filename, path) in &files {
+        assert!(
+            path.exists(),
+            "file {filename} should exist at {}",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn config_builder_defaults() {
     let config = FetchConfig::builder().build().unwrap();
