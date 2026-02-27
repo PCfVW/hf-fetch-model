@@ -3,7 +3,7 @@
 > An embeddable Rust library for downloading HuggingFace models with maximum throughput
 
 **Date:** February 27, 2026
-**Status:** Planning
+**Status:** Phase 0 complete
 **Context:** During the development of plip-rs and candle-mi, model downloads were a recurring bottleneck. No existing Rust crate provides a fast, ergonomic, embeddable library for downloading HuggingFace model repositories. hf-fetch-model fills this gap, and candle-mi will use it as its download backend.
 
 ---
@@ -107,7 +107,8 @@ hf-fetch-model wraps hf-hub (the official client, with cache compatibility and a
 use hf_fetch_model::{FetchConfig, ProgressEvent};
 
 // Minimal usage — download a model with defaults (Phase 0)
-let path = hf_fetch_model::download("google/gemma-2-2b-it").await?;
+// Grit Rule 6: async functions take owned types
+let path = hf_fetch_model::download("google/gemma-2-2b-it".to_owned()).await?;
 
 // Full control (Phase 1+)
 let config = FetchConfig::builder()
@@ -120,7 +121,7 @@ let config = FetchConfig::builder()
     })
     .build();
 
-let path = hf_fetch_model::download_with_config("google/gemma-2-2b-it", &config).await?;
+let path = hf_fetch_model::download_with_config("google/gemma-2-2b-it".to_owned(), &config).await?;
 ```
 
 ---
@@ -236,17 +237,18 @@ Every `.rs` source file must begin with an SPDX license identifier:
 **Goal:** A working library crate that downloads an entire model repo faster than naive hf-hub usage.
 
 **Deliverables:**
-- [ ] Initialize crate: `Cargo.toml` (with Grit lint configuration from §3.4), `src/lib.rs`, `#![forbid(unsafe_code)]`, SPDX headers
-- [ ] Set up CI: `ci.yml` enforcing `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` on every push/PR (see §3.5)
-- [ ] Depend on `hf-hub` with `tokio` feature, using `ApiBuilder::new().high()`
-- [ ] Implement repo file listing via HuggingFace API (list all files in a model repo)
-- [ ] Implement `download(repo_id) -> Result<PathBuf>`: download all files, return cache directory
-- [ ] Respect HF cache layout (`~/.cache/huggingface/hub/`) for compatibility with Python tooling
-- [ ] Auth: read `HF_TOKEN` environment variable, pass to hf-hub
-- [ ] Error type: `FetchError` enum with `thiserror`
-- [ ] Basic integration test: download a small public model (e.g., a tokenizer-only repo)
+- [x] Initialize crate: `Cargo.toml` (with Grit lint configuration from §3.4), `src/lib.rs`, `#![forbid(unsafe_code)]`, SPDX headers
+- [x] Set up CI: `ci.yml` enforcing `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` on every push/PR (see §3.5)
+- [x] Set up `publish.yml` with `workflow_dispatch` for manual re-runs from the GitHub Actions dashboard
+- [x] Depend on `hf-hub` v0.5 with `tokio` feature, using `ApiBuilder::new().high()`
+- [x] Implement repo file listing via HuggingFace API (`repo::list_repo_files()` using `info().siblings`)
+- [x] Implement `download(repo_id: String) -> Result<PathBuf>`: download all files, return cache directory
+- [x] Respect HF cache layout (`~/.cache/huggingface/hub/`) for compatibility with Python tooling
+- [x] Auth: `HF_TOKEN` environment variable, delegated to hf-hub's `ApiBuilder`
+- [x] Error type: `FetchError` enum with `thiserror` v2 (`#[non_exhaustive]`, variants: `Api`, `Io`, `RepoNotFound`, `Auth`)
+- [x] Basic integration test: download `julien-c/dummy-unknown`, verify cache path exists
 
-**Exit criteria:** `hf_fetch_model::download("some/small-model").await?` returns a valid cache path with all files present.
+**Exit criteria:** `hf_fetch_model::download("some/small-model".to_owned()).await?` returns a valid cache path with all files present. ✅ Met.
 
 ### Phase 1 — Progress & Filtering (1–2 sessions)
 
@@ -287,7 +289,7 @@ Every `.rs` source file must begin with an SPDX license identifier:
 - [ ] Update candle-mi examples to use `download_model()` where appropriate
 - [ ] Documentation: how to use fast downloads in candle-mi
 
-**Exit criteria:** `candle_mi::download_model("google/gemma-2-2b-it").await?` downloads and returns the path, with progress visible via `tracing`.
+**Exit criteria:** `candle_mi::download_model("google/gemma-2-2b-it".to_owned()).await?` downloads and returns the path, with progress visible via `tracing`.
 
 ### Phase 4 — CLI & Publish (1 session)
 
@@ -309,45 +311,43 @@ Every `.rs` source file must begin with an SPDX license identifier:
 
 ```
 hf-fetch-model/
-├── Cargo.toml                  # Workspace-free single crate; two [[bin]] targets; Grit lints (§3.4)
-├── CONVENTIONS.md              # Grit rules and annotation patterns (extracted from §3)
-├── LICENSE-MIT                 # Dual license (MIT / Apache-2.0)
-├── LICENSE-APACHE
-├── README.md
-├── CHANGELOG.md
+├── Cargo.toml                  # Workspace-free single crate; Grit lints (§3.4)          [Phase 0] ✓
+├── Cargo.lock                  # Pinned dependency versions                               [Phase 0] ✓
+├── CONVENTIONS.md              # Grit rules and annotation patterns (extracted from §3)   [Phase 0] ✓
+├── LICENSE-MIT                 # Dual license (MIT / Apache-2.0)                          [Phase 0] ✓
+├── LICENSE-APACHE              #                                                          [Phase 0] ✓
+├── README.md                   # Title, badges, one-liner                                 [Phase 0] ✓
+├── CHANGELOG.md                # Keep a Changelog format                                  [Phase 0] ✓
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml              # cargo fmt, clippy, test on push/PR
-│       └── publish.yml         # crates.io publish on tag
+│       ├── ci.yml              # cargo fmt, clippy, test on push/PR                       [Phase 0] ✓
+│       └── publish.yml         # crates.io publish on tag + workflow_dispatch              [Phase 0] ✓
 ├── src/
-│   ├── lib.rs                  # Public API: download(), download_with_config()
-│   ├── config.rs               # FetchConfig builder, Filter, presets
-│   ├── error.rs                # FetchError enum (thiserror)
-│   ├── repo.rs                 # Repo file listing via HF API
-│   ├── download.rs             # Orchestration: parallel file downloads over hf-hub
-│   ├── progress.rs             # ProgressEvent struct, indicatif implementation
-│   ├── checksum.rs             # SHA256 verification against HF metadata
-│   └── retry.rs                # Exponential backoff + jitter logic
+│   ├── lib.rs                  # Public API: download()                                   [Phase 0] ✓
+│   ├── error.rs                # FetchError enum (thiserror)                              [Phase 0] ✓
+│   ├── repo.rs                 # Repo file listing via HF API                             [Phase 0] ✓
+│   ├── download.rs             # Orchestration: file downloads over hf-hub .high()        [Phase 0] ✓
+│   ├── config.rs               # FetchConfig builder, Filter, presets                     [Phase 1]
+│   ├── progress.rs             # ProgressEvent struct, indicatif implementation           [Phase 1]
+│   ├── checksum.rs             # SHA256 verification against HF metadata                  [Phase 2]
+│   └── retry.rs                # Exponential backoff + jitter logic                       [Phase 2]
 ├── src/bin/
-│   └── main.rs                 # CLI binary (Phase 4, clap-based)
+│   └── main.rs                 # CLI binary (clap-based)                                  [Phase 4]
 │                               # Installed as both `hf-fetch-model` and `hf-fm`
 ├── tests/
-│   ├── integration.rs          # Download a small public repo, verify files
-│   └── filter.rs               # Glob filtering tests
+│   ├── integration.rs          # Download julien-c/dummy-unknown, verify cache path       [Phase 0] ✓
+│   └── filter.rs               # Glob filtering tests                                    [Phase 1]
 ├── examples/
-│   ├── basic.rs                # Minimal download example
-│   └── progress.rs             # Download with indicatif progress bars
+│   ├── basic.rs                # Minimal download example                                 [Phase 4]
+│   └── progress.rs             # Download with indicatif progress bars                    [Phase 4]
 └── benches/
-    └── throughput.rs            # Benchmark vs. plain hf-hub sequential download
+    └── throughput.rs            # Benchmark vs. plain hf-hub sequential download           [Phase 4]
 ```
 
-`cargo install hf-fetch-model` installs two binaries from the same source:
+`cargo install hf-fetch-model` will install two binaries from the same source (added in Phase 4):
 
 ```toml
-# Cargo.toml
-[package]
-name = "hf-fetch-model"
-
+# Cargo.toml (Phase 4 additions)
 [[bin]]
 name = "hf-fetch-model"        # explicit, discoverable
 path = "src/bin/main.rs"
@@ -359,32 +359,32 @@ path = "src/bin/main.rs"
 
 ### Module Responsibilities
 
-| Module | Phase | Responsibility |
-|---|---|---|
-| `lib.rs` | 0–1 | Phase 0: `download()`; Phase 1: adds `download_with_config()`, sync wrappers; re-exports |
-| `config.rs` | 1 | `FetchConfig` builder: revision, filters, token, `on_progress` callback, concurrency |
-| `error.rs` | 0–2 | `FetchError` enum: Phase 0: network, auth, IO; Phase 2: adds checksum, timeout variants |
-| `repo.rs` | 0 | List files in a HuggingFace repo via API; parse metadata (sizes, SHAs) |
-| `download.rs` | 0 | Orchestrate parallel file downloads using hf-hub `.high()`; manage concurrency |
-| `progress.rs` | 1 | `ProgressEvent` struct; optional `IndicatifProgress` behind `indicatif` feature gate |
-| `checksum.rs` | 2 | Stream SHA256 during download; verify against repo metadata |
-| `retry.rs` | 2 | Exponential backoff + jitter; retry policy configuration |
-| `bin/main.rs` | 4 | CLI: `hf-fetch-model <repo> [--filter] [--exclude] [--revision] [--token] [--output-dir] [--concurrency]` (also installed as `hf-fm`) |
+| Module | Phase | Status | Responsibility |
+|---|---|---|---|
+| `lib.rs` | 0–1 | ✓ Phase 0 | `download(repo_id: String)`; Phase 1: adds `download_with_config()`, sync wrappers; re-exports |
+| `error.rs` | 0–2 | ✓ Phase 0 | `FetchError` enum (`Api`, `Io`, `RepoNotFound`, `Auth`); Phase 2: adds checksum, timeout variants |
+| `repo.rs` | 0 | ✓ | `list_repo_files()` via `info().siblings`; parse metadata (sizes, SHAs) |
+| `download.rs` | 0 | ✓ | `download_all_files()`: orchestrate file downloads using hf-hub `.get()` with `.high()` |
+| `config.rs` | 1 | — | `FetchConfig` builder: revision, filters, token, `on_progress` callback, concurrency |
+| `progress.rs` | 1 | — | `ProgressEvent` struct; optional `IndicatifProgress` behind `indicatif` feature gate |
+| `checksum.rs` | 2 | — | Stream SHA256 during download; verify against repo metadata |
+| `retry.rs` | 2 | — | Exponential backoff + jitter; retry policy configuration |
+| `bin/main.rs` | 4 | — | CLI: `hf-fetch-model <repo> [--filter] [--exclude] [--revision] [--token] [--output-dir] [--concurrency]` (also installed as `hf-fm`) |
 
 ---
 
 ## 6. Dependencies
 
-| Crate | Purpose | Phase |
-|---|---|---|
-| `hf-hub` (tokio feature) | HTTP downloads, cache, auth | 0 |
-| `tokio` | Async runtime | 0 |
-| `thiserror` | Error types | 0 |
-| `glob` or `globset` | File filtering | 1 |
-| `indicatif` (optional) | Progress bars | 1 |
-| `sha2` | Checksum verification | 2 |
-| `tracing` | Structured logging (candle-mi integration) | 3 |
-| `clap` | CLI argument parsing | 4 |
+| Crate | Version | Purpose | Phase | Status |
+|---|---|---|---|---|
+| `hf-hub` (tokio feature) | 0.5 | HTTP downloads, cache, auth | 0 | ✓ |
+| `tokio` | 1 | Async runtime | 0 | ✓ |
+| `thiserror` | 2 | Error types | 0 | ✓ |
+| `glob` or `globset` | — | File filtering | 1 | — |
+| `indicatif` (optional) | — | Progress bars | 1 | — |
+| `sha2` | — | Checksum verification | 2 | — |
+| `tracing` | — | Structured logging (candle-mi integration) | 3 | — |
+| `clap` | — | CLI argument parsing | 4 | — |
 
 ---
 
