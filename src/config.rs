@@ -3,9 +3,10 @@
 //! Configuration for model downloads.
 //!
 //! [`FetchConfig`] controls revision, authentication, file filtering,
-//! concurrency, and progress reporting.
+//! concurrency, timeouts, retry behavior, and progress reporting.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -37,6 +38,10 @@ pub struct FetchConfig {
     pub(crate) include: Option<GlobSet>,
     pub(crate) exclude: Option<GlobSet>,
     pub(crate) concurrency: usize,
+    pub(crate) timeout_per_file: Option<Duration>,
+    pub(crate) timeout_total: Option<Duration>,
+    pub(crate) max_retries: u32,
+    pub(crate) verify_checksums: bool,
     // TRAIT_OBJECT: heterogeneous progress handlers from different callers
     pub(crate) on_progress: Option<ProgressCallback>,
 }
@@ -49,6 +54,10 @@ impl std::fmt::Debug for FetchConfig {
             .field("include", &self.include)
             .field("exclude", &self.exclude)
             .field("concurrency", &self.concurrency)
+            .field("timeout_per_file", &self.timeout_per_file)
+            .field("timeout_total", &self.timeout_total)
+            .field("max_retries", &self.max_retries)
+            .field("verify_checksums", &self.verify_checksums)
             .field(
                 "on_progress",
                 if self.on_progress.is_some() {
@@ -77,6 +86,10 @@ pub struct FetchConfigBuilder {
     include_patterns: Vec<String>,
     exclude_patterns: Vec<String>,
     concurrency: Option<usize>,
+    timeout_per_file: Option<Duration>,
+    timeout_total: Option<Duration>,
+    max_retries: Option<u32>,
+    verify_checksums: Option<bool>,
     on_progress: Option<ProgressCallback>,
 }
 
@@ -133,6 +146,49 @@ impl FetchConfigBuilder {
         self
     }
 
+    /// Sets the maximum time allowed per file download.
+    ///
+    /// If a single file download exceeds this duration, it is aborted
+    /// and may be retried according to the retry policy.
+    #[must_use]
+    pub fn timeout_per_file(mut self, duration: Duration) -> Self {
+        self.timeout_per_file = Some(duration);
+        self
+    }
+
+    /// Sets the maximum total time for the entire download operation.
+    ///
+    /// If the total download time exceeds this duration, remaining files
+    /// are skipped and a [`FetchError::Timeout`] is returned.
+    #[must_use]
+    pub fn timeout_total(mut self, duration: Duration) -> Self {
+        self.timeout_total = Some(duration);
+        self
+    }
+
+    /// Sets the maximum number of retry attempts per file.
+    ///
+    /// Defaults to 3. Set to 0 to disable retries.
+    /// Uses exponential backoff with jitter (base 300ms, cap 10s).
+    #[must_use]
+    pub fn max_retries(mut self, retries: u32) -> Self {
+        self.max_retries = Some(retries);
+        self
+    }
+
+    /// Enables or disables SHA256 checksum verification after download.
+    ///
+    /// When enabled, downloaded files are verified against the SHA256 hash
+    /// from `HuggingFace` LFS metadata. Files without LFS metadata (small
+    /// config files stored directly in git) are skipped.
+    ///
+    /// Defaults to `true`.
+    #[must_use]
+    pub fn verify_checksums(mut self, verify: bool) -> Self {
+        self.verify_checksums = Some(verify);
+        self
+    }
+
     /// Sets a progress callback invoked for each progress event.
     #[must_use]
     pub fn on_progress<F>(mut self, callback: F) -> Self
@@ -158,6 +214,10 @@ impl FetchConfigBuilder {
             include,
             exclude,
             concurrency: self.concurrency.unwrap_or(4),
+            timeout_per_file: self.timeout_per_file,
+            timeout_total: self.timeout_total,
+            max_retries: self.max_retries.unwrap_or(3),
+            verify_checksums: self.verify_checksums.unwrap_or(true),
             on_progress: self.on_progress,
         })
     }

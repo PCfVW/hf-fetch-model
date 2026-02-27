@@ -3,6 +3,7 @@
 //! Error types for hf-fetch-model.
 //!
 //! All fallible operations in this crate return [`FetchError`].
+//! [`FileFailure`] provides structured per-file error reporting.
 
 use std::path::PathBuf;
 
@@ -45,4 +46,60 @@ pub enum FetchError {
         /// Description of the parse error.
         reason: String,
     },
+
+    /// SHA256 checksum mismatch after download.
+    #[error("checksum mismatch for {filename}: expected {expected}, got {actual}")]
+    Checksum {
+        /// The filename that failed verification.
+        filename: String,
+        /// The expected SHA256 hex digest.
+        expected: String,
+        /// The actual SHA256 hex digest computed from the file.
+        actual: String,
+    },
+
+    /// A download operation timed out.
+    #[error("timeout downloading {filename} after {seconds}s")]
+    Timeout {
+        /// The filename that timed out.
+        filename: String,
+        /// The timeout duration in seconds.
+        seconds: u64,
+    },
+
+    /// One or more files failed to download.
+    ///
+    /// Contains the successful path and a list of per-file failures.
+    #[error("{} file(s) failed to download", failures.len())]
+    PartialDownload {
+        /// The snapshot directory (if any files succeeded).
+        path: Option<PathBuf>,
+        /// Per-file failure details.
+        failures: Vec<FileFailure>,
+    },
+
+    /// An HTTP request to the `HuggingFace` API failed.
+    #[error("HTTP error: {0}")]
+    Http(String),
+}
+
+/// A per-file download failure with structured context.
+#[derive(Debug, Clone)]
+pub struct FileFailure {
+    /// The filename that failed.
+    pub filename: String,
+    /// Human-readable description of the failure.
+    pub reason: String,
+    /// Whether this failure is likely to succeed on retry.
+    pub retryable: bool,
+}
+
+impl std::fmt::Display for FileFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {} (retryable: {})",
+            self.filename, self.reason, self.retryable
+        )
+    }
 }

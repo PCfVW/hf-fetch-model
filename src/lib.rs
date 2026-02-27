@@ -49,14 +49,16 @@
 //! Set the `HF_TOKEN` environment variable to access private or gated models,
 //! or use [`FetchConfig::builder().token()`](FetchConfigBuilder::token).
 
+pub mod checksum;
 pub mod config;
 pub mod download;
 pub mod error;
 pub mod progress;
 pub mod repo;
+mod retry;
 
 pub use config::{FetchConfig, FetchConfigBuilder, Filter};
-pub use error::FetchError;
+pub use error::{FetchError, FileFailure};
 pub use progress::ProgressEvent;
 
 use std::path::PathBuf;
