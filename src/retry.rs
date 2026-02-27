@@ -72,7 +72,7 @@ fn compute_delay(policy: &RetryPolicy, attempt: u32) -> Duration {
     let exp_delay = policy.base_delay.saturating_mul(1u32.wrapping_shl(attempt));
     let capped = exp_delay.min(policy.max_delay);
 
-    // Jitter: add 0–50% of the capped delay using system time nanoseconds.
+    // Jitter: scale to 50–100% of the capped delay using system time nanoseconds.
     let jitter_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());

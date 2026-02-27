@@ -51,6 +51,7 @@ pub async fn verify_sha256(
 async fn compute_sha256(path: &Path) -> Result<String, std::io::Error> {
     // Read file in 8 KiB chunks on a blocking thread to avoid
     // blocking the async runtime with synchronous I/O.
+    // BORROW: explicit .to_path_buf() — owned PathBuf needed to move into closure
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         use std::io::Read;

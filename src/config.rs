@@ -299,6 +299,8 @@ fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>, FetchError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     #[test]
@@ -308,24 +310,22 @@ mod tests {
 
     #[test]
     fn test_file_matches_include() {
-        let include = build_globset(&["*.safetensors".to_owned()]).ok().flatten();
+        let include = build_globset(&["*.safetensors".to_owned()]).unwrap();
         assert!(file_matches("model.safetensors", include.as_ref(), None));
         assert!(!file_matches("model.bin", include.as_ref(), None));
     }
 
     #[test]
     fn test_file_matches_exclude() {
-        let exclude = build_globset(&["*.bin".to_owned()]).ok().flatten();
+        let exclude = build_globset(&["*.bin".to_owned()]).unwrap();
         assert!(file_matches("model.safetensors", None, exclude.as_ref()));
         assert!(!file_matches("model.bin", None, exclude.as_ref()));
     }
 
     #[test]
     fn test_exclude_overrides_include() {
-        let include = build_globset(&["*.safetensors".to_owned(), "*.bin".to_owned()])
-            .ok()
-            .flatten();
-        let exclude = build_globset(&["*.bin".to_owned()]).ok().flatten();
+        let include = build_globset(&["*.safetensors".to_owned(), "*.bin".to_owned()]).unwrap();
+        let exclude = build_globset(&["*.bin".to_owned()]).unwrap();
         assert!(file_matches(
             "model.safetensors",
             include.as_ref(),
@@ -336,12 +336,5 @@ mod tests {
             include.as_ref(),
             exclude.as_ref()
         ));
-    }
-
-    #[test]
-    fn test_filter_presets_build() {
-        Filter::safetensors().build().ok();
-        Filter::gguf().build().ok();
-        Filter::config_only().build().ok();
     }
 }

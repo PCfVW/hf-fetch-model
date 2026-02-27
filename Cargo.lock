@@ -570,7 +570,6 @@ dependencies = [
  "indicatif 0.17.11",
  "reqwest",
  "serde",
- "serde_json",
  "sha2",
  "thiserror",
  "tokio",
