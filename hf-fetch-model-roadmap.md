@@ -3,7 +3,7 @@
 > An embeddable Rust library for downloading HuggingFace models with maximum throughput
 
 **Date:** February 27, 2026
-**Status:** Phase 2 complete
+**Status:** Phase 3 complete
 **Context:** During the development of plip-rs and candle-mi, model downloads were a recurring bottleneck. No existing Rust crate provides a fast, ergonomic, embeddable library for downloading HuggingFace model repositories. hf-fetch-model fills this gap, and candle-mi will use it as its download backend.
 
 ---
@@ -283,13 +283,13 @@ Every `.rs` source file must begin with an SPDX license identifier:
 **Goal:** candle-mi users can download models with a single function call.
 
 **Deliverables:**
-- [ ] Add `hf-fetch-model` as optional dependency of candle-mi: `features = ["fast-download"]`
-- [ ] `candle_mi::download_model(repo_id)` convenience function
-- [ ] Wire progress reporting to `tracing` (candle-mi's logging layer)
-- [ ] Update candle-mi examples to use `download_model()` where appropriate
-- [ ] Documentation: how to use fast downloads in candle-mi
+- [x] Add `hf-fetch-model` as optional dependency of candle-mi: `features = ["fast-download"]`
+- [x] `candle_mi::download_model(repo_id)` convenience function (async + blocking)
+- [x] Wire progress reporting to `tracing` (candle-mi's logging layer)
+- [x] Update candle-mi examples to use `download_model()` where appropriate
+- [x] Documentation: how to use fast downloads in candle-mi
 
-**Exit criteria:** `candle_mi::download_model("julien-c/dummy-unknown".to_owned()).await?` downloads and returns the path, with progress visible via `tracing`. (Uses the project's lightweight test repo; real models like Pythia are exercised in Phase 4.)
+**Exit criteria:** `candle_mi::download_model("julien-c/dummy-unknown".to_owned()).await?` downloads and returns the path, with progress visible via `tracing`. (Uses the project's lightweight test repo; real models like Pythia are exercised in Phase 4.) ✅ Met.
 
 ### Phase 4 — CLI & Publish → `v0.4.0`
 
@@ -390,8 +390,7 @@ path = "src/bin/main.rs"
 | `sha2` | 0.10 | Checksum verification | 2 | ✓ |
 | `reqwest` (json feature) | 0.12 | Direct HF API calls for metadata | 2 | ✓ |
 | `serde` (derive feature) | 1 | JSON deserialization | 2 | ✓ |
-| `serde_json` | 1 | JSON parsing | 2 | ✓ |
-| `tracing` | — | Structured logging (candle-mi integration) | 3 | — |
+| `tracing` | — | Structured logging (candle-mi integration) | 3 | Via candle-mi |
 | `clap` | — | CLI argument parsing | 4 | — |
 
 ---
