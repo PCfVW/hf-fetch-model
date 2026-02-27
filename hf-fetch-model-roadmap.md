@@ -3,7 +3,7 @@
 > An embeddable Rust library for downloading HuggingFace models with maximum throughput
 
 **Date:** February 27, 2026
-**Status:** Phase 1 complete
+**Status:** Phase 2 complete
 **Context:** During the development of plip-rs and candle-mi, model downloads were a recurring bottleneck. No existing Rust crate provides a fast, ergonomic, embeddable library for downloading HuggingFace model repositories. hf-fetch-model fills this gap, and candle-mi will use it as its download backend.
 
 ---
@@ -270,13 +270,13 @@ Every `.rs` source file must begin with an SPDX license identifier:
 **Goal:** Downloads succeed on flaky connections and files are verified.
 
 **Deliverables:**
-- [ ] App-level resume on restart: skip already-completed files, resume partially downloaded files (hf-hub handles HTTP-level Range resume within a single session; this adds cross-session resume)
-- [ ] Retry with exponential backoff + jitter (base 300ms, cap 10s, max 3 retries)
-- [ ] SHA256 checksum verification against HuggingFace repo metadata
-- [ ] Timeout configuration (per-file and overall)
-- [ ] Structured error reporting: which files failed, why, whether retryable
+- [x] App-level resume on restart: hf-hub's `.get()` skips already-cached files automatically; cross-session resume is inherited from hf-hub's cache layer
+- [x] Retry with exponential backoff + jitter (base 300ms, cap 10s, max 3 retries) — `retry.rs`
+- [x] SHA256 checksum verification against `HuggingFace` LFS metadata via direct REST API (`repo::list_repo_files_with_metadata()`) — `checksum.rs`
+- [x] Timeout configuration (per-file and overall) — `FetchConfig::timeout_per_file()`, `FetchConfig::timeout_total()`
+- [x] Structured error reporting: `FetchError::PartialDownload` with `Vec<FileFailure>` (filename, reason, retryable flag)
 
-**Exit criteria:** Killing the process mid-download and restarting completes without re-downloading finished files. Corrupted files are detected and re-fetched.
+**Exit criteria:** Killing the process mid-download and restarting completes without re-downloading finished files. Corrupted files are detected and re-fetched. ✅ Met.
 
 ### Phase 3 — candle-mi Integration (no hf-fetch-model release)
 
@@ -296,14 +296,17 @@ Every `.rs` source file must begin with an SPDX license identifier:
 **Goal:** Standalone CLI tool and crates.io publication.
 
 **Deliverables:**
-- [ ] CLI binaries (thin wrapper): `hf-fetch-model google/gemma-2-2b-it --filter "*.safetensors"` (also available as `hf-fm`)
-- [ ] `--revision`, `--token`, `--filter`, `--exclude`, `--output-dir`, `--concurrency` flags
+- [ ] CLI binaries (thin wrapper): `hf-fetch-model EleutherAI/pythia-1.4b --preset safetensors` (also available as `hf-fm`)
+- [ ] `--revision`, `--token`, `--filter`, `--exclude`, `--preset`, `--output-dir`, `--concurrency` flags
+- [ ] `--preset` maps to `Filter` presets: `safetensors`, `gguf`, `config-only`
+- [ ] `hf-fetch-model list-families` subcommand: scan local HF cache (`config.json` files), print cached `model_type` values with repo names
+- [ ] `hf-fetch-model discover` subcommand: query HF Hub API (`GET /api/models?config=true&sort=downloads&direction=-1`), collect `model_type` values from top models, diff against local cache, print families not yet cached (see Appendix B)
 - [ ] Benchmarks: compare download speed vs. plain hf-hub, document results in README
 - [ ] Pre-publish audit: verify all Grit rules (§3) are satisfied, CI green, `cargo doc` clean
 - [ ] README with usage examples, API docs, architecture diagram
 - [ ] Publish to crates.io
 
-**Exit criteria:** `cargo install hf-fetch-model && hf-fetch-model google/gemma-2-2b-it` works (and `hf-fm` as shorthand). Benchmarks show measurable speedup over default hf-hub on multi-shard models.
+**Exit criteria:** `cargo install hf-fetch-model && hf-fetch-model EleutherAI/pythia-1.4b` downloads all files; `hf-fm EleutherAI/pythia-1.4b --preset safetensors` downloads weights + config only; `hf-fm list-families` lists cached architectures; `hf-fm discover` shows new families available on the Hub. Benchmarks show measurable speedup over default hf-hub on multi-shard models.
 
 ---
 
@@ -325,19 +328,20 @@ hf-fetch-model/
 │       └── publish.yml         # crates.io publish on tag + workflow_dispatch              [Phase 0] ✓
 ├── src/
 │   ├── lib.rs                  # Public API: download(), download_with_config(), sync      [Phase 1] ✓
-│   ├── error.rs                # FetchError enum (5 variants, thiserror)                  [Phase 1] ✓
-│   ├── repo.rs                 # Repo file listing via HF API                             [Phase 0] ✓
-│   ├── download.rs             # Orchestration: filtering, progress, hf-hub .high()       [Phase 1] ✓
-│   ├── config.rs               # FetchConfig builder, Filter presets, glob matching       [Phase 1] ✓
+│   ├── error.rs                # FetchError enum (8 variants, thiserror) + FileFailure    [Phase 2] ✓
+│   ├── repo.rs                 # Repo file listing + extended metadata via HF REST API    [Phase 2] ✓
+│   ├── download.rs             # Orchestration: filter, progress, retry, checksum, timeout [Phase 2] ✓
+│   ├── config.rs               # FetchConfig builder, Filter presets, timeout/retry fields [Phase 2] ✓
 │   ├── progress.rs             # ProgressEvent struct, indicatif implementation           [Phase 1] ✓
-│   ├── checksum.rs             # SHA256 verification against HF metadata                  [Phase 2]
-│   └── retry.rs                # Exponential backoff + jitter logic                       [Phase 2]
+│   ├── checksum.rs             # SHA256 verification against HF LFS metadata              [Phase 2] ✓
+│   └── retry.rs                # Exponential backoff + jitter logic                       [Phase 2] ✓
 ├── src/bin/
 │   └── main.rs                 # CLI binary (clap-based)                                  [Phase 4]
 │                               # Installed as both `hf-fetch-model` and `hf-fm`
 ├── tests/
 │   ├── integration.rs          # Download julien-c/dummy-unknown, verify cache path       [Phase 0] ✓
-│   └── filter.rs               # Glob filtering, progress callback, presets tests         [Phase 1] ✓
+│   ├── filter.rs               # Glob filtering, progress callback, presets tests         [Phase 1] ✓
+│   └── reliability.rs          # Checksum, retry, timeout, structured error tests         [Phase 2] ✓
 ├── examples/
 │   ├── basic.rs                # Minimal download example                                 [Phase 4]
 │   └── progress.rs             # Download with indicatif progress bars                    [Phase 4]
@@ -362,15 +366,15 @@ path = "src/bin/main.rs"
 
 | Module | Phase | Status | Responsibility |
 |---|---|---|---|
-| `lib.rs` | 0–1 | ✓ Phase 1 | `download()`, `download_with_config()`, `download_blocking()`, `download_with_config_blocking()`; re-exports |
-| `error.rs` | 0–2 | ✓ Phase 1 | `FetchError` enum (`Api`, `Io`, `RepoNotFound`, `Auth`, `InvalidPattern`); Phase 2: adds checksum, timeout variants |
-| `repo.rs` | 0 | ✓ | `list_repo_files()` via `info().siblings`; parse metadata (sizes, SHAs) |
-| `download.rs` | 0–1 | ✓ Phase 1 | `download_all_files()`: orchestrate file downloads with filtering and progress reporting |
-| `config.rs` | 1 | ✓ | `FetchConfig` builder: revision, filters, token, `on_progress` callback, concurrency; `Filter` presets |
+| `lib.rs` | 0–1 | ✓ Phase 1 | `download()`, `download_with_config()`, `download_blocking()`, `download_with_config_blocking()`; re-exports `FileFailure` |
+| `error.rs` | 0–2 | ✓ Phase 2 | `FetchError` enum (8 variants: `Api`, `Io`, `RepoNotFound`, `Auth`, `InvalidPattern`, `Checksum`, `Timeout`, `PartialDownload`, `Http`); `FileFailure` struct |
+| `repo.rs` | 0–2 | ✓ Phase 2 | `list_repo_files()` via hf-hub; `list_repo_files_with_metadata()` via HF REST API (sizes, SHA256) |
+| `download.rs` | 0–2 | ✓ Phase 2 | `download_all_files()`: orchestrate with filtering, progress, retry, checksum, timeout, structured errors |
+| `config.rs` | 1–2 | ✓ Phase 2 | `FetchConfig` builder: revision, filters, token, `on_progress`, concurrency, `timeout_per_file`, `timeout_total`, `max_retries`, `verify_checksums`; `Filter` presets |
 | `progress.rs` | 1 | ✓ | `ProgressEvent` struct; optional `IndicatifProgress` behind `indicatif` feature gate |
-| `checksum.rs` | 2 | — | Stream SHA256 during download; verify against repo metadata |
-| `retry.rs` | 2 | — | Exponential backoff + jitter; retry policy configuration |
-| `bin/main.rs` | 4 | — | CLI: `hf-fetch-model <repo> [--filter] [--exclude] [--revision] [--token] [--output-dir] [--concurrency]` (also installed as `hf-fm`) |
+| `checksum.rs` | 2 | ✓ | `verify_sha256()`: compute SHA256 on blocking thread, compare against expected hash |
+| `retry.rs` | 2 | ✓ | `retry_async()`: exponential backoff + jitter; `is_retryable()` classification; `RetryPolicy` config |
+| `bin/main.rs` | 4 | — | CLI: `hf-fetch-model <repo> [--filter] [--exclude] [--preset] [--revision] [--token] [--output-dir] [--concurrency]` (also installed as `hf-fm`) |
 
 ---
 
@@ -383,7 +387,10 @@ path = "src/bin/main.rs"
 | `thiserror` | 2 | Error types | 0 | ✓ |
 | `globset` | 0.4 | File filtering | 1 | ✓ |
 | `indicatif` (optional) | 0.17 | Progress bars | 1 | ✓ |
-| `sha2` | — | Checksum verification | 2 | — |
+| `sha2` | 0.10 | Checksum verification | 2 | ✓ |
+| `reqwest` (json feature) | 0.12 | Direct HF API calls for metadata | 2 | ✓ |
+| `serde` (derive feature) | 1 | JSON deserialization | 2 | ✓ |
+| `serde_json` | 1 | JSON parsing | 2 | ✓ |
 | `tracing` | — | Structured logging (candle-mi integration) | 3 | — |
 | `clap` | — | CLI argument parsing | 4 | — |
 
@@ -407,3 +414,83 @@ path = "src/bin/main.rs"
 | HuggingFace moves entirely to xet backend | hf-fetch-model wraps hf-hub, which will adapt via the LFS Bridge (see §1.3); monitor xet-core for a Rust library API |
 | `.high()` performance insufficient | Benchmark early (Phase 0); if needed, fall back to direct reqwest with Range headers |
 | HF API rate limiting on file listing | Cache repo metadata; respect rate limit headers |
+
+---
+
+## Appendix A. Candidate Models for Download Testing
+
+The Phase 4 CLI test uses **EleutherAI/pythia-1.4b** — a model from the Pythia suite, purpose-built for mechanistic interpretability research. It introduces a new architecture family (GPT-NeoX) not already present in the local HuggingFace cache, and is small enough (~2.8 GB BF16) to run with ample room on an RTX 5060 Ti (16 GB).
+
+### Primary test model
+
+| Model | Family | Params | BF16 size | Why |
+|---|---|---|---|---|
+| `EleutherAI/pythia-1.4b` | GPT-NeoX | 1.4B | ~2.8 GB | Gold standard for MI research; training checkpoints at every step; parallel attn+MLP layout is a new axis for candle-mi |
+
+### Future candidates
+
+These models represent additional architecture families worth testing for fast download benchmarks and candle-mi integration:
+
+| Model | Family | Params | BF16 size | Why |
+|---|---|---|---|---|
+| `allenai/OLMo-2-0425-1B` | OLMo 2 | 1B | ~2 GB | Fully open (weights, data, code, checkpoints); ideal for MI reproducibility; LLaMA-like but with QK-norm |
+| `tiiuae/falcon-rw-1b` | Falcon | 1B | ~2 GB | Multi-query attention (single KV head); architecturally distinct from all cached models |
+| `state-spaces/mamba-1.4b` | Mamba (SSM) | 1.4B | ~2.8 GB | State Space Model — no attention; completely different paradigm; would require new candle-mi backend |
+
+---
+
+## Appendix B. Model Family Discovery via HF Hub API
+
+The `list-families` and `discover` subcommands (Phase 4) rely on the HuggingFace Hub REST API exposing `model_type` metadata without requiring a full model download.
+
+### API capabilities
+
+| Capability | Endpoint | Notes |
+|---|---|---|
+| Get `model_type` for a single model | `GET /api/models/{repo_id}` | Returns `config.model_type` (e.g., `"gpt_neox"`, `"llama"`) |
+| Get `model_type` in bulk | `GET /api/models?config=true&limit=100` | `config` field included in listing responses |
+| Filter by architecture | `GET /api/models?filter=gpt_neox&limit=3` | Architecture tags in `tags[]` match `model_type` |
+| Sort by popularity | `sort=downloads&direction=-1` | Ensures top models are scanned first |
+| List all unique `model_type` values | **Not available** | No dedicated endpoint; requires scanning |
+
+### `list-families` implementation
+
+1. Scan local HF cache directory (`~/.cache/huggingface/hub/models--*/snapshots/*/config.json`)
+2. Parse each `config.json`, extract `model_type` field
+3. Group by `model_type`, list repo names under each family
+
+```
+$ hf-fm list-families
+llama       meta-llama/Llama-3.2-1B, codellama/CodeLlama-7b-hf
+gemma2      google/gemma-2-2b, google/codegemma-7b-it
+qwen2       Qwen/Qwen2.5-Coder-3B-Instruct, Qwen/Qwen2.5-Coder-7B-Instruct
+phi3        microsoft/Phi-3-mini-4k-instruct
+starcoder2  bigcode/starcoder2-3b
+mistral     mistralai/Mistral-7B-v0.1
+```
+
+### `discover` implementation
+
+1. Run `list-families` to get the set of locally cached `model_type` values
+2. Query `GET /api/models?config=true&sort=downloads&direction=-1&limit=100` (paginate up to ~500 models)
+3. Collect all distinct `config.model_type` values from responses
+4. Diff: remote families minus local families → "new" families
+5. For each new family, show the most-downloaded representative model
+
+```
+$ hf-fm discover
+New families not in local cache (top models by downloads):
+
+gpt_neox      EleutherAI/pythia-1.4b          (1.4B params)
+falcon        tiiuae/falcon-rw-1b             (1B params)
+mamba         state-spaces/mamba-1.4b         (1.4B params)
+t5            google/flan-t5-base             (250M params)
+bert          google-bert/bert-base-uncased   (110M params)
+...
+```
+
+### Constraints
+
+- **No auth required** for public model metadata
+- **Rate limits apply** — paginating 500 models requires ~5 API calls; well within limits
+- **Not all models have `config.json`** — GGUF-only repos or custom frameworks may lack `model_type`; these are skipped
