@@ -289,7 +289,7 @@ Every `.rs` source file must begin with an SPDX license identifier:
 - [ ] Update candle-mi examples to use `download_model()` where appropriate
 - [ ] Documentation: how to use fast downloads in candle-mi
 
-**Exit criteria:** `candle_mi::download_model("google/gemma-2-2b-it".to_owned()).await?` downloads and returns the path, with progress visible via `tracing`.
+**Exit criteria:** `candle_mi::download_model("julien-c/dummy-unknown".to_owned()).await?` downloads and returns the path, with progress visible via `tracing`. (Uses the project's lightweight test repo; real models like Pythia are exercised in Phase 4.)
 
 ### Phase 4 — CLI & Publish → `v0.4.0`
 
@@ -338,7 +338,7 @@ hf-fetch-model/
 ├── src/bin/
 │   └── main.rs                 # CLI binary (clap-based)                                  [Phase 4]
 │                               # Installed as both `hf-fetch-model` and `hf-fm`
-├── tests/
+├── tests/                         # All network tests use julien-c/dummy-unknown (tiny public repo)
 │   ├── integration.rs          # Download julien-c/dummy-unknown, verify cache path       [Phase 0] ✓
 │   ├── filter.rs               # Glob filtering, progress callback, presets tests         [Phase 1] ✓
 │   └── reliability.rs          # Checksum, retry, timeout, structured error tests         [Phase 2] ✓
