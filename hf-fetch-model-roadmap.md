@@ -119,7 +119,7 @@ let config = FetchConfig::builder()
     .on_progress(|e: &ProgressEvent| {
         println!("{}: {:.1}%", e.filename, e.percent);
     })
-    .build();
+    .build()?;
 
 let path = hf_fetch_model::download_with_config("google/gemma-2-2b-it".to_owned(), &config).await?;
 ```
@@ -311,23 +311,24 @@ Every `.rs` source file must begin with an SPDX license identifier:
 
 ```
 hf-fetch-model/
-├── Cargo.toml                  # Workspace-free single crate; Grit lints (§3.4)          [Phase 0] ✓
+├── Cargo.toml                  # Single crate; features, Grit lints (§3.4)                [Phase 0] ✓
 ├── Cargo.lock                  # Pinned dependency versions                               [Phase 0] ✓
 ├── CONVENTIONS.md              # Grit rules and annotation patterns (extracted from §3)   [Phase 0] ✓
 ├── LICENSE-MIT                 # Dual license (MIT / Apache-2.0)                          [Phase 0] ✓
 ├── LICENSE-APACHE              #                                                          [Phase 0] ✓
 ├── README.md                   # Title, badges, one-liner                                 [Phase 0] ✓
 ├── CHANGELOG.md                # Keep a Changelog format                                  [Phase 0] ✓
+├── hf-fetch-model-roadmap.md   # This file                                                [Phase 0] ✓
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml              # cargo fmt, clippy, test on push/PR                       [Phase 0] ✓
 │       └── publish.yml         # crates.io publish on tag + workflow_dispatch              [Phase 0] ✓
 ├── src/
-│   ├── lib.rs                  # Public API: download()                                   [Phase 0] ✓
-│   ├── error.rs                # FetchError enum (thiserror)                              [Phase 0] ✓
+│   ├── lib.rs                  # Public API: download(), download_with_config(), sync      [Phase 1] ✓
+│   ├── error.rs                # FetchError enum (5 variants, thiserror)                  [Phase 1] ✓
 │   ├── repo.rs                 # Repo file listing via HF API                             [Phase 0] ✓
-│   ├── download.rs             # Orchestration: file downloads over hf-hub .high()        [Phase 0] ✓
-│   ├── config.rs               # FetchConfig builder, Filter, presets                     [Phase 1] ✓
+│   ├── download.rs             # Orchestration: filtering, progress, hf-hub .high()       [Phase 1] ✓
+│   ├── config.rs               # FetchConfig builder, Filter presets, glob matching       [Phase 1] ✓
 │   ├── progress.rs             # ProgressEvent struct, indicatif implementation           [Phase 1] ✓
 │   ├── checksum.rs             # SHA256 verification against HF metadata                  [Phase 2]
 │   └── retry.rs                # Exponential backoff + jitter logic                       [Phase 2]
@@ -336,7 +337,7 @@ hf-fetch-model/
 │                               # Installed as both `hf-fetch-model` and `hf-fm`
 ├── tests/
 │   ├── integration.rs          # Download julien-c/dummy-unknown, verify cache path       [Phase 0] ✓
-│   └── filter.rs               # Glob filtering tests                                    [Phase 1] ✓
+│   └── filter.rs               # Glob filtering, progress callback, presets tests         [Phase 1] ✓
 ├── examples/
 │   ├── basic.rs                # Minimal download example                                 [Phase 4]
 │   └── progress.rs             # Download with indicatif progress bars                    [Phase 4]
