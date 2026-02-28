@@ -97,7 +97,8 @@ pub async fn list_repo_files_with_metadata(
     }
 
     let client = reqwest::Client::new();
-    let mut request = client.get(&url);
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let mut request = client.get(url.as_str());
     if let Some(t) = token {
         request = request.bearer_auth(t);
     }

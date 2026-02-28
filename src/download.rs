@@ -3,14 +3,18 @@
 //! Download orchestration for `HuggingFace` model repositories.
 //!
 //! This module coordinates the download of all files in a model
-//! repository using `hf-hub`'s high-throughput mode, with filtering,
-//! progress reporting, retry, checksum verification, and timeouts.
+//! repository using `hf-hub`'s high-throughput mode, with concurrent
+//! file downloads, filtering, progress reporting, retry, checksum
+//! verification, and timeouts.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hf_hub::api::tokio::ApiRepo;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::checksum;
 use crate::config::{file_matches, FetchConfig};
@@ -27,7 +31,7 @@ const DEFAULT_TIMEOUT_PER_FILE: Duration = Duration::from_secs(300);
 /// Each file is downloaded via `hf-hub`'s `.get()` method, which respects
 /// the `HuggingFace` cache layout (`~/.cache/huggingface/hub/`).
 ///
-/// Features (Phase 2):
+/// - **Concurrency**: downloads up to `concurrency` files in parallel (default 4).
 /// - **Resume**: hf-hub skips already-cached files automatically.
 /// - **Retry**: transient failures are retried with exponential backoff + jitter.
 /// - **Checksum**: SHA256 verification against `HuggingFace` LFS metadata.
@@ -41,7 +45,7 @@ const DEFAULT_TIMEOUT_PER_FILE: Duration = Duration::from_secs(300);
 /// Returns [`FetchError::RepoNotFound`] if the repository does not exist.
 /// Returns [`FetchError::Timeout`] if the overall timeout is exceeded.
 pub async fn download_all_files(
-    repo: &ApiRepo,
+    repo: ApiRepo,
     repo_id: String,
     config: Option<&FetchConfig>,
 ) -> Result<PathBuf, FetchError> {
@@ -77,14 +81,14 @@ pub async fn download_all_files(
 /// Returns [`FetchError::RepoNotFound`] if the repository does not exist.
 /// Returns [`FetchError::Timeout`] if the overall timeout is exceeded.
 pub async fn download_all_files_map(
-    repo: &ApiRepo,
+    repo: ApiRepo,
     repo_id: String,
     config: Option<&FetchConfig>,
 ) -> Result<HashMap<String, PathBuf>, FetchError> {
     let overall_start = tokio::time::Instant::now();
 
     // Fetch file list with basic metadata from hf-hub.
-    let all_files = repo::list_repo_files(repo, repo_id.clone()).await?;
+    let all_files = repo::list_repo_files(&repo, repo_id.clone()).await?;
 
     // Apply include/exclude filters.
     let include = config.and_then(|c| c.include.as_ref());
@@ -121,39 +125,82 @@ pub async fn download_all_files_map(
         .and_then(|c| c.timeout_per_file)
         .unwrap_or(DEFAULT_TIMEOUT_PER_FILE);
     let timeout_total = config.and_then(|c| c.timeout_total);
+    let concurrency = config.map_or(4, |c| c.concurrency).max(1);
+    let on_progress = config.and_then(|c| c.on_progress.clone());
 
     let total = files.len();
-    let mut file_map: HashMap<String, PathBuf> = HashMap::with_capacity(total);
-    let mut last_path: Option<PathBuf> = None;
-    let mut failures: Vec<FileFailure> = Vec::new();
 
-    // TODO(Phase 2+): use config.concurrency for parallel downloads.
-    for (i, file) in files.iter().enumerate() {
-        // Check overall timeout before each file.
+    // Wrap shared state in Arc for concurrent task access.
+    let repo = Arc::new(repo);
+    let metadata_map = Arc::new(metadata_map);
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let mut join_set = JoinSet::new();
+
+    // Spawn download tasks, limited to `concurrency` in-flight at a time.
+    // The semaphore blocks the spawn loop until a permit is available,
+    // ensuring at most `concurrency` downloads run simultaneously.
+    for file in files {
+        // Check overall timeout before queuing next download.
         if let Some(total_limit) = timeout_total {
             if overall_start.elapsed() >= total_limit {
+                join_set.abort_all();
                 return Err(FetchError::Timeout {
-                    filename: file.filename.clone(),
+                    filename: file.filename,
                     seconds: total_limit.as_secs(),
                 });
             }
         }
 
-        // Download with retry and per-file timeout.
-        let download_result = download_single_file(
-            repo,
-            file,
-            &metadata_map,
-            verify_checksums,
-            &retry_policy,
-            timeout_per_file,
-        )
-        .await;
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|e| FetchError::Http(e.to_string()))?;
+
+        let task_repo = Arc::clone(&repo);
+        let task_meta = Arc::clone(&metadata_map);
+        let task_policy = retry_policy.clone();
+
+        join_set.spawn(async move {
+            let result = download_single_file(
+                &task_repo,
+                &file,
+                &task_meta,
+                verify_checksums,
+                &task_policy,
+                timeout_per_file,
+            )
+            .await;
+            drop(permit);
+            (file, result)
+        });
+    }
+
+    // Collect results as tasks complete.
+    let mut file_map: HashMap<String, PathBuf> = HashMap::with_capacity(total);
+    let mut failures: Vec<FileFailure> = Vec::new();
+    let mut completed_count: usize = 0;
+
+    while let Some(join_result) = join_set.join_next().await {
+        // Check overall timeout between result collections.
+        if let Some(total_limit) = timeout_total {
+            if overall_start.elapsed() >= total_limit {
+                join_set.abort_all();
+                return Err(FetchError::Timeout {
+                    filename: String::from("(overall timeout exceeded)"),
+                    seconds: total_limit.as_secs(),
+                });
+            }
+        }
+
+        let (file, download_result) =
+            join_result.map_err(|e| FetchError::Http(format!("download task failed: {e}")))?;
+
+        completed_count += 1;
 
         match download_result {
             Ok(path) => {
                 // Report progress for completed file.
-                let remaining = total.saturating_sub(i + 1);
+                let remaining = total.saturating_sub(completed_count);
                 let file_size = tokio::fs::metadata(&path)
                     .await
                     .map(|m| m.len())
@@ -161,19 +208,15 @@ pub async fn download_all_files_map(
                 // BORROW: explicit .as_str() instead of Deref coercion
                 let event = progress::completed_event(file.filename.as_str(), file_size, remaining);
 
-                if let Some(cfg) = config {
-                    if let Some(ref cb) = cfg.on_progress {
-                        cb(&event);
-                    }
+                if let Some(ref cb) = on_progress {
+                    cb(&event);
                 }
 
-                last_path = Some(path.clone());
-                // BORROW: explicit .clone() for owned String key
-                file_map.insert(file.filename.clone(), path);
+                file_map.insert(file.filename, path);
             }
             Err(e) => {
                 failures.push(FileFailure {
-                    filename: file.filename.clone(),
+                    filename: file.filename,
                     reason: e.to_string(),
                     retryable: retry::is_retryable(&e),
                 });
@@ -183,10 +226,8 @@ pub async fn download_all_files_map(
 
     // If some files failed, report structured errors.
     if !failures.is_empty() {
-        return Err(FetchError::PartialDownload {
-            path: last_path,
-            failures,
-        });
+        let path = file_map.values().next().cloned();
+        return Err(FetchError::PartialDownload { path, failures });
     }
 
     if file_map.is_empty() {
@@ -215,6 +256,7 @@ async fn download_single_file(
         let fname = filename.clone();
         let timeout_dur = timeout;
         async move {
+            // BORROW: explicit .as_str() instead of Deref coercion
             let download_fut = repo.get(fname.as_str());
             tokio::time::timeout(timeout_dur, download_fut)
                 .await
@@ -228,6 +270,7 @@ async fn download_single_file(
     .await?;
 
     // Verify SHA256 if enabled and metadata is available.
+    // BORROW: explicit .as_str() instead of Deref coercion
     if verify_checksums {
         if let Some(meta) = metadata_map.get(file.filename.as_str()) {
             if let Some(ref expected_sha) = meta.sha256 {

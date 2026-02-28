@@ -3,7 +3,7 @@
 //! Progress reporting for model downloads.
 //!
 //! [`ProgressEvent`] carries per-file and overall download status.
-//! When the `indicatif` feature is enabled, [`IndicatifProgress`]
+//! When the `indicatif` feature is enabled, `IndicatifProgress`
 //! provides multi-progress bars out of the box.
 
 /// A progress event emitted during download.
@@ -100,6 +100,11 @@ impl IndicatifProgress {
     /// Handles a [`ProgressEvent`], updating progress bars.
     pub fn handle(&self, event: &ProgressEvent) {
         if event.percent >= 100.0 {
+            // Derive total: completed so far + this file + remaining
+            // EXPLICIT: try_from for usize → u64 (infallible on 64-bit, safe fallback otherwise)
+            let remaining = u64::try_from(event.files_remaining).unwrap_or(u64::MAX);
+            let total = self.overall.position() + 1 + remaining;
+            self.overall.set_length(total);
             self.overall.inc(1);
         }
     }

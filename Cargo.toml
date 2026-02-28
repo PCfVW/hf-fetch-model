@@ -1,6 +1,6 @@
 [package]
 name = "hf-fetch-model"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Fast HuggingFace model downloads for Rust — an embeddable library for downloading HuggingFace models with maximum throughput"
@@ -8,20 +8,39 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/PCfVW/hf-fetch-model"
 keywords = ["huggingface", "download", "model", "machine-learning"]
 categories = ["network-programming", "science"]
+default-run = "hf-fetch-model"
 
 [features]
 default = []
 indicatif = ["dep:indicatif"]
+cli = ["dep:clap", "indicatif"]
 
 [dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
+dirs = "6"
 globset = "0.4"
 hf-hub = { version = "0.5", features = ["tokio"] }
 indicatif = { version = "0.17", optional = true }
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+[[bin]]
+name = "hf-fetch-model"
+path = "src/bin/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "hf-fm"
+path = "src/bin/main.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "progress"
+required-features = ["indicatif"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

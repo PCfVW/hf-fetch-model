@@ -81,6 +81,10 @@ pub enum FetchError {
     /// An HTTP request to the `HuggingFace` API failed.
     #[error("HTTP error: {0}")]
     Http(String),
+
+    /// An invalid argument was provided.
+    #[error("{0}")]
+    InvalidArgument(String),
 }
 
 /// A per-file download failure with structured context.

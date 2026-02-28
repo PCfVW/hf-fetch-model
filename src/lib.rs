@@ -49,8 +49,10 @@
 //! Set the `HF_TOKEN` environment variable to access private or gated models,
 //! or use [`FetchConfig::builder().token()`](FetchConfigBuilder::token).
 
+pub mod cache;
 pub mod checksum;
 pub mod config;
+pub mod discover;
 pub mod download;
 pub mod error;
 pub mod progress;
@@ -95,7 +97,7 @@ pub async fn download(repo_id: String) -> Result<PathBuf, FetchError> {
         .map_err(FetchError::Api)?;
 
     let repo = api.model(repo_id.clone());
-    download::download_all_files(&repo, repo_id, None).await
+    download::download_all_files(repo, repo_id, None).await
 }
 
 /// Downloads files from a `HuggingFace` model repository using the given configuration.
@@ -128,6 +130,11 @@ pub async fn download_with_config(
         builder = builder.with_token(Some(token.clone()));
     }
 
+    if let Some(ref dir) = config.output_dir {
+        // BORROW: explicit .clone() for owned PathBuf
+        builder = builder.with_cache_dir(dir.clone());
+    }
+
     let api = builder.build().map_err(FetchError::Api)?;
 
     let hf_repo = match config.revision {
@@ -139,7 +146,7 @@ pub async fn download_with_config(
     };
 
     let repo = api.repo(hf_repo);
-    download::download_all_files(&repo, repo_id, Some(config)).await
+    download::download_all_files(repo, repo_id, Some(config)).await
 }
 
 /// Blocking version of [`download()`] for non-async callers.
@@ -203,7 +210,7 @@ pub async fn download_files(repo_id: String) -> Result<HashMap<String, PathBuf>,
         .map_err(FetchError::Api)?;
 
     let repo = api.model(repo_id.clone());
-    download::download_all_files_map(&repo, repo_id, None).await
+    download::download_all_files_map(repo, repo_id, None).await
 }
 
 /// Downloads files from a `HuggingFace` model repository using the given
@@ -234,6 +241,11 @@ pub async fn download_files_with_config(
         builder = builder.with_token(Some(token.clone()));
     }
 
+    if let Some(ref dir) = config.output_dir {
+        // BORROW: explicit .clone() for owned PathBuf
+        builder = builder.with_cache_dir(dir.clone());
+    }
+
     let api = builder.build().map_err(FetchError::Api)?;
 
     let hf_repo = match config.revision {
@@ -245,7 +257,7 @@ pub async fn download_files_with_config(
     };
 
     let repo = api.repo(hf_repo);
-    download::download_all_files_map(&repo, repo_id, Some(config)).await
+    download::download_all_files_map(repo, repo_id, Some(config)).await
 }
 
 /// Blocking version of [`download_files()`] for non-async callers.

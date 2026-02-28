@@ -5,6 +5,7 @@
 //! [`FetchConfig`] controls revision, authentication, file filtering,
 //! concurrency, timeouts, retry behavior, and progress reporting.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,14 +24,16 @@ type ProgressCallback = Arc<dyn Fn(&ProgressEvent) + Send + Sync>;
 /// # Example
 ///
 /// ```rust
+/// # fn example() -> Result<(), hf_fetch_model::FetchError> {
 /// use hf_fetch_model::FetchConfig;
 ///
 /// let config = FetchConfig::builder()
 ///     .revision("main")
 ///     .filter("*.safetensors")
 ///     .concurrency(4)
-///     .build()
-///     .unwrap();
+///     .build()?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct FetchConfig {
     pub(crate) revision: Option<String>,
@@ -38,6 +41,7 @@ pub struct FetchConfig {
     pub(crate) include: Option<GlobSet>,
     pub(crate) exclude: Option<GlobSet>,
     pub(crate) concurrency: usize,
+    pub(crate) output_dir: Option<PathBuf>,
     pub(crate) timeout_per_file: Option<Duration>,
     pub(crate) timeout_total: Option<Duration>,
     pub(crate) max_retries: u32,
@@ -54,6 +58,7 @@ impl std::fmt::Debug for FetchConfig {
             .field("include", &self.include)
             .field("exclude", &self.exclude)
             .field("concurrency", &self.concurrency)
+            .field("output_dir", &self.output_dir)
             .field("timeout_per_file", &self.timeout_per_file)
             .field("timeout_total", &self.timeout_total)
             .field("max_retries", &self.max_retries)
@@ -86,6 +91,7 @@ pub struct FetchConfigBuilder {
     include_patterns: Vec<String>,
     exclude_patterns: Vec<String>,
     concurrency: Option<usize>,
+    output_dir: Option<PathBuf>,
     timeout_per_file: Option<Duration>,
     timeout_total: Option<Duration>,
     max_retries: Option<u32>,
@@ -143,6 +149,17 @@ impl FetchConfigBuilder {
     #[must_use]
     pub fn concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = Some(concurrency);
+        self
+    }
+
+    /// Sets a custom output directory for downloaded files.
+    ///
+    /// By default, files are stored in the standard `HuggingFace` cache directory
+    /// (`~/.cache/huggingface/hub/`). When set, the `HuggingFace` cache hierarchy
+    /// is created inside this directory instead.
+    #[must_use]
+    pub fn output_dir(mut self, dir: PathBuf) -> Self {
+        self.output_dir = Some(dir);
         self
     }
 
@@ -214,6 +231,7 @@ impl FetchConfigBuilder {
             include,
             exclude,
             concurrency: self.concurrency.unwrap_or(4),
+            output_dir: self.output_dir,
             timeout_per_file: self.timeout_per_file,
             timeout_total: self.timeout_total,
             max_retries: self.max_retries.unwrap_or(3),
