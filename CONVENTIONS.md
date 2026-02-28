@@ -17,16 +17,19 @@ hf-fetch-model follows [Grit — Strict Rust for AI-Assisted Development](https:
 | 9 | Prefer iterators | `#![warn(clippy::explicit_iter_loop, ...)]` | Iterator chains over imperative loops |
 | 10 | Single async runtime | Code review | Tokio only |
 | 11 | `#[non_exhaustive]` | Code review | Public enums that may gain variants |
-| 17 | `#[must_use]` | `#![warn(clippy::must_use_candidate)]` | Functions returning a value with no side effects |
+| 12 | `#[must_use]` | `#![warn(clippy::must_use_candidate)]` | Public functions returning a value with no side effects |
 
 ## Annotation Patterns
 
-| Annotation | When Required |
-|------------|---------------|
-| `// TRAIT_OBJECT: <reason>` | Every `Box<dyn Trait>` or `&dyn Trait` usage |
-| `// EXHAUSTIVE: <reason>` | On `#[allow(clippy::exhaustive_enums)]` |
-| `// EXPLICIT: <reason>` | Intentional no-op match arm, or imperative loop over iterator chain |
-| `// BORROW: <what>` | Explicit `.as_str()`, `.as_bytes()`, `.to_owned()` conversions |
+Every annotation is mandatory when the corresponding situation applies.
+
+| Annotation | When Required | Example |
+|------------|---------------|---------|
+| `// TRAIT_OBJECT: <reason>` | Every `Box<dyn Trait>` or `&dyn Trait` usage | `// TRAIT_OBJECT: heterogeneous progress handlers` |
+| `// EXHAUSTIVE: <reason>` | On `#[allow(clippy::exhaustive_enums)]` | `// EXHAUSTIVE: internal dispatch enum; crate owns all variants` |
+| `// EXPLICIT: <reason>` | Intentional no-op match arm, or imperative loop over iterator chain | `// EXPLICIT: no action needed for this variant` |
+| `// BORROW: <what>` | Explicit `.as_str()`, `.as_bytes()`, `.to_owned()` conversions | `// BORROW: explicit .as_str() instead of Deref coercion` |
+| `// SAFETY: <invariants>` | Every `unsafe` block (not expected: `#![forbid(unsafe_code)]`) | N/A |
 
 ## SPDX Headers
 
