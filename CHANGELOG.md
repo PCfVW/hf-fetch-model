@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Multi-connection HTTP Range-based parallel downloads for large files: files above `chunk_threshold` (default 100 MiB) are split into `connections_per_file` (default 8) concurrent Range requests for maximum throughput
+- `--chunk-threshold-mib` and `--connections-per-file` CLI flags
+- `FetchConfig::chunk_threshold()` and `FetchConfig::connections_per_file()` builder methods
+- `search` subcommand: query the HuggingFace Hub for models matching a string (e.g., `hf-fm search RWKV-7`), sorted by downloads
+- `status` subcommand: show per-file download state (complete / partial / missing) for a specific model (e.g., `hf-fm status RWKV/RWKV7-Goose-World3-1.5B-HF`), or scan the entire cache when no repo is given (`hf-fm status`)
+- `cache::repo_status()` async API: cross-reference local cache against HF API for per-file status
+- `cache::cache_summary()`: local-only scan of entire HF cache with file counts and sizes
+- `cache::FileStatus` enum (`Complete`, `Partial`, `Missing`) with `#[non_exhaustive]`
+- `cache::RepoStatus` and `cache::CachedModelSummary` structs
+- `discover::search_models()` async API and `discover::SearchResult` struct
+- `progress::streaming_event()` helper for mid-download progress reporting
+- Direct HTTP GET fallback when hf-hub fails with HTTP 416 Range Not Satisfiable (small git-stored files)
+- HF API commit hash resolution for fresh downloads (when `refs/main` does not yet exist)
+- `futures-util` 0.3 dependency; `stream` feature on `reqwest`; `fs` feature on `tokio`
+
+### Fixed
+
+- Progress bar rendering twice on completion (shared via `Arc`, `AtomicBool` finish-once guard)
+- Fresh download failure on first file when `refs/main` is absent (now resolved via HF API fallback)
+
 ## [0.4.0] — Phase 4: CLI & Publish
 
 ### Added
