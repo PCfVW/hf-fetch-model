@@ -78,6 +78,15 @@ pub enum FetchError {
         failures: Vec<FileFailure>,
     },
 
+    /// A chunked (multi-connection) download failed.
+    #[error("chunked download failed for {filename}: {reason}")]
+    ChunkedDownload {
+        /// The filename that failed.
+        filename: String,
+        /// Description of the failure.
+        reason: String,
+    },
+
     /// An HTTP request to the `HuggingFace` API failed.
     #[error("HTTP error: {0}")]
     Http(String),

@@ -12,6 +12,15 @@ use serde::Deserialize;
 
 use crate::error::FetchError;
 
+/// A model found by searching the `HuggingFace` Hub.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    /// The repository identifier (e.g., `"RWKV/RWKV7-Goose-World3-1.5B-HF"`).
+    pub model_id: String,
+    /// Total download count.
+    pub downloads: u64,
+}
+
 /// A model family discovered from the `HuggingFace` Hub.
 #[derive(Debug, Clone)]
 pub struct DiscoveredFamily {
@@ -117,4 +126,52 @@ pub async fn discover_new_families<S: BuildHasher>(
         .collect();
 
     Ok(discovered)
+}
+
+/// Searches the `HuggingFace` Hub for models matching a query string.
+///
+/// Results are sorted by download count (most popular first).
+///
+/// # Arguments
+///
+/// * `query` — Free-text search string (e.g., `"RWKV-7"`, `"llama 3"`).
+/// * `limit` — Maximum number of results to return.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`] if the API request fails.
+pub async fn search_models(query: &str, limit: usize) -> Result<Vec<SearchResult>, FetchError> {
+    let client = reqwest::Client::new();
+
+    let url = format!(
+        "{HF_API_BASE}?search={query}&sort=downloads&direction=-1&limit={limit}"
+    );
+
+    let response = client
+        .get(url.as_str()) // BORROW: explicit .as_str()
+        .send()
+        .await
+        .map_err(|e| FetchError::Http(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(FetchError::Http(format!(
+            "HF API returned status {}",
+            response.status()
+        )));
+    }
+
+    let models: Vec<ApiModelEntry> = response
+        .json()
+        .await
+        .map_err(|e| FetchError::Http(e.to_string()))?;
+
+    let results = models
+        .into_iter()
+        .map(|m| SearchResult {
+            model_id: m.model_id,
+            downloads: m.downloads,
+        })
+        .collect();
+
+    Ok(results)
 }

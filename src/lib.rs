@@ -51,6 +51,7 @@
 
 pub mod cache;
 pub mod checksum;
+mod chunked;
 pub mod config;
 pub mod discover;
 pub mod download;

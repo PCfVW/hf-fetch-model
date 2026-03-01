@@ -17,7 +17,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::checksum;
-use crate::config::{file_matches, FetchConfig};
+use crate::chunked;
+use crate::config::{file_matches, FetchConfig, ProgressCallback};
 use crate::error::{FetchError, FileFailure};
 use crate::progress;
 use crate::repo::{self, RepoFile};
@@ -100,9 +101,12 @@ pub async fn download_all_files_map(
         .filter(|f| file_matches(f.filename.as_str(), include, exclude))
         .collect();
 
-    // Fetch extended metadata (SHA256, sizes) if checksum verification is enabled.
+    // Fetch extended metadata (SHA256, sizes) if checksum verification is enabled
+    // or chunked downloads need file sizes to determine which files exceed the threshold.
     let verify_checksums = config.is_some_and(|c| c.verify_checksums);
-    let metadata_map = if verify_checksums {
+    let chunk_threshold = config.map_or(u64::MAX, |c| c.chunk_threshold);
+    let needs_metadata = verify_checksums || chunk_threshold < u64::MAX;
+    let metadata_map = if needs_metadata {
         fetch_metadata_map(
             // BORROW: explicit .as_str() instead of Deref coercion
             repo_id.as_str(),
@@ -127,6 +131,31 @@ pub async fn download_all_files_map(
     let timeout_total = config.and_then(|c| c.timeout_total);
     let concurrency = config.map_or(4, |c| c.concurrency).max(1);
     let on_progress = config.and_then(|c| c.on_progress.clone());
+    let connections_per_file = config.map_or(8, |c| c.connections_per_file);
+
+    // Build reqwest client up front (used by chunked downloads and 416 fallback).
+    let token_ref = config.and_then(|c| c.token.as_deref());
+    let http_client = Arc::new(chunked::build_client(token_ref)?);
+    let chunked_client = if chunk_threshold < u64::MAX {
+        Some(Arc::clone(&http_client))
+    } else {
+        None
+    };
+
+    // Resolve cache directory (used by chunked downloads and 416 fallback).
+    let cache_dir = Arc::new(
+        config
+            .and_then(|c| c.output_dir.clone())
+            .map_or_else(crate::cache::hf_cache_dir, Ok)?,
+    );
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let chunked_repo_folder = Arc::new(chunked::repo_folder_name(repo_id.as_str()));
+    let chunked_revision = Arc::new(
+        config
+            .and_then(|c| c.revision.clone())
+            .unwrap_or_else(|| String::from("main")),
+    );
+    let chunked_token = Arc::new(config.and_then(|c| c.token.clone()));
 
     let total = files.len();
 
@@ -159,17 +188,80 @@ pub async fn download_all_files_map(
         let task_repo = Arc::clone(&repo);
         let task_meta = Arc::clone(&metadata_map);
         let task_policy = retry_policy.clone();
+        let task_chunked_client = chunked_client.clone();
+        let task_cache_dir = cache_dir.clone();
+        let task_repo_folder = Arc::clone(&chunked_repo_folder);
+        let task_revision = Arc::clone(&chunked_revision);
+        let task_on_progress = on_progress.clone();
+        // BORROW: explicit .clone() for repo_id
+        let task_repo_id = repo_id.clone();
+        let task_token = Arc::clone(&chunked_token);
+        let task_http_client = Arc::clone(&http_client);
 
         join_set.spawn(async move {
-            let result = download_single_file(
-                &task_repo,
-                &file,
-                &task_meta,
-                verify_checksums,
-                &task_policy,
-                timeout_per_file,
-            )
-            .await;
+            // Determine file size from metadata for chunked download decision.
+            let file_size = task_meta
+                .get(file.filename.as_str())
+                .and_then(|m| m.size);
+
+            let result = if let (Some(size), Some(ref client)) =
+                (file_size, &task_chunked_client)
+            {
+                if size >= chunk_threshold {
+                    download_single_file_chunked(
+                        client,
+                        &file,
+                        &task_cache_dir,
+                        &task_repo_folder,
+                        &task_revision,
+                        task_repo_id.as_str(),
+                        (*task_token).clone(),
+                        &task_meta,
+                        verify_checksums,
+                        &task_policy,
+                        connections_per_file,
+                        task_on_progress,
+                        total.saturating_sub(1),
+                    )
+                    .await
+                } else {
+                    download_single_file(
+                        &task_repo,
+                        &file,
+                        &task_meta,
+                        verify_checksums,
+                        &task_policy,
+                        timeout_per_file,
+                    )
+                    .await
+                }
+            } else {
+                download_single_file(
+                    &task_repo,
+                    &file,
+                    &task_meta,
+                    verify_checksums,
+                    &task_policy,
+                    timeout_per_file,
+                )
+                .await
+            };
+
+            // Fall back to direct HTTP GET if hf-hub fails with 416 Range Not Satisfiable.
+            // This happens for small git-stored files that don't support Range requests.
+            let result = if is_range_not_satisfiable(&result) {
+                chunked::download_direct(
+                    &task_http_client,
+                    task_repo_id.as_str(),
+                    &task_revision,
+                    file.filename.as_str(),
+                    &task_cache_dir,
+                )
+                .await
+            } else {
+                result
+            };
+
             drop(permit);
             (file, result)
         });
@@ -281,6 +373,85 @@ async fn download_single_file(
     }
 
     Ok(path)
+}
+
+/// Downloads a large file using multi-connection chunked download with retry and checksum.
+#[allow(clippy::too_many_arguments)]
+async fn download_single_file_chunked(
+    client: &reqwest::Client,
+    file: &RepoFile,
+    cache_dir: &std::path::Path,
+    repo_folder: &str,
+    revision: &str,
+    repo_id: &str,
+    token: Option<String>,
+    metadata_map: &HashMap<String, RepoFile>,
+    verify_checksums: bool,
+    retry_policy: &RetryPolicy,
+    connections: usize,
+    // TRAIT_OBJECT: heterogeneous progress handlers from different callers
+    on_progress: Option<ProgressCallback>,
+    files_remaining: usize,
+) -> Result<PathBuf, FetchError> {
+    // Probe for Range support.
+    // BORROW: explicit .as_str() for URL construction
+    let url = chunked::build_download_url(repo_id, revision, file.filename.as_str());
+    let range_info = chunked::probe_range_support(client.clone(), url, token).await?;
+
+    let Some(range_info) = range_info else {
+        // Range not supported — this shouldn't happen for LFS files, but fall back
+        // gracefully. Return an error that will be caught and retried via the standard path.
+        return Err(FetchError::ChunkedDownload {
+            // BORROW: explicit .clone() for owned String
+            filename: file.filename.clone(),
+            reason: String::from("server does not support Range requests"),
+        });
+    };
+
+    let path = chunked::download_chunked(
+        client.clone(),
+        range_info,
+        // BORROW: explicit .to_path_buf() for owned PathBuf
+        cache_dir.to_path_buf(),
+        // BORROW: explicit .to_owned() for owned String
+        repo_folder.to_owned(),
+        // BORROW: explicit .to_owned() for owned String
+        revision.to_owned(),
+        // BORROW: explicit .clone() for owned String
+        file.filename.clone(),
+        connections,
+        retry_policy.clone(),
+        on_progress,
+        files_remaining,
+    )
+    .await?;
+
+    // Verify SHA256 if enabled and metadata is available.
+    // BORROW: explicit .as_str() instead of Deref coercion
+    if verify_checksums {
+        if let Some(meta) = metadata_map.get(file.filename.as_str()) {
+            if let Some(ref expected_sha) = meta.sha256 {
+                checksum::verify_sha256(&path, file.filename.as_str(), expected_sha.as_str())
+                    .await?;
+            }
+        }
+    }
+
+    Ok(path)
+}
+
+/// Returns whether a download result contains an HTTP 416 Range Not Satisfiable error.
+///
+/// hf-hub's `.get()` internally sends `Range: bytes=0-0` for all files. Small git-stored
+/// files (not LFS) may not support Range requests and return 416.
+fn is_range_not_satisfiable(result: &Result<PathBuf, FetchError>) -> bool {
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            msg.contains("416") || msg.contains("Range Not Satisfiable")
+        }
+        Ok(_) => false,
+    }
 }
 
 /// Fetches extended metadata and builds a filename → `RepoFile` lookup map.

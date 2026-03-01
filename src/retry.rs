@@ -84,10 +84,20 @@ fn compute_delay(policy: &RetryPolicy, attempt: u32) -> Duration {
 }
 
 /// Returns whether a [`FetchError`] is likely transient and worth retrying.
+///
+/// HTTP 416 Range Not Satisfiable is deterministic (the server will never
+/// support Range for that file), so it is excluded from retries.
 #[must_use]
 pub(crate) fn is_retryable(error: &FetchError) -> bool {
     match error {
-        FetchError::Api(_) | FetchError::Http(_) | FetchError::Timeout { .. } => true,
+        FetchError::Api(e) => {
+            let msg = e.to_string();
+            // 416 Range Not Satisfiable is deterministic, not transient.
+            !msg.contains("416")
+        }
+        FetchError::Http(_)
+        | FetchError::Timeout { .. }
+        | FetchError::ChunkedDownload { .. } => true,
         FetchError::Io { .. }
         | FetchError::RepoNotFound { .. }
         | FetchError::Auth { .. }

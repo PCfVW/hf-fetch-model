@@ -15,7 +15,7 @@ use crate::error::FetchError;
 use crate::progress::ProgressEvent;
 
 // TRAIT_OBJECT: heterogeneous progress handlers from different callers
-type ProgressCallback = Arc<dyn Fn(&ProgressEvent) + Send + Sync>;
+pub(crate) type ProgressCallback = Arc<dyn Fn(&ProgressEvent) + Send + Sync>;
 
 /// Configuration for downloading a model repository.
 ///
@@ -46,6 +46,8 @@ pub struct FetchConfig {
     pub(crate) timeout_total: Option<Duration>,
     pub(crate) max_retries: u32,
     pub(crate) verify_checksums: bool,
+    pub(crate) chunk_threshold: u64,
+    pub(crate) connections_per_file: usize,
     // TRAIT_OBJECT: heterogeneous progress handlers from different callers
     pub(crate) on_progress: Option<ProgressCallback>,
 }
@@ -63,6 +65,8 @@ impl std::fmt::Debug for FetchConfig {
             .field("timeout_total", &self.timeout_total)
             .field("max_retries", &self.max_retries)
             .field("verify_checksums", &self.verify_checksums)
+            .field("chunk_threshold", &self.chunk_threshold)
+            .field("connections_per_file", &self.connections_per_file)
             .field(
                 "on_progress",
                 if self.on_progress.is_some() {
@@ -96,6 +100,8 @@ pub struct FetchConfigBuilder {
     timeout_total: Option<Duration>,
     max_retries: Option<u32>,
     verify_checksums: Option<bool>,
+    chunk_threshold: Option<u64>,
+    connections_per_file: Option<usize>,
     on_progress: Option<ProgressCallback>,
 }
 
@@ -206,6 +212,27 @@ impl FetchConfigBuilder {
         self
     }
 
+    /// Sets the minimum file size (in bytes) for chunked parallel download.
+    ///
+    /// Files at or above this threshold are downloaded using multiple HTTP
+    /// Range connections in parallel. Files below use the standard single
+    /// connection. Defaults to 100 MiB (104\_857\_600 bytes). Set to
+    /// `u64::MAX` to disable chunked downloads entirely.
+    #[must_use]
+    pub fn chunk_threshold(mut self, bytes: u64) -> Self {
+        self.chunk_threshold = Some(bytes);
+        self
+    }
+
+    /// Sets the number of parallel HTTP connections per large file.
+    ///
+    /// Only applies to files at or above `chunk_threshold`. Defaults to 8.
+    #[must_use]
+    pub fn connections_per_file(mut self, connections: usize) -> Self {
+        self.connections_per_file = Some(connections);
+        self
+    }
+
     /// Sets a progress callback invoked for each progress event.
     #[must_use]
     pub fn on_progress<F>(mut self, callback: F) -> Self
@@ -236,6 +263,8 @@ impl FetchConfigBuilder {
             timeout_total: self.timeout_total,
             max_retries: self.max_retries.unwrap_or(3),
             verify_checksums: self.verify_checksums.unwrap_or(true),
+            chunk_threshold: self.chunk_threshold.unwrap_or(104_857_600),
+            connections_per_file: self.connections_per_file.unwrap_or(8).max(1),
             on_progress: self.on_progress,
         })
     }

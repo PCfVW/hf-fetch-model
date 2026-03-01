@@ -35,6 +35,30 @@ pub(crate) fn completed_event(filename: &str, size: u64, files_remaining: usize)
     }
 }
 
+/// Creates a [`ProgressEvent`] for an in-progress file (streaming update).
+#[must_use]
+pub(crate) fn streaming_event(
+    filename: &str,
+    bytes_downloaded: u64,
+    bytes_total: u64,
+    files_remaining: usize,
+) -> ProgressEvent {
+    #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+    // EXPLICIT: f64 cast for percentage; precision loss negligible for display
+    let percent = if bytes_total > 0 {
+        (bytes_downloaded as f64 / bytes_total as f64) * 100.0
+    } else {
+        0.0
+    };
+    ProgressEvent {
+        filename: filename.to_owned(),
+        bytes_downloaded,
+        bytes_total,
+        percent,
+        files_remaining,
+    }
+}
+
 /// Multi-progress bar display using `indicatif`.
 ///
 /// Available only when the `indicatif` feature is enabled.
@@ -62,6 +86,7 @@ pub(crate) fn completed_event(filename: &str, size: u64, files_remaining: usize)
 pub struct IndicatifProgress {
     multi: indicatif::MultiProgress,
     overall: indicatif::ProgressBar,
+    finished: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "indicatif")]
@@ -81,7 +106,11 @@ impl IndicatifProgress {
                 .progress_chars("=> "),
         );
         overall.set_message("Overall");
-        Self { multi, overall }
+        Self {
+            multi,
+            overall,
+            finished: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Returns a reference to the underlying [`indicatif::MultiProgress`].
@@ -107,6 +136,23 @@ impl IndicatifProgress {
             self.overall.set_length(total);
             self.overall.inc(1);
         }
+    }
+
+    /// Finishes the progress bar, ensuring the final state is rendered.
+    ///
+    /// Called automatically on drop, but can be called explicitly for
+    /// immediate visual feedback.
+    pub fn finish(&self) {
+        if !self.finished.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            self.overall.finish();
+        }
+    }
+}
+
+#[cfg(feature = "indicatif")]
+impl Drop for IndicatifProgress {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
