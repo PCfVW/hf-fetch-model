@@ -11,13 +11,15 @@
 ## Features
 
 - **Repo-level download** — give it a model ID, get all files
-- **Maximum throughput** — parallel chunked downloads via hf-hub's `.high()` mode
+- **Maximum throughput** — multi-connection parallel Range downloads for large files (8 connections by default), plus hf-hub's `.high()` mode
 - **File filtering** — glob patterns (`*.safetensors`) and presets (`safetensors`, `gguf`, `config-only`)
+- **HF cache compatible** — files stored in `~/.cache/huggingface/hub/`
 - **Progress reporting** — per-file callbacks, optional `indicatif` progress bars
 - **Checksum verification** — SHA256 against HuggingFace LFS metadata
 - **Retry with backoff** — exponential backoff + jitter for flaky connections
 - **Timeout control** — per-file and overall time limits
-- **HF cache compatible** — files stored in `~/.cache/huggingface/hub/`
+- **Cache diagnostics** — `status` command shows per-file download state (complete / partial / missing)
+- **Model search** — `search` command queries the HuggingFace Hub by keyword
 - **CLI included** — `hf-fetch-model` / `hf-fm` binary for command-line use
 
 ## Installation
@@ -72,6 +74,13 @@ hf-fm google/gemma-2-2b-it --filter "*.safetensors" --filter "*.json"
 # Download to a specific directory
 hf-fm google/gemma-2-2b-it --output-dir ./models
 
+# Search for models on HuggingFace Hub
+hf-fm search RWKV-7
+
+# Check download status (per-repo or entire cache)
+hf-fm status RWKV/RWKV7-Goose-World3-1.5B-HF
+hf-fm status
+
 # List model families in local cache
 hf-fm list-families
 
@@ -79,19 +88,40 @@ hf-fm list-families
 hf-fm discover
 ```
 
-### CLI Flags
+### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| *(default)* | Download a model: `hf-fm <REPO_ID>` |
+| `search <QUERY>` | Search the HuggingFace Hub for models (by downloads) |
+| `status [REPO_ID]` | Show download status — per-repo detail, or cache-wide summary |
+| `list-families` | List model families (`model_type`) in local cache |
+| `discover` | Find new model families on the Hub not yet cached locally |
+
+### Download Flags
+
+These flags apply to the default download command (`hf-fm <REPO_ID>`).
 
 | Flag | Description | Default |
 |------|-------------|---------|
+| `--chunk-threshold-mib` | Min file size (MiB) for multi-connection download | 100 |
 | `--concurrency` | Parallel file downloads | 4 |
+| `--connections-per-file` | Parallel HTTP connections per large file | 8 |
 | `--exclude` | Exclude glob pattern (repeatable) | none |
 | `--filter` | Include glob pattern (repeatable) | all files |
-| `-h`, `--help` | Print help | — |
 | `--output-dir` | Custom output directory | HF cache |
 | `--preset` | Filter preset: `safetensors`, `gguf`, `config-only` | — |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |
-| `-V`, `--version` | Print version | — |
+
+### General Flags
+
+| Flag | Description |
+|------|-------------|
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
+
+Subcommands accept their own flags (e.g., `--limit` for `search` and `discover`). Run `hf-fm <command> --help` for details.
 
 ## Architecture
 
@@ -103,12 +133,14 @@ hf-fetch-model
   • repo file listing
   • file filtering (glob patterns)
   • parallel file orchestration
+  • multi-connection Range downloads (large files)
   • progress callbacks
   • checksum verification
   • resume / retry
+  • cache diagnostics & model search
          │ dep
 hf-hub (tokio, .high())
-  • HTTP chunked parallel download
+  • single-connection download (.high() mode)
   • HF cache layout compatibility
   • auth token handling
 ```
@@ -128,6 +160,8 @@ hf-hub (tokio, .high())
 | `.timeout_total(dur)` | Overall timeout | unlimited |
 | `.max_retries(n)` | Retries per file | 3 |
 | `.verify_checksums(bool)` | SHA256 verification | true |
+| `.chunk_threshold(bytes)` | Min file size for multi-connection download | 100 MiB |
+| `.connections_per_file(n)` | Parallel connections per large file | 8 |
 | `.on_progress(closure)` | Progress callback | — |
 
 ## Used by
