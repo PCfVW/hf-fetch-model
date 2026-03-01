@@ -200,13 +200,9 @@ pub async fn download_all_files_map(
 
         join_set.spawn(async move {
             // Determine file size from metadata for chunked download decision.
-            let file_size = task_meta
-                .get(file.filename.as_str())
-                .and_then(|m| m.size);
+            let file_size = task_meta.get(file.filename.as_str()).and_then(|m| m.size);
 
-            let result = if let (Some(size), Some(ref client)) =
-                (file_size, &task_chunked_client)
-            {
+            let result = if let (Some(size), Some(ref client)) = (file_size, &task_chunked_client) {
                 if size >= chunk_threshold {
                     download_single_file_chunked(
                         client,

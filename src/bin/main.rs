@@ -152,11 +152,9 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             repo_id: Some(repo_id),
             revision,
             token,
-        // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
+            // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         }) => run_status(repo_id.as_str(), revision.as_deref(), token.as_deref()),
-        Some(Commands::Status {
-            repo_id: None, ..
-        }) => run_status_all(),
+        Some(Commands::Status { repo_id: None, .. }) => run_status_all(),
         None => run_download(cli.download),
     }
 }
@@ -329,7 +327,11 @@ fn run_status_all() -> Result<(), FetchError> {
     Ok(())
 }
 
-fn run_status(repo_id: &str, revision: Option<&str>, token: Option<&str>) -> Result<(), FetchError> {
+fn run_status(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+) -> Result<(), FetchError> {
     // BORROW: explicit String::from (equivalent to .to_owned()) for Option<&str> → Option<String>
     let token = token
         .map(String::from)
@@ -341,11 +343,7 @@ fn run_status(repo_id: &str, revision: Option<&str>, token: Option<&str>) -> Res
     })?;
 
     // BORROW: explicit .as_deref() for Option<String> → Option<&str>
-    let status = rt.block_on(cache::repo_status(
-        repo_id,
-        token.as_deref(),
-        revision,
-    ))?;
+    let status = rt.block_on(cache::repo_status(repo_id, token.as_deref(), revision))?;
 
     // Header
     let rev_display = revision.unwrap_or("main");

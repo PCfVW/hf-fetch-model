@@ -143,9 +143,7 @@ pub async fn discover_new_families<S: BuildHasher>(
 pub async fn search_models(query: &str, limit: usize) -> Result<Vec<SearchResult>, FetchError> {
     let client = reqwest::Client::new();
 
-    let url = format!(
-        "{HF_API_BASE}?search={query}&sort=downloads&direction=-1&limit={limit}"
-    );
+    let url = format!("{HF_API_BASE}?search={query}&sort=downloads&direction=-1&limit={limit}");
 
     let response = client
         .get(url.as_str()) // BORROW: explicit .as_str()

@@ -253,9 +253,7 @@ pub async fn repo_status(
 
         let status = if let Some(ref path) = local_path {
             if path.exists() {
-                let local_size = std::fs::metadata(path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let local_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
                 if expected_size > 0 && local_size < expected_size {
                     FileStatus::Partial {

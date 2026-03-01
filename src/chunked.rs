@@ -220,9 +220,7 @@ fn parse_content_length_from_range(response: &reqwest::Response) -> Result<u64, 
         .split('/')
         .next_back()
         .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| {
-            FetchError::Http(format!("invalid Content-Range header: {content_range}"))
-        })
+        .ok_or_else(|| FetchError::Http(format!("invalid Content-Range header: {content_range}")))
 }
 
 /// Downloads a file using parallel Range requests and writes it to the hf-hub cache.
@@ -262,7 +260,9 @@ pub(crate) async fn download_chunked(
     // Build cache paths following hf-hub layout.
     let repo_dir = cache_dir.join(repo_folder.as_str());
     let blob_path = repo_dir.join("blobs").join(range_info.etag.as_str());
-    let snapshot_dir = repo_dir.join("snapshots").join(range_info.commit_hash.as_str());
+    let snapshot_dir = repo_dir
+        .join("snapshots")
+        .join(range_info.commit_hash.as_str());
     let pointer_path = snapshot_dir.join(filename.as_str());
 
     // If the pointer path already exists, the file is cached — skip download.
@@ -272,26 +272,32 @@ pub(crate) async fn download_chunked(
 
     // Create directories.
     if let Some(parent) = blob_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| FetchError::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| FetchError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
     }
     if let Some(parent) = pointer_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| FetchError::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| FetchError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
     }
 
     // Pre-allocate temp file.
     let temp_path = blob_path.with_extension("chunked.part");
     {
-        let f = tokio::fs::File::create(&temp_path).await.map_err(|e| FetchError::Io {
-            // BORROW: explicit .clone() for owned PathBuf
-            path: temp_path.clone(),
-            source: e,
-        })?;
+        let f = tokio::fs::File::create(&temp_path)
+            .await
+            .map_err(|e| FetchError::Io {
+                // BORROW: explicit .clone() for owned PathBuf
+                path: temp_path.clone(),
+                source: e,
+            })?;
         f.set_len(total_size).await.map_err(|e| FetchError::Io {
             // BORROW: explicit .clone() for owned PathBuf
             path: temp_path.clone(),
@@ -372,11 +378,13 @@ pub(crate) async fn download_chunked(
     }
 
     // Rename temp file to blob path.
-    tokio::fs::rename(&temp_path, &blob_path).await.map_err(|e| FetchError::Io {
-        // BORROW: explicit .clone() for owned PathBuf
-        path: blob_path.clone(),
-        source: e,
-    })?;
+    tokio::fs::rename(&temp_path, &blob_path)
+        .await
+        .map_err(|e| FetchError::Io {
+            // BORROW: explicit .clone() for owned PathBuf
+            path: blob_path.clone(),
+            source: e,
+        })?;
 
     // Create pointer symlink (or rename on Windows).
     symlink_or_rename(&blob_path, &pointer_path).map_err(|e| FetchError::Io {
@@ -387,11 +395,13 @@ pub(crate) async fn download_chunked(
 
     // Write refs file.
     let refs_dir = repo_dir.join("refs");
-    tokio::fs::create_dir_all(&refs_dir).await.map_err(|e| FetchError::Io {
-        // BORROW: explicit .clone() for owned PathBuf
-        path: refs_dir.clone(),
-        source: e,
-    })?;
+    tokio::fs::create_dir_all(&refs_dir)
+        .await
+        .map_err(|e| FetchError::Io {
+            // BORROW: explicit .clone() for owned PathBuf
+            path: refs_dir.clone(),
+            source: e,
+        })?;
     // BORROW: explicit .as_str() for path construction
     let ref_path = refs_dir.join(revision.as_str());
     tokio::fs::write(&ref_path, range_info.commit_hash.as_bytes())
@@ -462,10 +472,12 @@ async fn download_chunk(
                     path: task_temp.clone(),
                     source: e,
                 })?;
-            file.seek(SeekFrom::Start(start)).await.map_err(|e| FetchError::Io {
-                path: task_temp.clone(),
-                source: e,
-            })?;
+            file.seek(SeekFrom::Start(start))
+                .await
+                .map_err(|e| FetchError::Io {
+                    path: task_temp.clone(),
+                    source: e,
+                })?;
 
             // Stream bytes and write to file.
             let mut stream = response.bytes_stream();
@@ -717,7 +729,12 @@ fn symlink_or_rename(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
 
     use super::*;
 

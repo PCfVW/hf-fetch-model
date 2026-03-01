@@ -95,9 +95,9 @@ pub(crate) fn is_retryable(error: &FetchError) -> bool {
             // 416 Range Not Satisfiable is deterministic, not transient.
             !msg.contains("416")
         }
-        FetchError::Http(_)
-        | FetchError::Timeout { .. }
-        | FetchError::ChunkedDownload { .. } => true,
+        FetchError::Http(_) | FetchError::Timeout { .. } | FetchError::ChunkedDownload { .. } => {
+            true
+        }
         FetchError::Io { .. }
         | FetchError::RepoNotFound { .. }
         | FetchError::Auth { .. }

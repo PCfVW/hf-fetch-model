@@ -143,7 +143,10 @@ impl IndicatifProgress {
     /// Called automatically on drop, but can be called explicitly for
     /// immediate visual feedback.
     pub fn finish(&self) {
-        if !self.finished.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        if !self
+            .finished
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
             self.overall.finish();
         }
     }
