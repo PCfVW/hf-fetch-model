@@ -90,6 +90,34 @@ enum Commands {
         #[arg(long, default_value = "20")]
         limit: usize,
     },
+    /// Download a single file from a `HuggingFace` repository.
+    DownloadFile {
+        /// The repository identifier (e.g., "mntss/clt-gemma-2-2b-426k").
+        repo_id: String,
+
+        /// Exact filename within the repository (e.g., `"W_dec_0.safetensors"`).
+        filename: String,
+
+        /// Git revision (branch, tag, or commit SHA).
+        #[arg(long)]
+        revision: Option<String>,
+
+        /// Authentication token (or set `HF_TOKEN` env var).
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Output directory (default: HF cache).
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+
+        /// Minimum file size (MiB) for parallel chunked download.
+        #[arg(long, default_value = "100")]
+        chunk_threshold_mib: u64,
+
+        /// Number of parallel HTTP connections per large file.
+        #[arg(long, default_value = "8")]
+        connections_per_file: usize,
+    },
     /// Show download status (all models, or a specific one).
     Status {
         /// The repository identifier (omit to list all cached models).
@@ -148,6 +176,23 @@ fn run(cli: Cli) -> Result<(), FetchError> {
         Some(Commands::Discover { limit }) => run_discover(limit),
         // BORROW: explicit .as_str() for String → &str conversion
         Some(Commands::Search { query, limit }) => run_search(query.as_str(), limit),
+        Some(Commands::DownloadFile {
+            repo_id,
+            filename,
+            revision,
+            token,
+            output_dir,
+            chunk_threshold_mib,
+            connections_per_file,
+        }) => run_download_file(
+            repo_id.as_str(),
+            filename.as_str(),
+            revision.as_deref(),
+            token.as_deref(),
+            output_dir,
+            chunk_threshold_mib,
+            connections_per_file,
+        ),
         Some(Commands::Status {
             repo_id: Some(repo_id),
             revision,
@@ -218,6 +263,64 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
     })?;
 
     let path = rt.block_on(hf_fetch_model::download_with_config(repo_id, &config))?;
+
+    // Finalize progress bar before printing to avoid interleaved output.
+    progress.finish();
+
+    println!("Downloaded to: {}", path.display());
+    Ok(())
+}
+
+fn run_download_file(
+    repo_id: &str,
+    filename: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    output_dir: Option<PathBuf>,
+    chunk_threshold_mib: u64,
+    connections_per_file: usize,
+) -> Result<(), FetchError> {
+    if !repo_id.contains('/') {
+        return Err(FetchError::InvalidArgument(format!(
+            "invalid REPO_ID \"{repo_id}\": expected \"org/model\" format (e.g., \"mntss/clt-gemma-2-2b-426k\")"
+        )));
+    }
+
+    // Build FetchConfig from CLI args.
+    let mut builder = FetchConfig::builder();
+
+    if let Some(rev) = revision {
+        builder = builder.revision(rev);
+    }
+    if let Some(tok) = token {
+        builder = builder.token(tok);
+    } else {
+        builder = builder.token_from_env();
+    }
+    builder = builder.chunk_threshold(chunk_threshold_mib.saturating_mul(1024 * 1024));
+    builder = builder.connections_per_file(connections_per_file);
+    if let Some(dir) = output_dir {
+        builder = builder.output_dir(dir);
+    }
+
+    // Set up indicatif progress bars.
+    let progress = Arc::new(IndicatifProgress::new());
+    let progress_handle = Arc::clone(&progress);
+    builder = builder.on_progress(move |e| progress_handle.handle(e));
+
+    let config = builder.build()?;
+
+    // Run the download using a new Tokio runtime.
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+
+    let path = rt.block_on(hf_fetch_model::download_file(
+        repo_id.to_owned(),
+        filename,
+        &config,
+    ))?;
 
     // Finalize progress bar before printing to avoid interleaved output.
     progress.finish();
