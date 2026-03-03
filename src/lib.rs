@@ -277,6 +277,79 @@ pub fn download_files_blocking(repo_id: String) -> Result<HashMap<String, PathBu
     rt.block_on(download_files(repo_id))
 }
 
+/// Downloads a single file from a `HuggingFace` model repository.
+///
+/// Returns the local cache path. If the file is already cached (and
+/// checksums match when `verify_checksums` is enabled), the download
+/// is skipped and the cached path is returned immediately.
+///
+/// Files at or above [`FetchConfig`]'s `chunk_threshold` (default 100 MiB)
+/// are downloaded using multiple parallel HTTP Range connections
+/// (`connections_per_file`, default 8). Smaller files use a single
+/// connection.
+///
+/// # Arguments
+///
+/// * `repo_id` — Repository identifier (e.g., `"mntss/clt-gemma-2-2b-426k"`).
+/// * `filename` — Exact filename within the repository (e.g., `"W_enc_5.safetensors"`).
+/// * `config` — Shared configuration for auth, progress, checksums, retries, and chunking.
+///
+/// # Errors
+///
+/// * [`FetchError::Http`] — if the file does not exist in the repository.
+/// * [`FetchError::Api`] — on download failure (after retries).
+/// * [`FetchError::Checksum`] — if verification is enabled and fails.
+pub async fn download_file(
+    repo_id: String,
+    filename: &str,
+    config: &FetchConfig,
+) -> Result<PathBuf, FetchError> {
+    let mut builder = hf_hub::api::tokio::ApiBuilder::new().high();
+
+    if let Some(ref token) = config.token {
+        // BORROW: explicit .clone() to pass owned String
+        builder = builder.with_token(Some(token.clone()));
+    }
+
+    if let Some(ref dir) = config.output_dir {
+        // BORROW: explicit .clone() for owned PathBuf
+        builder = builder.with_cache_dir(dir.clone());
+    }
+
+    let api = builder.build().map_err(FetchError::Api)?;
+
+    let hf_repo = match config.revision {
+        Some(ref rev) => {
+            // BORROW: explicit .clone() for owned String arguments
+            Repo::with_revision(repo_id.clone(), RepoType::Model, rev.clone())
+        }
+        None => Repo::new(repo_id.clone(), RepoType::Model),
+    };
+
+    let repo = api.repo(hf_repo);
+    download::download_file_by_name(repo, repo_id, filename, config).await
+}
+
+/// Blocking version of [`download_file()`] for non-async callers.
+///
+/// Creates a Tokio runtime internally. Do not call from within
+/// an existing async context (use [`download_file()`] instead).
+///
+/// # Errors
+///
+/// Same as [`download_file()`].
+pub fn download_file_blocking(
+    repo_id: String,
+    filename: &str,
+    config: &FetchConfig,
+) -> Result<PathBuf, FetchError> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+    rt.block_on(download_file(repo_id, filename, config))
+}
+
 /// Blocking version of [`download_files_with_config()`] for non-async callers.
 ///
 /// Creates a Tokio runtime internally. Do not call from within
