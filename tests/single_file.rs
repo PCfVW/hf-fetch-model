@@ -10,13 +10,10 @@ use hf_fetch_model::{FetchConfig, FetchError};
 async fn download_single_file_async() {
     let config = FetchConfig::builder().build().unwrap();
 
-    let path = hf_fetch_model::download_file(
-        "julien-c/dummy-unknown".to_owned(),
-        "config.json",
-        &config,
-    )
-    .await
-    .unwrap();
+    let path =
+        hf_fetch_model::download_file("julien-c/dummy-unknown".to_owned(), "config.json", &config)
+            .await
+            .unwrap();
 
     assert!(path.exists(), "downloaded file should exist on disk");
     assert!(path.is_file(), "path should be a file, not a directory");
@@ -52,7 +49,10 @@ async fn download_single_file_nonexistent_returns_error() {
     )
     .await;
 
-    assert!(result.is_err(), "downloading a nonexistent file should fail");
+    assert!(
+        result.is_err(),
+        "downloading a nonexistent file should fail"
+    );
     match result {
         Err(FetchError::Api(_) | FetchError::Http(_)) => {}
         Err(other) => {

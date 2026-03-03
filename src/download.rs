@@ -444,9 +444,9 @@ async fn download_single_file_chunked(
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Http`] if the file does not exist in the repository.
-/// Returns [`FetchError::Api`] on download failure (after retries).
-/// Returns [`FetchError::Checksum`] if verification is enabled and fails.
+/// * [`FetchError::Http`] — if the file does not exist in the repository.
+/// * [`FetchError::Api`] — on download failure (after retries).
+/// * [`FetchError::Checksum`] — if verification is enabled and fails.
 pub(crate) async fn download_file_by_name(
     repo: ApiRepo,
     repo_id: String,
@@ -460,6 +460,7 @@ pub(crate) async fn download_file_by_name(
     let needs_metadata = verify_checksums || chunk_threshold < u64::MAX;
     let metadata_map = if needs_metadata {
         fetch_metadata_map(
+            // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
             repo_id.as_str(),
             config.token.as_deref(),
             config.revision.as_deref(),
@@ -472,6 +473,7 @@ pub(crate) async fn download_file_by_name(
 
     // Build a RepoFile for this filename from metadata (or with no metadata).
     let file_meta = metadata_map.get(filename);
+    // BORROW: explicit .to_owned()/.clone() for owned String fields
     let file = RepoFile {
         filename: filename.to_owned(),
         size: file_meta.and_then(|m| m.size),
@@ -485,19 +487,23 @@ pub(crate) async fn download_file_by_name(
     };
 
     let timeout_per_file = config.timeout_per_file.unwrap_or(DEFAULT_TIMEOUT_PER_FILE);
+    // BORROW: explicit .clone() for Arc-wrapped callback
     let on_progress = config.on_progress.clone();
     let connections_per_file = config.connections_per_file;
 
     // Build reqwest client (used by chunked downloads and 416 fallback).
+    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
     let http_client = chunked::build_client(config.token.as_deref())?;
 
     // Resolve cache directory.
+    // BORROW: explicit .clone() for owned PathBuf
     let cache_dir = config
         .output_dir
         .clone()
         .map_or_else(crate::cache::hf_cache_dir, Ok)?;
     // BORROW: explicit .as_str() instead of Deref coercion
     let repo_folder = chunked::repo_folder_name(repo_id.as_str());
+    // BORROW: explicit .clone() for owned String
     let revision = config
         .revision
         .clone()
@@ -512,9 +518,11 @@ pub(crate) async fn download_file_by_name(
                 &http_client,
                 &file,
                 &cache_dir,
+                // BORROW: explicit .as_str() for String → &str conversions
                 repo_folder.as_str(),
                 revision.as_str(),
                 repo_id.as_str(),
+                // BORROW: explicit .clone() for owned Option<String> and Arc
                 config.token.clone(),
                 &metadata_map,
                 verify_checksums,
@@ -551,6 +559,7 @@ pub(crate) async fn download_file_by_name(
     let result = if is_range_not_satisfiable(&result) {
         chunked::download_direct(
             &http_client,
+            // BORROW: explicit .as_str() for String → &str conversions
             repo_id.as_str(),
             revision.as_str(),
             filename,

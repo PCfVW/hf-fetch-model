@@ -176,6 +176,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
         Some(Commands::Discover { limit }) => run_discover(limit),
         // BORROW: explicit .as_str() for String → &str conversion
         Some(Commands::Search { query, limit }) => run_search(query.as_str(), limit),
+        // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::DownloadFile {
             repo_id,
             filename,
@@ -316,6 +317,7 @@ fn run_download_file(
         source: e,
     })?;
 
+    // BORROW: explicit .to_owned() for &str → owned String
     let path = rt.block_on(hf_fetch_model::download_file(
         repo_id.to_owned(),
         filename,
