@@ -10,6 +10,7 @@
 
 ## Features
 
+- **Single-file download** — download one file by name, get its cache path
 - **Repo-level download** — give it a model ID, get all files
 - **Maximum throughput** — multi-connection parallel Range downloads for large files (8 connections by default), plus hf-hub's `.high()` mode
 - **File filtering** — glob patterns (`*.safetensors`) and presets (`safetensors`, `gguf`, `config-only`)
@@ -59,6 +60,30 @@ let path = hf_fetch_model::download_with_config(
 
 Blocking wrappers (`download_blocking()`, `download_with_config_blocking()`) are available for non-async callers.
 
+### Single-file download
+
+```rust
+use hf_fetch_model::FetchConfig;
+
+let config = FetchConfig::builder()
+    .on_progress(|e| println!("{}: {:.1}%", e.filename, e.percent))
+    .build()?;
+
+// Download one file — returns the local cache path
+let path = hf_fetch_model::download_file(
+    "mntss/clt-gemma-2-2b-426k".to_owned(),
+    "W_enc_0.safetensors",
+    &config,
+).await?;
+
+// Blocking variant for non-async callers
+let path = hf_fetch_model::download_file_blocking(
+    "mntss/clt-gemma-2-2b-426k".to_owned(),
+    "config.yaml",
+    &config,
+)?;
+```
+
 ## CLI Usage
 
 ```sh
@@ -73,6 +98,9 @@ hf-fm google/gemma-2-2b-it --filter "*.safetensors" --filter "*.json"
 
 # Download to a specific directory
 hf-fm google/gemma-2-2b-it --output-dir ./models
+
+# Download a single file
+hf-fm download-file mntss/clt-gemma-2-2b-426k W_dec_0.safetensors
 
 # Search for models on HuggingFace Hub
 hf-fm search RWKV-7
@@ -93,10 +121,13 @@ hf-fm discover
 | Command | Description |
 |---------|-------------|
 | *(default)* | Download a model: `hf-fm <REPO_ID>` |
+| `download-file <REPO_ID> <FILENAME>` | Download a single file and print its cache path |
 | `search <QUERY>` | Search the HuggingFace Hub for models (by downloads) |
 | `status [REPO_ID]` | Show download status — per-repo detail, or cache-wide summary |
 | `list-families` | List model families (`model_type`) in local cache |
 | `discover` | Find new model families on the Hub not yet cached locally |
+
+`<ARG>` = required, `[ARG]` = optional.
 
 ### Download Flags
 
