@@ -22,10 +22,6 @@ use hf_fetch_model::{FetchConfig, FetchError, Filter};
 #[command(name = "hf-fetch-model", version, about)]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
-    /// Enable verbose output (download diagnostics).
-    #[arg(short, long, global = true)]
-    verbose: bool,
-
     #[command(subcommand)]
     command: Option<Commands>,
 
@@ -36,6 +32,10 @@ struct Cli {
 /// Arguments for the default download command.
 #[derive(Args)]
 struct DownloadArgs {
+    /// Enable verbose output (download diagnostics).
+    #[arg(short, long)]
+    verbose: bool,
+
     /// The repository identifier (e.g., "google/gemma-2-2b-it").
     #[arg(value_name = "REPO_ID")]
     repo_id: Option<String>,
@@ -97,6 +97,10 @@ enum Commands {
     },
     /// Download a single file from a `HuggingFace` repository.
     DownloadFile {
+        /// Enable verbose output (download diagnostics).
+        #[arg(short, long)]
+        verbose: bool,
+
         /// The repository identifier (e.g., "mntss/clt-gemma-2-2b-426k").
         repo_id: String,
 
@@ -147,9 +151,22 @@ enum Preset {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    // Extract --verbose from the active command context.
+    // EXHAUSTIVE: non-download subcommands have no --verbose flag
+    let verbose = match &cli.command {
+        Some(Commands::DownloadFile { verbose, .. }) => *verbose,
+        None => cli.download.verbose,
+        Some(
+            Commands::ListFamilies
+            | Commands::Discover { .. }
+            | Commands::Search { .. }
+            | Commands::Status { .. },
+        ) => false,
+    };
+
     // Initialize tracing subscriber when --verbose is set.
     // Respects RUST_LOG if present, otherwise defaults to debug for hf_fetch_model.
-    if cli.verbose {
+    if verbose {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new("hf_fetch_model=debug"));
         tracing_subscriber::fmt()
@@ -196,6 +213,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
         Some(Commands::Search { query, limit }) => run_search(query.as_str(), limit),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::DownloadFile {
+            verbose: _,
             repo_id,
             filename,
             revision,

@@ -94,6 +94,14 @@ pub enum FetchError {
     /// An invalid argument was provided.
     #[error("{0}")]
     InvalidArgument(String),
+
+    /// The repository exists but no files matched after filtering,
+    /// or the repository contains no files at all.
+    #[error("no files matched in repository {repo_id}")]
+    NoFilesMatched {
+        /// The repository identifier.
+        repo_id: String,
+    },
 }
 
 /// A per-file download failure with structured context.

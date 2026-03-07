@@ -44,12 +44,15 @@ const DEFAULT_TIMEOUT_PER_FILE: Duration = Duration::from_secs(300);
 /// Returns [`FetchError::PartialDownload`] if some files fail and others succeed.
 /// Returns [`FetchError::Api`] if the file listing fails.
 /// Returns [`FetchError::RepoNotFound`] if the repository does not exist.
+/// Returns [`FetchError::NoFilesMatched`] if the repository is empty or all files were filtered out.
 /// Returns [`FetchError::Timeout`] if the overall timeout is exceeded.
 pub async fn download_all_files(
     repo: ApiRepo,
     repo_id: String,
     config: Option<&FetchConfig>,
 ) -> Result<PathBuf, FetchError> {
+    // BORROW: clone before move into download_all_files_map for error context
+    let repo_id_for_error = repo_id.clone();
     let file_map = download_all_files_map(repo, repo_id, config).await?;
 
     // Extract the snapshot directory from any downloaded file path.
@@ -58,8 +61,8 @@ pub async fn download_all_files(
     let any_path = file_map
         .into_values()
         .next()
-        .ok_or_else(|| FetchError::RepoNotFound {
-            repo_id: String::from("(empty repository or all files filtered out)"),
+        .ok_or_else(|| FetchError::NoFilesMatched {
+            repo_id: repo_id_for_error,
         })?;
 
     let cache_dir = any_path
@@ -80,6 +83,7 @@ pub async fn download_all_files(
 /// Returns [`FetchError::PartialDownload`] if some files fail and others succeed.
 /// Returns [`FetchError::Api`] if the file listing fails.
 /// Returns [`FetchError::RepoNotFound`] if the repository does not exist.
+/// Returns [`FetchError::NoFilesMatched`] if the repository is empty or all files were filtered out.
 /// Returns [`FetchError::Timeout`] if the overall timeout is exceeded.
 pub async fn download_all_files_map(
     repo: ApiRepo,
@@ -402,8 +406,8 @@ pub async fn download_all_files_map(
     }
 
     if file_map.is_empty() {
-        return Err(FetchError::RepoNotFound {
-            repo_id: String::from("(empty repository or all files filtered out)"),
+        return Err(FetchError::NoFilesMatched {
+            repo_id: repo_id.clone(),
         });
     }
 
@@ -602,9 +606,16 @@ pub(crate) async fn download_file_by_name(
 
     // Determine file size from metadata for chunked download decision.
     let file_size = file.size;
+    let start = std::time::Instant::now();
 
     let result = if let Some(size) = file_size {
         if size >= chunk_threshold {
+            tracing::debug!(
+                filename = %filename,
+                size_mib = size / 1_048_576,
+                connections = connections_per_file,
+                "chunked download (multi-connection)"
+            );
             download_single_file_chunked(
                 &http_client,
                 &file,
@@ -624,6 +635,11 @@ pub(crate) async fn download_file_by_name(
             )
             .await
         } else {
+            tracing::debug!(
+                filename = %filename,
+                size_mib = size / 1_048_576,
+                "single-connection download (below chunk threshold)"
+            );
             download_single_file(
                 &repo,
                 &file,
@@ -635,6 +651,10 @@ pub(crate) async fn download_file_by_name(
             .await
         }
     } else {
+        tracing::debug!(
+            filename = %filename,
+            "single-connection download (file size unknown)"
+        );
         download_single_file(
             &repo,
             &file,
@@ -662,6 +682,31 @@ pub(crate) async fn download_file_by_name(
     };
 
     let path = result?;
+
+    // Log completion with elapsed time and throughput.
+    let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+    if let Some(size) = file_size {
+        // CAST: u64 → f64, precision loss acceptable; value is a display-only throughput scalar
+        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+        let mbps = if elapsed_secs > 0.0 {
+            (size as f64 * 8.0) / elapsed_secs / 1_000_000.0
+        } else {
+            0.0
+        };
+        tracing::debug!(
+            filename = %filename,
+            elapsed_secs = format_args!("{elapsed_secs:.1}"),
+            throughput_mbps = format_args!("{mbps:.1}"),
+            "download complete"
+        );
+    } else {
+        tracing::debug!(
+            filename = %filename,
+            elapsed_secs = format_args!("{elapsed_secs:.1}"),
+            "download complete"
+        );
+    }
 
     // Report progress for the completed file.
     if let Some(ref cb) = on_progress {

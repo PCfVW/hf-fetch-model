@@ -117,7 +117,7 @@ hf-fm list-families
 hf-fm discover
 
 # Download with diagnostics (chunked/single decisions, throughput)
-hf-fm -v google/gemma-2-2b-it
+hf-fm google/gemma-2-2b-it -v
 ```
 
 ### Subcommands
@@ -135,10 +135,11 @@ hf-fm -v google/gemma-2-2b-it
 
 ### Download Flags
 
-These flags apply to the default download command (`hf-fm <REPO_ID>`).
+These flags apply to the default download command (`hf-fm <REPO_ID>`) and `download-file`.
 
 | Flag | Description | Default |
 |------|-------------|---------|
+| `-v`, `--verbose` | Enable download diagnostics (plan, per-file decisions, throughput) | off |
 | `--chunk-threshold-mib` | Min file size (MiB) for multi-connection download | 100 |
 | `--concurrency` | Parallel file downloads | 4 |
 | `--connections-per-file` | Parallel HTTP connections per large file | 8 |
@@ -153,7 +154,6 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`).
 
 | Flag | Description |
 |------|-------------|
-| `-v`, `--verbose` | Enable download diagnostics (plan, per-file decisions, throughput) |
 | `-h`, `--help` | Print help |
 | `-V`, `--version` | Print version |
 
@@ -165,7 +165,7 @@ hf-fetch-model emits structured `tracing` events at `debug` level to help diagno
 
 ```sh
 # CLI — verbose flag (prints diagnostics to stderr)
-hf-fm -v google/gemma-2-2b-it
+hf-fm google/gemma-2-2b-it -v
 ```
 
 Example output:

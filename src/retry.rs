@@ -104,7 +104,8 @@ pub(crate) fn is_retryable(error: &FetchError) -> bool {
         | FetchError::InvalidPattern { .. }
         | FetchError::Checksum { .. }
         | FetchError::PartialDownload { .. }
-        | FetchError::InvalidArgument(_) => false,
+        | FetchError::InvalidArgument(_)
+        | FetchError::NoFilesMatched { .. } => false,
     }
 }
 

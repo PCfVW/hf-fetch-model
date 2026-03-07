@@ -20,12 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Per-file decision**: whether each file uses chunked (multi-connection) or single-connection download, with file size and reason.
   - **Per-file completion**: elapsed time and throughput in Mbps (when file size is known).
   - **Overall summary**: total files downloaded, failures, and elapsed time.
-- `--verbose` / `-v` global CLI flag: initializes a `tracing-subscriber` at `debug` level for `hf_fetch_model`, printing download diagnostics to stderr. Respects `RUST_LOG` if set.
+- `--verbose` / `-v` CLI flag on the default download and `download-file` subcommands: initializes a `tracing-subscriber` at `debug` level for `hf_fetch_model`, printing download diagnostics to stderr. Respects `RUST_LOG` if set.
+- Download diagnostics for single-file downloads (`download_file` / `download-file`): per-file chunked/single decision, elapsed time, and throughput.
 - `tracing-subscriber` 0.3 dependency (optional, behind `cli` feature) with `env-filter` for `--verbose` support.
 
 ### Fixed
 
 - `download()` and `download_files()` silently using single-connection downloads because they passed `config: None` to the internal orchestrator, which set `chunk_threshold = u64::MAX` — effectively disabling the chunked download path that was available since 0.5.0.
+- `FetchError::RepoNotFound` was returned when a repository existed but had no files after filtering. Added `FetchError::NoFilesMatched` variant to distinguish "repo not found" from "repo exists but zero files matched".
 
 ## [0.6.0] — Phase 6: Single-File Download API
 
