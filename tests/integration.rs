@@ -14,7 +14,9 @@
 async fn download_small_public_model() {
     let result = hf_fetch_model::download("julien-c/dummy-unknown".to_owned()).await;
 
-    let path = result.unwrap_or_else(|e| panic!("download failed: {e}"));
+    let path = result
+        .unwrap_or_else(|e| panic!("download failed: {e}"))
+        .into_inner();
 
     assert!(
         path.exists(),

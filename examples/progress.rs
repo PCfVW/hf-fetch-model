@@ -15,9 +15,13 @@ async fn main() -> Result<(), hf_fetch_model::FetchError> {
         .on_progress(move |e| progress.handle(e))
         .build()?;
 
-    let path =
+    let outcome =
         hf_fetch_model::download_with_config("julien-c/dummy-unknown".to_owned(), &config).await?;
 
-    println!("Downloaded to: {}", path.display());
+    if outcome.is_cached() {
+        println!("Cached at: {}", outcome.inner().display());
+    } else {
+        println!("Downloaded to: {}", outcome.inner().display());
+    }
     Ok(())
 }

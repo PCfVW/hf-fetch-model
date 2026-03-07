@@ -20,7 +20,8 @@ async fn download_with_checksum_verification() {
 
     let path = hf_fetch_model::download_with_config("julien-c/dummy-unknown".to_owned(), &config)
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
 
     assert!(path.exists(), "cache directory should exist");
     assert!(path.is_dir(), "cache path should be a directory");
@@ -38,7 +39,8 @@ async fn download_with_checksums_disabled() {
 
     let path = hf_fetch_model::download_with_config("julien-c/dummy-unknown".to_owned(), &config)
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
 
     assert!(path.exists());
 }
@@ -54,7 +56,8 @@ async fn download_with_retry_config() {
 
     let path = hf_fetch_model::download_with_config("julien-c/dummy-unknown".to_owned(), &config)
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
 
     assert!(path.exists());
 }
@@ -71,7 +74,8 @@ async fn download_with_per_file_timeout() {
 
     let path = hf_fetch_model::download_with_config("julien-c/dummy-unknown".to_owned(), &config)
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
 
     assert!(path.exists());
 }
@@ -88,7 +92,8 @@ async fn download_with_total_timeout() {
 
     let path = hf_fetch_model::download_with_config("julien-c/dummy-unknown".to_owned(), &config)
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
 
     assert!(path.exists());
 }
@@ -124,7 +129,8 @@ async fn download_files_returns_file_map() {
     let files =
         hf_fetch_model::download_files_with_config("julien-c/dummy-unknown".to_owned(), &config)
             .await
-            .unwrap();
+            .unwrap()
+            .into_inner();
 
     // The map should contain at least config.json (present in all HF repos).
     assert!(!files.is_empty(), "file map should not be empty");
@@ -152,7 +158,8 @@ fn download_files_blocking_returns_file_map() {
         "julien-c/dummy-unknown".to_owned(),
         &config,
     )
-    .unwrap();
+    .unwrap()
+    .into_inner();
 
     assert!(!files.is_empty(), "file map should not be empty");
 

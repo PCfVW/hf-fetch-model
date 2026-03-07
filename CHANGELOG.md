@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Downloads of gated models (e.g., `meta-llama/Llama-3.2-1B`) failed with "file(s) failed to download" even when the model was already cached. Root cause: hf-hub's `.high()` mode sends `Range: bytes=0-0` probes that fail for gated LFS files, and no cache check existed. Added full offline cache resolution: `download_all_files_map` now scans the local snapshot directory **before any network request** and returns immediately if all files are present. Single-file downloads (`download_file_by_name`) also check the cache first. Zero network calls for cached models.
 
+### Added
+
+- `DownloadOutcome<T>` enum (`Cached(T)` / `Downloaded(T)`) returned by all public download functions, so callers can distinguish cache hits from network downloads. Includes `into_inner()`, `inner()`, and `is_cached()` accessors. Re-exported from `hf_fetch_model::DownloadOutcome`.
+- CLI now prints "Cached at:" when the model was resolved from local cache, and "Downloaded to:" when it was freshly downloaded.
+
 ### Changed
 
 - Refactored `download_all_files_map` (291 → ~90 lines), `download_file_by_name` (162 → ~55 lines), and `download_chunked` (122 → ~80 lines) by extracting shared helpers:

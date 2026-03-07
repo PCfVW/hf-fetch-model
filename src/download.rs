@@ -29,6 +29,47 @@ use crate::retry::{self, RetryPolicy};
 const DEFAULT_TIMEOUT_PER_FILE: Duration = Duration::from_secs(300);
 
 // ---------------------------------------------------------------------------
+// DownloadOutcome — cache vs network result indicator
+// ---------------------------------------------------------------------------
+
+/// Indicates whether files were resolved from local cache or freshly downloaded.
+///
+/// Wraps the result value (a path or file map) so callers can distinguish
+/// between a cache hit (zero network requests) and a network download.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum DownloadOutcome<T> {
+    /// All requested files were found in the local cache (no network requests).
+    Cached(T),
+    /// Files were downloaded from the network (or a mix of cache and network).
+    Downloaded(T),
+}
+
+impl<T> DownloadOutcome<T> {
+    /// Returns the inner value regardless of cache/download origin.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        match self {
+            Self::Cached(v) | Self::Downloaded(v) => v,
+        }
+    }
+
+    /// Returns `true` if the result came entirely from local cache.
+    #[must_use]
+    pub fn is_cached(&self) -> bool {
+        matches!(self, Self::Cached(_))
+    }
+
+    /// Returns a reference to the inner value.
+    #[must_use]
+    pub fn inner(&self) -> &T {
+        match self {
+            Self::Cached(v) | Self::Downloaded(v) => v,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DownloadPlan — resolved config parameters
 // ---------------------------------------------------------------------------
 
@@ -101,14 +142,16 @@ pub async fn download_all_files(
     repo: ApiRepo,
     repo_id: String,
     config: Option<&FetchConfig>,
-) -> Result<PathBuf, FetchError> {
+) -> Result<DownloadOutcome<PathBuf>, FetchError> {
     // BORROW: clone before move into download_all_files_map for error context
     let repo_id_for_error = repo_id.clone();
-    let file_map = download_all_files_map(repo, repo_id, config).await?;
+    let outcome = download_all_files_map(repo, repo_id, config).await?;
+    let was_cached = outcome.is_cached();
 
     // Extract the snapshot directory from any downloaded file path.
     // All files in a repo share the same snapshot directory.
     // hf-hub cache layout: .cache/huggingface/hub/models--org--name/snapshots/<sha>/<relative_path>
+    let file_map = outcome.into_inner();
     let (filename, path) =
         file_map
             .into_iter()
@@ -117,7 +160,12 @@ pub async fn download_all_files(
                 repo_id: repo_id_for_error,
             })?;
 
-    Ok(snapshot_root(&filename, &path))
+    let root = snapshot_root(&filename, &path);
+    if was_cached {
+        Ok(DownloadOutcome::Cached(root))
+    } else {
+        Ok(DownloadOutcome::Downloaded(root))
+    }
 }
 
 /// Downloads all files from a repository and returns a filename → path map.
@@ -137,12 +185,12 @@ pub async fn download_all_files_map(
     repo: ApiRepo,
     repo_id: String,
     config: Option<&FetchConfig>,
-) -> Result<HashMap<String, PathBuf>, FetchError> {
+) -> Result<DownloadOutcome<HashMap<String, PathBuf>>, FetchError> {
     let overall_start = tokio::time::Instant::now();
 
     // Check local cache first — return immediately if all files are present (no network).
     if let Some(file_map) = try_resolve_repo_from_cache(config, repo_id.as_str())? {
-        return Ok(file_map);
+        return Ok(DownloadOutcome::Cached(file_map));
     }
 
     // Cache miss — list files from the network.
@@ -250,7 +298,7 @@ pub async fn download_all_files_map(
 
     let file_map = validate_download_results(file_map, failures, repo_id.as_str())?;
     tracing::debug!(files_downloaded = file_map.len(), "download complete");
-    Ok(file_map)
+    Ok(DownloadOutcome::Downloaded(file_map))
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +430,7 @@ pub(crate) async fn download_file_by_name(
     repo_id: String,
     filename: &str,
     config: &FetchConfig,
-) -> Result<PathBuf, FetchError> {
+) -> Result<DownloadOutcome<PathBuf>, FetchError> {
     // Check local cache first — return immediately if the file is present.
     let cache_dir = config
         .output_dir
@@ -394,7 +442,7 @@ pub(crate) async fn download_file_by_name(
     if let Some(cached) =
         resolve_cached_file(&cache_dir, repo_folder.as_str(), revision_str, filename)
     {
-        return Ok(cached);
+        return Ok(DownloadOutcome::Cached(cached));
     }
 
     let plan = DownloadPlan::from_config(Some(config));
@@ -473,7 +521,7 @@ pub(crate) async fn download_file_by_name(
         cb(&event);
     }
 
-    Ok(path)
+    Ok(DownloadOutcome::Downloaded(path))
 }
 
 // ---------------------------------------------------------------------------

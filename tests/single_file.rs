@@ -13,7 +13,8 @@ async fn download_single_file_async() {
     let path =
         hf_fetch_model::download_file("julien-c/dummy-unknown".to_owned(), "config.json", &config)
             .await
-            .unwrap();
+            .unwrap()
+            .into_inner();
 
     assert!(path.exists(), "downloaded file should exist on disk");
     assert!(path.is_file(), "path should be a file, not a directory");
@@ -32,7 +33,8 @@ fn download_single_file_blocking() {
         "config.json",
         &config,
     )
-    .unwrap();
+    .unwrap()
+    .into_inner();
 
     assert!(path.exists(), "downloaded file should exist on disk");
     assert!(path.is_file(), "path should be a file, not a directory");
@@ -62,9 +64,9 @@ async fn download_single_file_nonexistent_returns_error() {
                 "unexpected error: {other}"
             );
         }
-        Ok(path) => panic!(
+        Ok(outcome) => panic!(
             "expected error for nonexistent file, got: {}",
-            path.display()
+            outcome.into_inner().display()
         ),
     }
 }

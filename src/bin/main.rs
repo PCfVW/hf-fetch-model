@@ -299,12 +299,16 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
         source: e,
     })?;
 
-    let path = rt.block_on(hf_fetch_model::download_with_config(repo_id, &config))?;
+    let outcome = rt.block_on(hf_fetch_model::download_with_config(repo_id, &config))?;
 
     // Finalize progress bar before printing to avoid interleaved output.
     progress.finish();
 
-    println!("Downloaded to: {}", path.display());
+    if outcome.is_cached() {
+        println!("Cached at: {}", outcome.inner().display());
+    } else {
+        println!("Downloaded to: {}", outcome.inner().display());
+    }
     Ok(())
 }
 
@@ -354,7 +358,7 @@ fn run_download_file(
     })?;
 
     // BORROW: explicit .to_owned() for &str → owned String
-    let path = rt.block_on(hf_fetch_model::download_file(
+    let outcome = rt.block_on(hf_fetch_model::download_file(
         repo_id.to_owned(),
         filename,
         &config,
@@ -363,7 +367,11 @@ fn run_download_file(
     // Finalize progress bar before printing to avoid interleaved output.
     progress.finish();
 
-    println!("Downloaded to: {}", path.display());
+    if outcome.is_cached() {
+        println!("Cached at: {}", outcome.inner().display());
+    } else {
+        println!("Downloaded to: {}", outcome.inner().display());
+    }
     Ok(())
 }
 

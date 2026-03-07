@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Benchmark 2: hf-fetch-model (concurrent)
     println!("\n=== hf-fetch-model (concurrent) ===");
     let start = Instant::now();
-    let _path = hf_fetch_model::download(repo_id.to_owned()).await?;
+    let _outcome = hf_fetch_model::download(repo_id.to_owned()).await?;
     let hfm_duration = start.elapsed();
     println!("hf-fetch-model:    {hfm_duration:?}");
 

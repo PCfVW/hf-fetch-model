@@ -6,8 +6,12 @@
 
 #[tokio::main]
 async fn main() -> Result<(), hf_fetch_model::FetchError> {
-    let path = hf_fetch_model::download("julien-c/dummy-unknown".to_owned()).await?;
+    let outcome = hf_fetch_model::download("julien-c/dummy-unknown".to_owned()).await?;
 
-    println!("Downloaded to: {}", path.display());
+    if outcome.is_cached() {
+        println!("Cached at: {}", outcome.inner().display());
+    } else {
+        println!("Downloaded to: {}", outcome.inner().display());
+    }
     Ok(())
 }

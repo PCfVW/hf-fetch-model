@@ -17,7 +17,8 @@ async fn download_with_safetensors_filter() {
 
     let path = hf_fetch_model::download_with_config("julien-c/dummy-unknown".to_owned(), &config)
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
 
     assert!(path.exists(), "cache directory should exist");
     assert!(path.is_dir(), "cache path should be a directory");
@@ -29,7 +30,8 @@ async fn download_with_exclude_filter() {
 
     let path = hf_fetch_model::download_with_config("julien-c/dummy-unknown".to_owned(), &config)
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
 
     assert!(path.exists());
 }
@@ -61,7 +63,8 @@ async fn download_with_progress_callback() {
 
     let path = hf_fetch_model::download_with_config("julien-c/dummy-unknown".to_owned(), &config)
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
 
     assert!(path.exists());
 

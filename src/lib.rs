@@ -11,8 +11,8 @@
 //!
 //! ```rust,no_run
 //! # async fn example() -> Result<(), hf_fetch_model::FetchError> {
-//! let path = hf_fetch_model::download("julien-c/dummy-unknown".to_owned()).await?;
-//! println!("Model downloaded to: {}", path.display());
+//! let outcome = hf_fetch_model::download("julien-c/dummy-unknown".to_owned()).await?;
+//! println!("Model at: {}", outcome.inner().display());
 //! # Ok(())
 //! # }
 //! ```
@@ -31,10 +31,12 @@
 //!     })
 //!     .build()?;
 //!
-//! let path = hf_fetch_model::download_with_config(
+//! let outcome = hf_fetch_model::download_with_config(
 //!     "google/gemma-2-2b".to_owned(),
 //!     &config,
 //! ).await?;
+//! // outcome.is_cached() tells you if it came from local cache
+//! let path = outcome.into_inner();
 //! # Ok(())
 //! # }
 //! ```
@@ -61,6 +63,7 @@ pub mod repo;
 mod retry;
 
 pub use config::{FetchConfig, FetchConfigBuilder, Filter};
+pub use download::DownloadOutcome;
 pub use error::{FetchError, FileFailure};
 pub use progress::ProgressEvent;
 
@@ -93,7 +96,7 @@ use hf_hub::{Repo, RepoType};
 /// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
 /// * [`FetchError::InvalidPattern`] — if the default config fails to build (should not happen).
-pub async fn download(repo_id: String) -> Result<PathBuf, FetchError> {
+pub async fn download(repo_id: String) -> Result<DownloadOutcome<PathBuf>, FetchError> {
     let config = FetchConfig::builder().build()?;
     download_with_config(repo_id, &config).await
 }
@@ -119,7 +122,7 @@ pub async fn download(repo_id: String) -> Result<PathBuf, FetchError> {
 pub async fn download_with_config(
     repo_id: String,
     config: &FetchConfig,
-) -> Result<PathBuf, FetchError> {
+) -> Result<DownloadOutcome<PathBuf>, FetchError> {
     let mut builder = hf_hub::api::tokio::ApiBuilder::new().high();
 
     if let Some(ref token) = config.token {
@@ -154,7 +157,7 @@ pub async fn download_with_config(
 /// # Errors
 ///
 /// Same as [`download()`].
-pub fn download_blocking(repo_id: String) -> Result<PathBuf, FetchError> {
+pub fn download_blocking(repo_id: String) -> Result<DownloadOutcome<PathBuf>, FetchError> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
         path: PathBuf::from("<runtime>"),
         source: e,
@@ -173,7 +176,7 @@ pub fn download_blocking(repo_id: String) -> Result<PathBuf, FetchError> {
 pub fn download_with_config_blocking(
     repo_id: String,
     config: &FetchConfig,
-) -> Result<PathBuf, FetchError> {
+) -> Result<DownloadOutcome<PathBuf>, FetchError> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
         path: PathBuf::from("<runtime>"),
         source: e,
@@ -203,7 +206,9 @@ pub fn download_with_config_blocking(
 /// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
 /// * [`FetchError::InvalidPattern`] — if the default config fails to build (should not happen).
-pub async fn download_files(repo_id: String) -> Result<HashMap<String, PathBuf>, FetchError> {
+pub async fn download_files(
+    repo_id: String,
+) -> Result<DownloadOutcome<HashMap<String, PathBuf>>, FetchError> {
     let config = FetchConfig::builder().build()?;
     download_files_with_config(repo_id, &config).await
 }
@@ -227,7 +232,7 @@ pub async fn download_files(repo_id: String) -> Result<HashMap<String, PathBuf>,
 pub async fn download_files_with_config(
     repo_id: String,
     config: &FetchConfig,
-) -> Result<HashMap<String, PathBuf>, FetchError> {
+) -> Result<DownloadOutcome<HashMap<String, PathBuf>>, FetchError> {
     let mut builder = hf_hub::api::tokio::ApiBuilder::new().high();
 
     if let Some(ref token) = config.token {
@@ -262,7 +267,9 @@ pub async fn download_files_with_config(
 /// # Errors
 ///
 /// Same as [`download_files()`].
-pub fn download_files_blocking(repo_id: String) -> Result<HashMap<String, PathBuf>, FetchError> {
+pub fn download_files_blocking(
+    repo_id: String,
+) -> Result<DownloadOutcome<HashMap<String, PathBuf>>, FetchError> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
         path: PathBuf::from("<runtime>"),
         source: e,
@@ -296,7 +303,7 @@ pub async fn download_file(
     repo_id: String,
     filename: &str,
     config: &FetchConfig,
-) -> Result<PathBuf, FetchError> {
+) -> Result<DownloadOutcome<PathBuf>, FetchError> {
     let mut builder = hf_hub::api::tokio::ApiBuilder::new().high();
 
     if let Some(ref token) = config.token {
@@ -335,7 +342,7 @@ pub fn download_file_blocking(
     repo_id: String,
     filename: &str,
     config: &FetchConfig,
-) -> Result<PathBuf, FetchError> {
+) -> Result<DownloadOutcome<PathBuf>, FetchError> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
         path: PathBuf::from("<runtime>"),
         source: e,
@@ -354,7 +361,7 @@ pub fn download_file_blocking(
 pub fn download_files_with_config_blocking(
     repo_id: String,
     config: &FetchConfig,
-) -> Result<HashMap<String, PathBuf>, FetchError> {
+) -> Result<DownloadOutcome<HashMap<String, PathBuf>>, FetchError> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
         path: PathBuf::from("<runtime>"),
         source: e,
