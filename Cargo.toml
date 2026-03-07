@@ -13,7 +13,7 @@ default-run = "hf-fetch-model"
 [features]
 default = []
 indicatif = ["dep:indicatif"]
-cli = ["dep:clap", "indicatif"]
+cli = ["dep:clap", "dep:tracing-subscriber", "indicatif"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"], optional = true }
@@ -29,6 +29,7 @@ sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 [[bin]]
 name = "hf-fetch-model"

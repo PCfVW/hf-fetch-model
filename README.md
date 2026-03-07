@@ -115,6 +115,9 @@ hf-fm list-families
 
 # Discover new families from HuggingFace Hub
 hf-fm discover
+
+# Download with diagnostics (chunked/single decisions, throughput)
+hf-fm -v google/gemma-2-2b-it
 ```
 
 ### Subcommands
@@ -150,6 +153,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`).
 
 | Flag | Description |
 |------|-------------|
+| `-v`, `--verbose` | Enable download diagnostics (plan, per-file decisions, throughput) |
 | `-h`, `--help` | Print help |
 | `-V`, `--version` | Print version |
 
@@ -157,7 +161,14 @@ Subcommands accept their own flags (e.g., `--limit` for `search` and `discover`)
 
 ## Download Diagnostics
 
-hf-fetch-model emits structured `tracing` events at `debug` level to help diagnose download performance. Enable them by setting `RUST_LOG=debug` (or `RUST_LOG=hf_fetch_model=debug` for this crate only) with a `tracing-subscriber`:
+hf-fetch-model emits structured `tracing` events at `debug` level to help diagnose download performance. In the CLI, use the `--verbose` / `-v` flag. For library users, initialize a `tracing-subscriber` at `debug` level (e.g., `RUST_LOG=hf_fetch_model=debug`):
+
+```sh
+# CLI — verbose flag (prints diagnostics to stderr)
+hf-fm -v google/gemma-2-2b-it
+```
+
+Example output:
 
 ```
 DEBUG hf_fetch_model: listing repository files repo_id="allenai/OLMo-1B-hf"

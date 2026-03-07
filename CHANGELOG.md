@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Per-file decision**: whether each file uses chunked (multi-connection) or single-connection download, with file size and reason.
   - **Per-file completion**: elapsed time and throughput in Mbps (when file size is known).
   - **Overall summary**: total files downloaded, failures, and elapsed time.
-- Enable diagnostics by initializing a `tracing` subscriber at `debug` level (e.g., `RUST_LOG=debug`).
+- `--verbose` / `-v` global CLI flag: initializes a `tracing-subscriber` at `debug` level for `hf_fetch_model`, printing download diagnostics to stderr. Respects `RUST_LOG` if set.
+- `tracing-subscriber` 0.3 dependency (optional, behind `cli` feature) with `env-filter` for `--verbose` support.
 
 ### Fixed
 

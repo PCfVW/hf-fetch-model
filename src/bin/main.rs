@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use tracing_subscriber::EnvFilter;
 
 use hf_fetch_model::cache;
 use hf_fetch_model::discover;
@@ -21,6 +22,10 @@ use hf_fetch_model::{FetchConfig, FetchError, Filter};
 #[command(name = "hf-fetch-model", version, about)]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
+    /// Enable verbose output (download diagnostics).
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 
@@ -141,6 +146,19 @@ enum Preset {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    // Initialize tracing subscriber when --verbose is set.
+    // Respects RUST_LOG if present, otherwise defaults to debug for hf_fetch_model.
+    if cli.verbose {
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("hf_fetch_model=debug"));
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .init();
+    }
+
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(FetchError::PartialDownload { path, failures }) => {
