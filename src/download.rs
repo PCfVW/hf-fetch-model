@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,19 +58,15 @@ pub async fn download_all_files(
 
     // Extract the snapshot directory from any downloaded file path.
     // All files in a repo share the same snapshot directory.
-    // hf-hub cache layout: .cache/huggingface/hub/models--org--name/snapshots/<sha>/file
-    let any_path = file_map
-        .into_values()
+    // hf-hub cache layout: .cache/huggingface/hub/models--org--name/snapshots/<sha>/<relative_path>
+    let (filename, path) = file_map
+        .into_iter()
         .next()
         .ok_or_else(|| FetchError::NoFilesMatched {
             repo_id: repo_id_for_error,
         })?;
 
-    let cache_dir = any_path
-        .parent()
-        .map_or_else(|| any_path.clone(), std::path::Path::to_path_buf);
-
-    Ok(cache_dir)
+    Ok(snapshot_root(&filename, &path))
 }
 
 /// Downloads all files from a repository and returns a filename → path map.
@@ -197,6 +194,8 @@ pub async fn download_all_files_map(
     let repo = Arc::new(repo);
     let metadata_map = Arc::new(metadata_map);
     let semaphore = Arc::new(Semaphore::new(concurrency));
+    // Shared counter for completed files, used by streaming progress events.
+    let completed = Arc::new(AtomicUsize::new(0));
     let mut join_set = JoinSet::new();
 
     // Spawn download tasks, limited to `concurrency` in-flight at a time.
@@ -231,6 +230,7 @@ pub async fn download_all_files_map(
         let task_repo_id = repo_id.clone();
         let task_token = Arc::clone(&chunked_token);
         let task_http_client = Arc::clone(&http_client);
+        let task_completed = Arc::clone(&completed);
 
         join_set.spawn(async move {
             // Determine file size from metadata for chunked download decision.
@@ -258,7 +258,7 @@ pub async fn download_all_files_map(
                         &task_policy,
                         connections_per_file,
                         task_on_progress,
-                        total.saturating_sub(1),
+                        total.saturating_sub(task_completed.load(Ordering::Relaxed) + 1),
                     )
                     .await
                 } else {
@@ -353,7 +353,6 @@ pub async fn download_all_files_map(
     // Collect results as tasks complete.
     let mut file_map: HashMap<String, PathBuf> = HashMap::with_capacity(total);
     let mut failures: Vec<FileFailure> = Vec::new();
-    let mut completed_count: usize = 0;
 
     while let Some(join_result) = join_set.join_next().await {
         // Check overall timeout between result collections.
@@ -370,7 +369,8 @@ pub async fn download_all_files_map(
         let (file, download_result) =
             join_result.map_err(|e| FetchError::Http(format!("download task failed: {e}")))?;
 
-        completed_count += 1;
+        // Increment shared counter so in-flight tasks see updated remaining count.
+        let completed_count = completed.fetch_add(1, Ordering::Relaxed) + 1;
 
         match download_result {
             Ok(path) => {
@@ -401,7 +401,10 @@ pub async fn download_all_files_map(
 
     // If some files failed, report structured errors.
     if !failures.is_empty() {
-        let path = file_map.values().next().cloned();
+        let path = file_map
+            .iter()
+            .next()
+            .map(|(filename, path)| snapshot_root(filename, path));
         return Err(FetchError::PartialDownload { path, failures });
     }
 
@@ -726,6 +729,23 @@ pub(crate) async fn download_file_by_name(
     }
 
     Ok(path)
+}
+
+/// Derives the snapshot root directory from a `(filename, downloaded_path)` pair.
+///
+/// hf-hub cache layout: `.../snapshots/<sha>/<relative_filename>`
+/// For a nested file like `subdir/file.bin`, the downloaded path is
+/// `.../snapshots/<sha>/subdir/file.bin`. Stripping the filename's
+/// path components from the tail recovers `.../snapshots/<sha>/`.
+fn snapshot_root(filename: &str, path: &std::path::Path) -> PathBuf {
+    let depth = std::path::Path::new(filename).components().count();
+    let mut root = path.to_path_buf();
+    for _ in 0..depth {
+        if !root.pop() {
+            break;
+        }
+    }
+    root
 }
 
 /// Returns whether a download result contains an HTTP 416 Range Not Satisfiable error.

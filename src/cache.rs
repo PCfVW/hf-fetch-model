@@ -145,7 +145,9 @@ pub enum FileStatus {
         /// Local file size in bytes.
         local_size: u64,
     },
-    /// File exists but is smaller than expected (interrupted download).
+    /// File exists but is smaller than expected (interrupted download),
+    /// or a `.chunked.part` temp file was found in the blobs directory
+    /// (repo-level heuristic — may not correspond to this specific file).
     Partial {
         /// Local file size in bytes.
         local_size: u64,

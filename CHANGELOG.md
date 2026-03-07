@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added field-level documentation to all `pub(crate)` fields in `FetchConfig`.
 - `retry_async()` used a `last_error` accumulator with an awkward synthetic fallback. Restructured with match guards so success and final-failure exits are explicit.
 - Chunked download error message said "task panicked" for all `JoinError`s, which can also represent cancellation. Changed to "chunk task failed".
+- `download_all_files()` used `.parent()` to derive the snapshot directory from a downloaded file path, which returned a wrong path for nested files (e.g., `subdir/file.bin` → `.../snapshots/<sha>/subdir` instead of `.../snapshots/<sha>`). Added `snapshot_root()` helper that strips the filename's path components to recover the true snapshot root. Also fixed `FetchError::PartialDownload.path` which stored a raw file path instead of the snapshot directory.
+- `FileStatus::Partial` doc now notes that the `.chunked.part` detection is a repo-level heuristic (may not correspond to a specific file).
+- Chunked downloads passed a fixed `total - 1` as `files_remaining` for every file's streaming progress events, regardless of how many files had actually completed. Replaced with a shared `AtomicUsize` counter incremented on each file completion, so in-flight tasks report an accurate remaining count.
+- Examples (`basic.rs`, `bench.rs`, `progress.rs`) now return `Result` and use `?` instead of `.expect()`.
 
 ## [0.6.0] — Phase 6: Single-File Download API
 

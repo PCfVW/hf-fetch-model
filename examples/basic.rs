@@ -4,13 +4,10 @@
 //!
 //! Run: `cargo run --example basic`
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 #[tokio::main]
-async fn main() {
-    let path = hf_fetch_model::download("julien-c/dummy-unknown".to_owned())
-        .await
-        .expect("download failed");
+async fn main() -> Result<(), hf_fetch_model::FetchError> {
+    let path = hf_fetch_model::download("julien-c/dummy-unknown".to_owned()).await?;
 
     println!("Downloaded to: {}", path.display());
+    Ok(())
 }
