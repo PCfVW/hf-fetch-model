@@ -73,7 +73,7 @@ pub enum FetchError {
     /// One or more files failed to download.
     ///
     /// Contains the successful path and a list of per-file failures.
-    #[error("{} file(s) failed to download", failures.len())]
+    #[error("{} file(s) failed to download:{}", failures.len(), format_failures(failures))]
     PartialDownload {
         /// The snapshot directory (if any files succeeded).
         path: Option<PathBuf>,
@@ -126,4 +126,16 @@ impl std::fmt::Display for FileFailure {
             self.filename, self.reason, self.retryable
         )
     }
+}
+
+/// Formats a list of file failures for inclusion in the `PartialDownload` error message.
+fn format_failures(failures: &[FileFailure]) -> String {
+    let mut s = String::new();
+    for f in failures {
+        s.push_str("\n  - ");
+        s.push_str(f.filename.as_str());
+        s.push_str(": ");
+        s.push_str(f.reason.as_str());
+    }
+    s
 }

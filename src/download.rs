@@ -28,6 +28,56 @@ use crate::retry::{self, RetryPolicy};
 /// Default timeout per file when no config is provided (5 minutes).
 const DEFAULT_TIMEOUT_PER_FILE: Duration = Duration::from_secs(300);
 
+// ---------------------------------------------------------------------------
+// DownloadPlan — resolved config parameters
+// ---------------------------------------------------------------------------
+
+/// Resolved download parameters extracted from [`FetchConfig`].
+///
+/// Groups all config-derived values controlling download behavior,
+/// avoiding repetitive option unpacking in the download pipeline.
+#[derive(Clone)]
+struct DownloadPlan {
+    /// Retry policy for transient failures.
+    retry_policy: RetryPolicy,
+    /// Per-file timeout.
+    timeout_per_file: Duration,
+    /// Overall timeout for the entire batch.
+    timeout_total: Option<Duration>,
+    /// Maximum concurrent downloads.
+    concurrency: usize,
+    /// Connections per chunked download.
+    connections_per_file: usize,
+    /// File size threshold for multi-connection chunked downloads.
+    chunk_threshold: u64,
+    /// Whether to verify SHA256 checksums after download.
+    verify_checksums: bool,
+}
+
+impl DownloadPlan {
+    /// Builds a plan from optional config, using sensible defaults.
+    fn from_config(config: Option<&FetchConfig>) -> Self {
+        Self {
+            retry_policy: RetryPolicy {
+                max_retries: config.map_or(3, |c| c.max_retries),
+                ..RetryPolicy::default()
+            },
+            timeout_per_file: config
+                .and_then(|c| c.timeout_per_file)
+                .unwrap_or(DEFAULT_TIMEOUT_PER_FILE),
+            timeout_total: config.and_then(|c| c.timeout_total),
+            concurrency: config.map_or(4, |c| c.concurrency).max(1),
+            connections_per_file: config.map_or(8, |c| c.connections_per_file),
+            chunk_threshold: config.map_or(u64::MAX, |c| c.chunk_threshold),
+            verify_checksums: config.is_some_and(|c| c.verify_checksums),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public download entry points
+// ---------------------------------------------------------------------------
+
 /// Downloads all files from a repository and returns the cache directory.
 ///
 /// Each file is downloaded via `hf-hub`'s `.get()` method, which respects
@@ -90,121 +140,48 @@ pub async fn download_all_files_map(
 ) -> Result<HashMap<String, PathBuf>, FetchError> {
     let overall_start = tokio::time::Instant::now();
 
-    // Fetch file list with basic metadata from hf-hub.
+    // List and filter repository files.
     tracing::debug!(repo_id = %repo_id, "listing repository files");
     let all_files = repo::list_repo_files(&repo, repo_id.clone()).await?;
-
-    // Apply include/exclude filters.
     let include = config.and_then(|c| c.include.as_ref());
     let exclude = config.and_then(|c| c.exclude.as_ref());
-
     let files: Vec<_> = all_files
         .into_iter()
         // BORROW: explicit .as_str() instead of Deref coercion
         .filter(|f| file_matches(f.filename.as_str(), include, exclude))
         .collect();
 
-    // Fetch extended metadata (SHA256, sizes) if checksum verification is enabled
-    // or chunked downloads need file sizes to determine which files exceed the threshold.
-    let verify_checksums = config.is_some_and(|c| c.verify_checksums);
-    let chunk_threshold = config.map_or(u64::MAX, |c| c.chunk_threshold);
-    let needs_metadata = verify_checksums || chunk_threshold < u64::MAX;
-    let metadata_map = if needs_metadata {
-        tracing::debug!("fetching extended metadata (checksums={verify_checksums}, chunk_threshold={chunk_threshold} bytes)");
-        match fetch_metadata_map(
-            // BORROW: explicit .as_str() instead of Deref coercion
-            repo_id.as_str(),
-            config.and_then(|c| c.token.as_deref()),
-            config.and_then(|c| c.revision.as_deref()),
-        )
-        .await
-        {
-            Ok(map) => {
-                let with_size = map.values().filter(|f| f.size.is_some()).count();
-                tracing::debug!(
-                    files_with_size = with_size,
-                    total_files = map.len(),
-                    "metadata fetch succeeded"
-                );
-                map
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "metadata fetch failed; chunked downloads disabled for this run"
-                );
-                HashMap::new()
-            }
-        }
-    } else {
-        tracing::debug!("skipping metadata fetch (checksums disabled, chunk_threshold=MAX)");
-        HashMap::new()
-    };
-
-    // Build retry policy from config.
-    let retry_policy = RetryPolicy {
-        max_retries: config.map_or(3, |c| c.max_retries),
-        ..RetryPolicy::default()
-    };
-
-    let timeout_per_file = config
-        .and_then(|c| c.timeout_per_file)
-        .unwrap_or(DEFAULT_TIMEOUT_PER_FILE);
-    let timeout_total = config.and_then(|c| c.timeout_total);
-    let concurrency = config.map_or(4, |c| c.concurrency).max(1);
+    // Build download plan and fetch metadata.
+    let plan = DownloadPlan::from_config(config);
     let on_progress = config.and_then(|c| c.on_progress.clone());
-    let connections_per_file = config.map_or(8, |c| c.connections_per_file);
+    let metadata_map = fetch_metadata_if_needed(
+        config,
+        repo_id.as_str(),
+        plan.verify_checksums,
+        plan.chunk_threshold,
+    )
+    .await;
 
-    // Build reqwest client up front (used by chunked downloads and 416 fallback).
-    let token_ref = config.and_then(|c| c.token.as_deref());
-    let http_client = Arc::new(chunked::build_client(token_ref)?);
-    let chunked_client = if chunk_threshold < u64::MAX {
-        Some(Arc::clone(&http_client))
-    } else {
-        None
-    };
-
-    // Resolve cache directory (used by chunked downloads and 416 fallback).
-    let cache_dir = Arc::new(
-        config
-            .and_then(|c| c.output_dir.clone())
-            .map_or_else(crate::cache::hf_cache_dir, Ok)?,
-    );
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let chunked_repo_folder = Arc::new(chunked::repo_folder_name(repo_id.as_str()));
-    let chunked_revision = Arc::new(
-        config
-            .and_then(|c| c.revision.clone())
-            .unwrap_or_else(|| String::from("main")),
-    );
-    let chunked_token = Arc::new(config.and_then(|c| c.token.clone()));
+    // Build HTTP clients and resolve cache paths.
+    let (http_client, chunked_client, cache_dir, repo_folder, revision, token) =
+        build_shared_state(config, repo_id.as_str(), &plan)?;
 
     let total = files.len();
-    let chunked_enabled = chunked_client.is_some();
     tracing::debug!(
         total_files = total,
-        concurrency = concurrency,
-        connections_per_file = connections_per_file,
-        chunk_threshold_mib = chunk_threshold / 1_048_576,
-        chunked_enabled = chunked_enabled,
-        verify_checksums = verify_checksums,
+        concurrency = plan.concurrency,
         "download plan"
     );
 
-    // Wrap shared state in Arc for concurrent task access.
+    // Spawn concurrent download tasks.
     let repo = Arc::new(repo);
     let metadata_map = Arc::new(metadata_map);
-    let semaphore = Arc::new(Semaphore::new(concurrency));
-    // Shared counter for completed files, used by streaming progress events.
+    let semaphore = Arc::new(Semaphore::new(plan.concurrency));
     let completed = Arc::new(AtomicUsize::new(0));
     let mut join_set = JoinSet::new();
 
-    // Spawn download tasks, limited to `concurrency` in-flight at a time.
-    // The semaphore blocks the spawn loop until a permit is available,
-    // ensuring at most `concurrency` downloads run simultaneously.
     for file in files {
-        // Check overall timeout before queuing next download.
-        if let Some(total_limit) = timeout_total {
+        if let Some(total_limit) = plan.timeout_total {
             if overall_start.elapsed() >= total_limit {
                 join_set.abort_all();
                 return Err(FetchError::Timeout {
@@ -221,210 +198,59 @@ pub async fn download_all_files_map(
 
         let task_repo = Arc::clone(&repo);
         let task_meta = Arc::clone(&metadata_map);
-        let task_policy = retry_policy.clone();
         let task_chunked_client = chunked_client.clone();
+        let task_http_client = Arc::clone(&http_client);
         let task_cache_dir = cache_dir.clone();
-        let task_repo_folder = Arc::clone(&chunked_repo_folder);
-        let task_revision = Arc::clone(&chunked_revision);
-        let task_on_progress = on_progress.clone();
+        let task_repo_folder = Arc::clone(&repo_folder);
+        let task_revision = Arc::clone(&revision);
         // BORROW: explicit .clone() for repo_id
         let task_repo_id = repo_id.clone();
-        let task_token = Arc::clone(&chunked_token);
-        let task_http_client = Arc::clone(&http_client);
+        let task_token = Arc::clone(&token);
+        let task_plan = plan.clone();
+        let task_on_progress = on_progress.clone();
         let task_completed = Arc::clone(&completed);
 
         join_set.spawn(async move {
-            // Determine file size from metadata for chunked download decision.
-            let file_size = task_meta.get(file.filename.as_str()).and_then(|m| m.size);
-            let file_start = tokio::time::Instant::now();
-
-            let result = if let (Some(size), Some(ref client)) = (file_size, &task_chunked_client) {
-                if size >= chunk_threshold {
-                    tracing::debug!(
-                        filename = %file.filename,
-                        size_mib = size / 1_048_576,
-                        connections = connections_per_file,
-                        "chunked download (multi-connection)"
-                    );
-                    download_single_file_chunked(
-                        client,
-                        &file,
-                        &task_cache_dir,
-                        &task_repo_folder,
-                        &task_revision,
-                        task_repo_id.as_str(),
-                        (*task_token).clone(),
-                        &task_meta,
-                        verify_checksums,
-                        &task_policy,
-                        connections_per_file,
-                        task_on_progress,
-                        total.saturating_sub(task_completed.load(Ordering::Relaxed) + 1),
-                    )
-                    .await
-                } else {
-                    tracing::debug!(
-                        filename = %file.filename,
-                        size_mib = size / 1_048_576,
-                        "single-connection download (below chunk threshold)"
-                    );
-                    download_single_file(
-                        &task_repo,
-                        &file,
-                        &task_meta,
-                        verify_checksums,
-                        &task_policy,
-                        timeout_per_file,
-                    )
-                    .await
-                }
-            } else {
-                let reason = if file_size.is_none() {
-                    "file size unknown (metadata missing)"
-                } else {
-                    "chunked downloads disabled"
-                };
-                tracing::debug!(
-                    filename = %file.filename,
-                    file_size = ?file_size,
-                    reason = reason,
-                    "single-connection download"
-                );
-                download_single_file(
-                    &task_repo,
-                    &file,
-                    &task_meta,
-                    verify_checksums,
-                    &task_policy,
-                    timeout_per_file,
-                )
-                .await
-            };
-
-            // Fall back to direct HTTP GET if hf-hub fails with 416 Range Not Satisfiable.
-            // This happens for small git-stored files that don't support Range requests.
-            let result = if is_range_not_satisfiable(&result) {
-                chunked::download_direct(
-                    &task_http_client,
-                    task_repo_id.as_str(),
-                    &task_revision,
-                    file.filename.as_str(),
-                    &task_cache_dir,
-                )
-                .await
-            } else {
-                result
-            };
-
-            let elapsed = file_start.elapsed();
-            match &result {
-                Ok(_) => {
-                    if let Some(size) = file_size {
-                        // CAST: u64 → f64, precision loss acceptable; value is a display-only throughput scalar
-                        #[allow(clippy::as_conversions, clippy::cast_precision_loss)]
-                        let mbps = (size as f64 * 8.0) / elapsed.as_secs_f64() / 1_000_000.0;
-                        tracing::debug!(
-                            filename = %file.filename,
-                            elapsed_secs = format_args!("{:.1}", elapsed.as_secs_f64()),
-                            throughput_mbps = format_args!("{mbps:.1}"),
-                            "download complete"
-                        );
-                    } else {
-                        tracing::debug!(
-                            filename = %file.filename,
-                            elapsed_secs = format_args!("{:.1}", elapsed.as_secs_f64()),
-                            "download complete (size unknown)"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        filename = %file.filename,
-                        error = %e,
-                        "download failed"
-                    );
-                }
-            }
-
+            let result = dispatch_download(
+                &task_repo,
+                &file,
+                &task_meta,
+                task_chunked_client.as_deref(),
+                &task_http_client,
+                &task_cache_dir,
+                &task_repo_folder,
+                &task_revision,
+                task_repo_id.as_str(),
+                (*task_token).clone(),
+                &task_plan,
+                task_on_progress,
+                total.saturating_sub(task_completed.load(Ordering::Relaxed) + 1),
+            )
+            .await;
             drop(permit);
             (file, result)
         });
     }
 
-    // Collect results as tasks complete.
-    let mut file_map: HashMap<String, PathBuf> = HashMap::with_capacity(total);
-    let mut failures: Vec<FileFailure> = Vec::new();
+    // Collect results and check for failures.
+    let (file_map, failures) = collect_results(
+        &mut join_set,
+        plan.timeout_total,
+        overall_start,
+        on_progress.as_ref(),
+        total,
+        &completed,
+    )
+    .await?;
 
-    while let Some(join_result) = join_set.join_next().await {
-        // Check overall timeout between result collections.
-        if let Some(total_limit) = timeout_total {
-            if overall_start.elapsed() >= total_limit {
-                join_set.abort_all();
-                return Err(FetchError::Timeout {
-                    filename: String::from("(overall timeout exceeded)"),
-                    seconds: total_limit.as_secs(),
-                });
-            }
-        }
-
-        let (file, download_result) =
-            join_result.map_err(|e| FetchError::Http(format!("download task failed: {e}")))?;
-
-        // Increment shared counter so in-flight tasks see updated remaining count.
-        let completed_count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-
-        match download_result {
-            Ok(path) => {
-                // Report progress for completed file.
-                let remaining = total.saturating_sub(completed_count);
-                let file_size = tokio::fs::metadata(&path)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                // BORROW: explicit .as_str() instead of Deref coercion
-                let event = progress::completed_event(file.filename.as_str(), file_size, remaining);
-
-                if let Some(ref cb) = on_progress {
-                    cb(&event);
-                }
-
-                file_map.insert(file.filename, path);
-            }
-            Err(e) => {
-                failures.push(FileFailure {
-                    filename: file.filename,
-                    reason: e.to_string(),
-                    retryable: retry::is_retryable(&e),
-                });
-            }
-        }
-    }
-
-    // If some files failed, report structured errors.
-    if !failures.is_empty() {
-        let path = file_map
-            .iter()
-            .next()
-            .map(|(filename, path)| snapshot_root(filename, path));
-        return Err(FetchError::PartialDownload { path, failures });
-    }
-
-    if file_map.is_empty() {
-        return Err(FetchError::NoFilesMatched {
-            repo_id: repo_id.clone(),
-        });
-    }
-
-    let total_elapsed = overall_start.elapsed();
-    tracing::debug!(
-        files_downloaded = file_map.len(),
-        files_failed = failures.len(),
-        total_elapsed_secs = format_args!("{:.1}", total_elapsed.as_secs_f64()),
-        "download complete"
-    );
-
+    let file_map = validate_download_results(file_map, failures, repo_id.as_str())?;
+    tracing::debug!(files_downloaded = file_map.len(), "download complete");
     Ok(file_map)
 }
+
+// ---------------------------------------------------------------------------
+// Single-file download methods
+// ---------------------------------------------------------------------------
 
 /// Downloads a single file with retry and timeout, then optionally verifies its checksum.
 async fn download_single_file(
@@ -539,43 +365,30 @@ async fn download_single_file_chunked(
 ///
 /// This is the single-file counterpart to [`download_all_files_map()`]. It reuses
 /// the same download pipeline (chunked or standard, retry, checksum, 416 fallback)
-/// but applied to exactly one file.
+/// via [`dispatch_download()`].
 ///
 /// # Errors
 ///
-/// * [`FetchError::Http`] — if the file does not exist in the repository.
-/// * [`FetchError::Api`] — on download failure (after retries).
-/// * [`FetchError::Checksum`] — if verification is enabled and fails.
+/// Returns [`FetchError::Http`] if the file does not exist in the repository.
+/// Returns [`FetchError::Api`] on download failure (after retries).
+/// Returns [`FetchError::Checksum`] if verification is enabled and fails.
 pub(crate) async fn download_file_by_name(
     repo: ApiRepo,
     repo_id: String,
     filename: &str,
     config: &FetchConfig,
 ) -> Result<PathBuf, FetchError> {
-    // Fetch extended metadata (SHA256, sizes) if checksum verification is enabled
-    // or chunked downloads need file sizes to determine whether to chunk.
-    let verify_checksums = config.verify_checksums;
-    let chunk_threshold = config.chunk_threshold;
-    let needs_metadata = verify_checksums || chunk_threshold < u64::MAX;
-    let metadata_map = if needs_metadata {
-        fetch_metadata_map(
-            // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
-            repo_id.as_str(),
-            config.token.as_deref(),
-            config.revision.as_deref(),
-        )
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-                filename = %filename,
-                error = %e,
-                "metadata fetch failed; file size unknown, chunked download disabled"
-            );
-            HashMap::new()
-        })
-    } else {
-        HashMap::new()
-    };
+    let plan = DownloadPlan::from_config(Some(config));
+    // BORROW: explicit .clone() for Arc-wrapped callback
+    let on_progress = config.on_progress.clone();
+
+    let metadata_map = fetch_metadata_if_needed(
+        Some(config),
+        repo_id.as_str(),
+        plan.verify_checksums,
+        plan.chunk_threshold,
+    )
+    .await;
 
     // Build a RepoFile for this filename from metadata (or with no metadata).
     let file_meta = metadata_map.get(filename);
@@ -585,17 +398,6 @@ pub(crate) async fn download_file_by_name(
         size: file_meta.and_then(|m| m.size),
         sha256: file_meta.and_then(|m| m.sha256.clone()),
     };
-
-    // Build retry policy from config.
-    let retry_policy = RetryPolicy {
-        max_retries: config.max_retries,
-        ..RetryPolicy::default()
-    };
-
-    let timeout_per_file = config.timeout_per_file.unwrap_or(DEFAULT_TIMEOUT_PER_FILE);
-    // BORROW: explicit .clone() for Arc-wrapped callback
-    let on_progress = config.on_progress.clone();
-    let connections_per_file = config.connections_per_file;
 
     // Build reqwest client (used by chunked downloads and 416 fallback).
     // BORROW: explicit .as_deref() for Option<String> → Option<&str>
@@ -615,109 +417,32 @@ pub(crate) async fn download_file_by_name(
         .clone()
         .unwrap_or_else(|| String::from("main"));
 
-    // Determine file size from metadata for chunked download decision.
-    let file_size = file.size;
-    let start = std::time::Instant::now();
-
-    let result = if let Some(size) = file_size {
-        if size >= chunk_threshold {
-            tracing::debug!(
-                filename = %filename,
-                size_mib = size / 1_048_576,
-                connections = connections_per_file,
-                "chunked download (multi-connection)"
-            );
-            download_single_file_chunked(
-                &http_client,
-                &file,
-                &cache_dir,
-                // BORROW: explicit .as_str() for String → &str conversions
-                repo_folder.as_str(),
-                revision.as_str(),
-                repo_id.as_str(),
-                // BORROW: explicit .clone() for owned Option<String> and Arc
-                config.token.clone(),
-                &metadata_map,
-                verify_checksums,
-                &retry_policy,
-                connections_per_file,
-                on_progress.clone(),
-                0, // files_remaining: only one file
-            )
-            .await
-        } else {
-            tracing::debug!(
-                filename = %filename,
-                size_mib = size / 1_048_576,
-                "single-connection download (below chunk threshold)"
-            );
-            download_single_file(
-                &repo,
-                &file,
-                &metadata_map,
-                verify_checksums,
-                &retry_policy,
-                timeout_per_file,
-            )
-            .await
-        }
+    let chunked_client = if plan.chunk_threshold < u64::MAX {
+        Some(&http_client)
     } else {
-        tracing::debug!(
-            filename = %filename,
-            "single-connection download (file size unknown)"
-        );
-        download_single_file(
-            &repo,
-            &file,
-            &metadata_map,
-            verify_checksums,
-            &retry_policy,
-            timeout_per_file,
-        )
-        .await
+        None
     };
 
-    // Fall back to direct HTTP GET if hf-hub fails with 416 Range Not Satisfiable.
-    let result = if is_range_not_satisfiable(&result) {
-        chunked::download_direct(
-            &http_client,
-            // BORROW: explicit .as_str() for String → &str conversions
-            repo_id.as_str(),
-            revision.as_str(),
-            filename,
-            &cache_dir,
-        )
-        .await
-    } else {
-        result
-    };
+    let result = dispatch_download(
+        &repo,
+        &file,
+        &metadata_map,
+        chunked_client,
+        &http_client,
+        &cache_dir,
+        // BORROW: explicit .as_str() for String → &str conversions
+        repo_folder.as_str(),
+        revision.as_str(),
+        repo_id.as_str(),
+        // BORROW: explicit .clone() for owned Option<String>
+        config.token.clone(),
+        &plan,
+        on_progress.clone(),
+        0, // files_remaining: only one file
+    )
+    .await;
 
     let path = result?;
-
-    // Log completion with elapsed time and throughput.
-    let elapsed = start.elapsed();
-    let elapsed_secs = elapsed.as_secs_f64();
-    if let Some(size) = file_size {
-        // CAST: u64 → f64, precision loss acceptable; value is a display-only throughput scalar
-        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-        let mbps = if elapsed_secs > 0.0 {
-            (size as f64 * 8.0) / elapsed_secs / 1_000_000.0
-        } else {
-            0.0
-        };
-        tracing::debug!(
-            filename = %filename,
-            elapsed_secs = format_args!("{elapsed_secs:.1}"),
-            throughput_mbps = format_args!("{mbps:.1}"),
-            "download complete"
-        );
-    } else {
-        tracing::debug!(
-            filename = %filename,
-            elapsed_secs = format_args!("{elapsed_secs:.1}"),
-            "download complete"
-        );
-    }
 
     // Report progress for the completed file.
     if let Some(ref cb) = on_progress {
@@ -730,6 +455,397 @@ pub(crate) async fn download_file_by_name(
     }
 
     Ok(path)
+}
+
+// ---------------------------------------------------------------------------
+// Shared download helpers (factored from download_all_files_map and
+// download_file_by_name to eliminate duplication)
+// ---------------------------------------------------------------------------
+
+/// Builds the shared `Arc`-wrapped state needed for concurrent downloads.
+///
+/// Returns `(http_client, chunked_client, cache_dir, repo_folder, revision, token)`.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`] if the HTTP client cannot be built.
+/// Returns [`FetchError::Io`] if the cache directory cannot be resolved.
+#[allow(clippy::type_complexity)]
+fn build_shared_state(
+    config: Option<&FetchConfig>,
+    repo_id: &str,
+    plan: &DownloadPlan,
+) -> Result<
+    (
+        Arc<reqwest::Client>,
+        Option<Arc<reqwest::Client>>,
+        Arc<PathBuf>,
+        Arc<String>,
+        Arc<String>,
+        Arc<Option<String>>,
+    ),
+    FetchError,
+> {
+    let token_ref = config.and_then(|c| c.token.as_deref());
+    let http_client = Arc::new(chunked::build_client(token_ref)?);
+    let chunked_client = if plan.chunk_threshold < u64::MAX {
+        Some(Arc::clone(&http_client))
+    } else {
+        None
+    };
+
+    let cache_dir = Arc::new(
+        config
+            .and_then(|c| c.output_dir.clone())
+            .map_or_else(crate::cache::hf_cache_dir, Ok)?,
+    );
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let repo_folder = Arc::new(chunked::repo_folder_name(repo_id));
+    let revision = Arc::new(
+        config
+            .and_then(|c| c.revision.clone())
+            .unwrap_or_else(|| String::from("main")),
+    );
+    let token = Arc::new(config.and_then(|c| c.token.clone()));
+
+    Ok((
+        http_client,
+        chunked_client,
+        cache_dir,
+        repo_folder,
+        revision,
+        token,
+    ))
+}
+
+/// Downloads a single file, choosing the best method and applying fallbacks.
+///
+/// This is the core download logic shared by [`download_all_files_map()`]
+/// (batch) and [`download_file_by_name()`] (single-file). It:
+///
+/// 1. Chooses chunked (multi-connection) or single-connection download
+/// 2. Falls back to direct HTTP GET on HTTP 416 Range Not Satisfiable
+/// 3. Falls back to the local cache if all download attempts fail
+/// 4. Logs the result with timing and throughput
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_download(
+    repo: &ApiRepo,
+    file: &RepoFile,
+    metadata_map: &HashMap<String, RepoFile>,
+    chunked_client: Option<&reqwest::Client>,
+    http_client: &reqwest::Client,
+    cache_dir: &std::path::Path,
+    repo_folder: &str,
+    revision: &str,
+    repo_id: &str,
+    token: Option<String>,
+    plan: &DownloadPlan,
+    on_progress: Option<ProgressCallback>,
+    files_remaining: usize,
+) -> Result<PathBuf, FetchError> {
+    let file_size = metadata_map
+        .get(file.filename.as_str())
+        .and_then(|m| m.size);
+    let start = std::time::Instant::now();
+
+    // Choose download method based on file size and chunked client availability.
+    let result = if let (Some(size), Some(client)) = (file_size, chunked_client) {
+        if size >= plan.chunk_threshold {
+            tracing::debug!(
+                filename = %file.filename,
+                size_mib = size / 1_048_576,
+                connections = plan.connections_per_file,
+                "chunked download (multi-connection)"
+            );
+            download_single_file_chunked(
+                client,
+                file,
+                cache_dir,
+                repo_folder,
+                revision,
+                repo_id,
+                token,
+                metadata_map,
+                plan.verify_checksums,
+                &plan.retry_policy,
+                plan.connections_per_file,
+                on_progress,
+                files_remaining,
+            )
+            .await
+        } else {
+            tracing::debug!(
+                filename = %file.filename,
+                size_mib = size / 1_048_576,
+                "single-connection download (below chunk threshold)"
+            );
+            download_single_file(
+                repo,
+                file,
+                metadata_map,
+                plan.verify_checksums,
+                &plan.retry_policy,
+                plan.timeout_per_file,
+            )
+            .await
+        }
+    } else {
+        let reason = if file_size.is_none() {
+            "file size unknown (metadata missing)"
+        } else {
+            "chunked downloads disabled"
+        };
+        tracing::debug!(
+            filename = %file.filename,
+            file_size = ?file_size,
+            reason = reason,
+            "single-connection download"
+        );
+        download_single_file(
+            repo,
+            file,
+            metadata_map,
+            plan.verify_checksums,
+            &plan.retry_policy,
+            plan.timeout_per_file,
+        )
+        .await
+    };
+
+    // Fall back to direct HTTP GET if hf-hub fails with 416 Range Not Satisfiable.
+    // This happens for small git-stored files that don't support Range requests.
+    let result = if is_range_not_satisfiable(&result) {
+        chunked::download_direct(
+            http_client,
+            repo_id,
+            revision,
+            file.filename.as_str(),
+            cache_dir,
+        )
+        .await
+    } else {
+        result
+    };
+
+    // Last resort: check the local cache before reporting failure.
+    // This handles gated models where the file was previously downloaded
+    // but the current API request fails (e.g., auth/Range probe issues).
+    let result = match result {
+        Ok(path) => Ok(path),
+        Err(e) => {
+            if let Some(cached) =
+                resolve_cached_file(cache_dir, repo_folder, revision, file.filename.as_str())
+            {
+                Ok(cached)
+            } else {
+                Err(e)
+            }
+        }
+    };
+
+    log_download_result(file.filename.as_str(), &result, file_size, start.elapsed());
+    result
+}
+
+/// Collects download task results into a file map and failure list.
+///
+/// Drains the [`JoinSet`], checking the overall timeout between results.
+/// Reports per-file completion progress via the callback.
+async fn collect_results(
+    join_set: &mut JoinSet<(RepoFile, Result<PathBuf, FetchError>)>,
+    timeout_total: Option<Duration>,
+    overall_start: tokio::time::Instant,
+    on_progress: Option<&ProgressCallback>,
+    total: usize,
+    completed: &Arc<AtomicUsize>,
+) -> Result<(HashMap<String, PathBuf>, Vec<FileFailure>), FetchError> {
+    let mut file_map: HashMap<String, PathBuf> = HashMap::with_capacity(total);
+    let mut failures: Vec<FileFailure> = Vec::new();
+
+    while let Some(join_result) = join_set.join_next().await {
+        // Check overall timeout between result collections.
+        if let Some(total_limit) = timeout_total {
+            if overall_start.elapsed() >= total_limit {
+                join_set.abort_all();
+                return Err(FetchError::Timeout {
+                    filename: String::from("(overall timeout exceeded)"),
+                    seconds: total_limit.as_secs(),
+                });
+            }
+        }
+
+        let (file, download_result) =
+            join_result.map_err(|e| FetchError::Http(format!("download task failed: {e}")))?;
+
+        // Increment shared counter so in-flight tasks see updated remaining count.
+        let completed_count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+
+        match download_result {
+            Ok(path) => {
+                // Report progress for completed file.
+                let remaining = total.saturating_sub(completed_count);
+                let file_size = tokio::fs::metadata(&path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                // BORROW: explicit .as_str() instead of Deref coercion
+                let event = progress::completed_event(file.filename.as_str(), file_size, remaining);
+
+                if let Some(cb) = on_progress {
+                    cb(&event);
+                }
+
+                file_map.insert(file.filename, path);
+            }
+            Err(e) => {
+                failures.push(FileFailure {
+                    filename: file.filename,
+                    reason: e.to_string(),
+                    retryable: retry::is_retryable(&e),
+                });
+            }
+        }
+    }
+
+    Ok((file_map, failures))
+}
+
+/// Checks download results for failures or empty file maps.
+///
+/// Returns the file map on success, or an appropriate error.
+fn validate_download_results(
+    file_map: HashMap<String, PathBuf>,
+    failures: Vec<FileFailure>,
+    repo_id: &str,
+) -> Result<HashMap<String, PathBuf>, FetchError> {
+    if !failures.is_empty() {
+        let path = file_map
+            .iter()
+            .next()
+            .map(|(filename, path)| snapshot_root(filename, path));
+        return Err(FetchError::PartialDownload { path, failures });
+    }
+    if file_map.is_empty() {
+        // BORROW: explicit .clone() for owned String
+        return Err(FetchError::NoFilesMatched {
+            repo_id: repo_id.to_owned(),
+        });
+    }
+    Ok(file_map)
+}
+
+/// Fetches extended file metadata if needed for checksums or chunked downloads.
+///
+/// Returns an empty map if neither checksums nor chunked downloads are enabled,
+/// or if the metadata fetch fails (with a warning log).
+async fn fetch_metadata_if_needed(
+    config: Option<&FetchConfig>,
+    repo_id: &str,
+    verify_checksums: bool,
+    chunk_threshold: u64,
+) -> HashMap<String, RepoFile> {
+    let needs_metadata = verify_checksums || chunk_threshold < u64::MAX;
+    if !needs_metadata {
+        tracing::debug!("skipping metadata fetch (checksums disabled, chunk_threshold=MAX)");
+        return HashMap::new();
+    }
+
+    tracing::debug!(
+        "fetching extended metadata (checksums={verify_checksums}, chunk_threshold={chunk_threshold} bytes)"
+    );
+    match fetch_metadata_map(
+        repo_id,
+        config.and_then(|c| c.token.as_deref()),
+        config.and_then(|c| c.revision.as_deref()),
+    )
+    .await
+    {
+        Ok(map) => {
+            let with_size = map.values().filter(|f| f.size.is_some()).count();
+            tracing::debug!(
+                files_with_size = with_size,
+                total_files = map.len(),
+                "metadata fetch succeeded"
+            );
+            map
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "metadata fetch failed; chunked downloads disabled for this run"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+/// Logs the result of a file download with timing and throughput.
+fn log_download_result(
+    filename: &str,
+    result: &Result<PathBuf, FetchError>,
+    file_size: Option<u64>,
+    elapsed: std::time::Duration,
+) {
+    match result {
+        Ok(_) => {
+            if let Some(size) = file_size {
+                // CAST: u64 → f64, precision loss acceptable; value is a display-only throughput scalar
+                #[allow(clippy::as_conversions, clippy::cast_precision_loss)]
+                let mbps = (size as f64 * 8.0) / elapsed.as_secs_f64() / 1_000_000.0;
+                tracing::debug!(
+                    filename = %filename,
+                    elapsed_secs = format_args!("{:.1}", elapsed.as_secs_f64()),
+                    throughput_mbps = format_args!("{mbps:.1}"),
+                    "download complete"
+                );
+            } else {
+                tracing::debug!(
+                    filename = %filename,
+                    elapsed_secs = format_args!("{:.1}", elapsed.as_secs_f64()),
+                    "download complete (size unknown)"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                filename = %filename,
+                error = %e,
+                "download failed"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Utility helpers
+// ---------------------------------------------------------------------------
+
+/// Attempts to resolve a file from the local `HuggingFace` cache.
+///
+/// This is a last-resort fallback when a download fails (e.g., due to auth
+/// issues with gated models) but the file was previously cached. Looks up:
+/// `<cache_dir>/<repo_folder>/snapshots/<commit_hash>/<filename>`.
+///
+/// Returns `Some(path)` if the file exists locally, `None` otherwise.
+fn resolve_cached_file(
+    cache_dir: &std::path::Path,
+    repo_folder: &str,
+    revision: &str,
+    filename: &str,
+) -> Option<PathBuf> {
+    let repo_dir = cache_dir.join(repo_folder);
+    let commit_hash = crate::cache::read_ref(&repo_dir, revision)?;
+    let cached_path = repo_dir.join("snapshots").join(commit_hash).join(filename);
+    if cached_path.exists() {
+        tracing::debug!(
+            filename = %filename,
+            path = %cached_path.display(),
+            "download failed but file found in local cache"
+        );
+        Some(cached_path)
+    } else {
+        None
+    }
 }
 
 /// Derives the snapshot root directory from a `(filename, downloaded_path)` pair.

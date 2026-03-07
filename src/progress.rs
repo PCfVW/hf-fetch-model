@@ -44,7 +44,7 @@ pub(crate) fn streaming_event(
     files_remaining: usize,
 ) -> ProgressEvent {
     #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-    // EXPLICIT: f64 cast for percentage; precision loss negligible for display
+    // CAST: u64 → f64, precision loss acceptable; values are display-only percentage scalars
     let percent = if bytes_total > 0 {
         (bytes_downloaded as f64 / bytes_total as f64) * 100.0
     } else {

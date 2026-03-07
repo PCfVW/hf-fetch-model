@@ -410,7 +410,7 @@ fn count_files_recursive(dir: &Path, count: &mut usize, total: &mut u64) {
 }
 
 /// Reads the commit hash from a refs file, if it exists.
-fn read_ref(repo_dir: &Path, revision: &str) -> Option<String> {
+pub(crate) fn read_ref(repo_dir: &Path, revision: &str) -> Option<String> {
     let ref_path = repo_dir.join("refs").join(revision);
     std::fs::read_to_string(ref_path)
         .ok()

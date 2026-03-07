@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] — Cache Fallback & Download Refactor
+
+### Fixed
+
+- Downloads of gated models (e.g., `meta-llama/Llama-3.2-1B`) failed with "file(s) failed to download" even when the model was already cached. Root cause: hf-hub's `.high()` mode sends `Range: bytes=0-0` probes that fail for gated LFS files, and no cache fallback existed. Added `resolve_cached_file()` to fall back to the local cache (`refs/<revision>` → `snapshots/<hash>/<filename>`) when all download attempts fail.
+
+### Changed
+
+- Refactored `download_all_files_map` (291 → ~90 lines), `download_file_by_name` (162 → ~55 lines), and `download_chunked` (122 → ~80 lines) by extracting shared helpers:
+  - `DownloadPlan` — resolved config parameters, avoiding repetitive option unpacking.
+  - `dispatch_download()` — shared core download logic (method selection, 416 fallback, cache fallback, logging) used by both batch and single-file paths.
+  - `collect_results()` — drains `JoinSet` with timeout checking and progress reporting.
+  - `validate_download_results()` — checks for partial failures or empty file maps.
+  - `build_shared_state()` — `Arc`-wrapped HTTP clients and cache paths for concurrent tasks.
+  - `fetch_metadata_if_needed()` — conditional metadata fetching with logging.
+  - `log_download_result()` — timing and throughput logging.
+  - `prepare_temp_file()` — directory creation and temp file pre-allocation for chunked downloads.
+  - `finalize_chunked_download()` — rename, symlink, and refs file creation.
+- Made `cache::read_ref()` `pub(crate)` so `resolve_cached_file()` can look up commit hashes.
+- Applied CONVENTIONS.md: fixed `# Errors` doc format on `download_file_by_name`, corrected CAST annotation in `progress.rs`.
+- All functions now pass `clippy::too_many_lines` (≤100 lines) under `clippy::pedantic`.
+
 ## [0.7.1] — Metadata & Progress Bar Fixes
 
 ### Fixed
