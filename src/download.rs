@@ -523,9 +523,9 @@ fn build_shared_state(
 /// This is the core download logic shared by [`download_all_files_map()`]
 /// (batch) and [`download_file_by_name()`] (single-file). It:
 ///
-/// 1. Chooses chunked (multi-connection) or single-connection download
-/// 2. Falls back to direct HTTP GET on HTTP 416 Range Not Satisfiable
-/// 3. Falls back to the local cache if all download attempts fail
+/// 1. Returns immediately if the file exists in the local cache
+/// 2. Chooses chunked (multi-connection) or single-connection download
+/// 3. Falls back to direct HTTP GET on HTTP 416 Range Not Satisfiable
 /// 4. Logs the result with timing and throughput
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_download(
@@ -543,6 +543,13 @@ async fn dispatch_download(
     on_progress: Option<ProgressCallback>,
     files_remaining: usize,
 ) -> Result<PathBuf, FetchError> {
+    // Check local cache first — skip the network entirely if the file exists.
+    if let Some(cached) =
+        resolve_cached_file(cache_dir, repo_folder, revision, file.filename.as_str())
+    {
+        return Ok(cached);
+    }
+
     let file_size = metadata_map
         .get(file.filename.as_str())
         .and_then(|m| m.size);
@@ -625,22 +632,6 @@ async fn dispatch_download(
         .await
     } else {
         result
-    };
-
-    // Last resort: check the local cache before reporting failure.
-    // This handles gated models where the file was previously downloaded
-    // but the current API request fails (e.g., auth/Range probe issues).
-    let result = match result {
-        Ok(path) => Ok(path),
-        Err(e) => {
-            if let Some(cached) =
-                resolve_cached_file(cache_dir, repo_folder, revision, file.filename.as_str())
-            {
-                Ok(cached)
-            } else {
-                Err(e)
-            }
-        }
     };
 
     log_download_result(file.filename.as_str(), &result, file_size, start.elapsed());

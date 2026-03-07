@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Downloads of gated models (e.g., `meta-llama/Llama-3.2-1B`) failed with "file(s) failed to download" even when the model was already cached. Root cause: hf-hub's `.high()` mode sends `Range: bytes=0-0` probes that fail for gated LFS files, and no cache fallback existed. Added `resolve_cached_file()` to fall back to the local cache (`refs/<revision>` → `snapshots/<hash>/<filename>`) when all download attempts fail.
+- Downloads of gated models (e.g., `meta-llama/Llama-3.2-1B`) failed with "file(s) failed to download" even when the model was already cached. Root cause: hf-hub's `.high()` mode sends `Range: bytes=0-0` probes that fail for gated LFS files, and no cache check existed. Added `resolve_cached_file()` and moved it to the **front** of `dispatch_download()` — cached files now return immediately without any network request.
 
 ### Changed
 
