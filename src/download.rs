@@ -470,19 +470,9 @@ pub(crate) async fn download_file_by_name(
     // BORROW: explicit .as_deref() for Option<String> → Option<&str>
     let http_client = chunked::build_client(config.token.as_deref())?;
 
-    // Resolve cache directory.
-    // BORROW: explicit .clone() for owned PathBuf
-    let cache_dir = config
-        .output_dir
-        .clone()
-        .map_or_else(crate::cache::hf_cache_dir, Ok)?;
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let repo_folder = chunked::repo_folder_name(repo_id.as_str());
-    // BORROW: explicit .clone() for owned String
-    let revision = config
-        .revision
-        .clone()
-        .unwrap_or_else(|| String::from("main"));
+    // Reuse cache_dir and repo_folder resolved above for the cache check.
+    // BORROW: explicit .to_owned() for &str → owned String
+    let revision = revision_str.to_owned();
 
     let chunked_client = if plan.chunk_threshold < u64::MAX {
         Some(&http_client)

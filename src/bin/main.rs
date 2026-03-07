@@ -564,15 +564,17 @@ fn format_size(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
 
     if bytes >= GIB {
-        // EXPLICIT: f64 cast for display formatting; precision loss negligible
+        // CAST: u64 → f64, precision loss acceptable; value is a display-only size scalar
         #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
         let val = bytes as f64 / GIB as f64;
         format!("{val:.2} GiB")
     } else if bytes >= MIB {
+        // CAST: u64 → f64, precision loss acceptable; value is a display-only size scalar
         #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
         let val = bytes as f64 / MIB as f64;
         format!("{val:.2} MiB")
     } else if bytes >= KIB {
+        // CAST: u64 → f64, precision loss acceptable; value is a display-only size scalar
         #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
         let val = bytes as f64 / KIB as f64;
         format!("{val:.1} KiB")
@@ -584,15 +586,17 @@ fn format_size(bytes: u64) -> String {
 /// Formats a download count with K/M/B suffixes for readability.
 fn format_downloads(n: u64) -> String {
     if n >= 1_000_000_000 {
-        // EXPLICIT: f64 cast for display formatting; precision loss negligible
+        // CAST: u64 → f64, precision loss acceptable; value is a display-only download count
         #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
         let val = n as f64 / 1_000_000_000.0;
         format!("{val:.1}B")
     } else if n >= 1_000_000 {
+        // CAST: u64 → f64, precision loss acceptable; value is a display-only download count
         #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
         let val = n as f64 / 1_000_000.0;
         format!("{val:.1}M")
     } else if n >= 1_000 {
+        // CAST: u64 → f64, precision loss acceptable; value is a display-only download count
         #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
         let val = n as f64 / 1_000.0;
         format!("{val:.1}K")

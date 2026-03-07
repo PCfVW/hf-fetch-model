@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `finalize_chunked_download()` — rename, symlink, and refs file creation.
 - Made `cache::read_ref()` `pub(crate)` so `resolve_cached_file()` can look up commit hashes.
 - Applied CONVENTIONS.md: fixed `# Errors` doc format on `download_file_by_name`, corrected CAST annotation in `progress.rs`.
+- Fixed `// EXPLICIT:` → `// CAST:` annotations on 6 `as` casts in `main.rs` (`format_size`, `format_downloads`).
+- Removed duplicate `cache_dir`/`repo_folder` resolution in `download_file_by_name` (was resolved twice: once for cache check, again for dispatch).
 - All functions now pass `clippy::too_many_lines` (≤100 lines) under `clippy::pedantic`.
 
 ## [0.7.1] — Metadata & Progress Bar Fixes
