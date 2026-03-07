@@ -59,12 +59,13 @@ pub async fn download_all_files(
     // Extract the snapshot directory from any downloaded file path.
     // All files in a repo share the same snapshot directory.
     // hf-hub cache layout: .cache/huggingface/hub/models--org--name/snapshots/<sha>/<relative_path>
-    let (filename, path) = file_map
-        .into_iter()
-        .next()
-        .ok_or_else(|| FetchError::NoFilesMatched {
-            repo_id: repo_id_for_error,
-        })?;
+    let (filename, path) =
+        file_map
+            .into_iter()
+            .next()
+            .ok_or_else(|| FetchError::NoFilesMatched {
+                repo_id: repo_id_for_error,
+            })?;
 
     Ok(snapshot_root(&filename, &path))
 }
