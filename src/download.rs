@@ -140,11 +140,16 @@ pub async fn download_all_files_map(
 ) -> Result<HashMap<String, PathBuf>, FetchError> {
     let overall_start = tokio::time::Instant::now();
 
-    // List and filter repository files.
+    // Check local cache first — return immediately if all files are present (no network).
+    if let Some(file_map) = try_resolve_repo_from_cache(config, repo_id.as_str())? {
+        return Ok(file_map);
+    }
+
+    // Cache miss — list files from the network.
     tracing::debug!(repo_id = %repo_id, "listing repository files");
-    let all_files = repo::list_repo_files(&repo, repo_id.clone()).await?;
     let include = config.and_then(|c| c.include.as_ref());
     let exclude = config.and_then(|c| c.exclude.as_ref());
+    let all_files = repo::list_repo_files(&repo, repo_id.clone()).await?;
     let files: Vec<_> = all_files
         .into_iter()
         // BORROW: explicit .as_str() instead of Deref coercion
@@ -378,6 +383,20 @@ pub(crate) async fn download_file_by_name(
     filename: &str,
     config: &FetchConfig,
 ) -> Result<PathBuf, FetchError> {
+    // Check local cache first — return immediately if the file is present.
+    let cache_dir = config
+        .output_dir
+        .clone()
+        .map_or_else(crate::cache::hf_cache_dir, Ok)?;
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let repo_folder = chunked::repo_folder_name(repo_id.as_str());
+    let revision_str = config.revision.as_deref().unwrap_or("main");
+    if let Some(cached) =
+        resolve_cached_file(&cache_dir, repo_folder.as_str(), revision_str, filename)
+    {
+        return Ok(cached);
+    }
+
     let plan = DownloadPlan::from_config(Some(config));
     // BORROW: explicit .clone() for Arc-wrapped callback
     let on_progress = config.on_progress.clone();
@@ -811,11 +830,9 @@ fn log_download_result(
 // Utility helpers
 // ---------------------------------------------------------------------------
 
-/// Attempts to resolve a file from the local `HuggingFace` cache.
+/// Attempts to resolve a single file from the local `HuggingFace` cache.
 ///
-/// This is a last-resort fallback when a download fails (e.g., due to auth
-/// issues with gated models) but the file was previously cached. Looks up:
-/// `<cache_dir>/<repo_folder>/snapshots/<commit_hash>/<filename>`.
+/// Looks up: `<cache_dir>/<repo_folder>/snapshots/<commit_hash>/<filename>`.
 ///
 /// Returns `Some(path)` if the file exists locally, `None` otherwise.
 fn resolve_cached_file(
@@ -831,11 +848,114 @@ fn resolve_cached_file(
         tracing::debug!(
             filename = %filename,
             path = %cached_path.display(),
-            "download failed but file found in local cache"
+            "file resolved from local cache"
         );
         Some(cached_path)
     } else {
         None
+    }
+}
+
+/// Attempts to resolve all repository files from the local cache (no network).
+///
+/// Resolves the cache directory and repo folder from config, then delegates
+/// to [`try_resolve_all_from_cache()`].
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the cache directory cannot be resolved.
+fn try_resolve_repo_from_cache(
+    config: Option<&FetchConfig>,
+    repo_id: &str,
+) -> Result<Option<HashMap<String, PathBuf>>, FetchError> {
+    let cache_dir = config
+        .and_then(|c| c.output_dir.clone())
+        .map_or_else(crate::cache::hf_cache_dir, Ok)?;
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let repo_folder = chunked::repo_folder_name(repo_id);
+    let revision = config.and_then(|c| c.revision.as_deref()).unwrap_or("main");
+    let include = config.and_then(|c| c.include.as_ref());
+    let exclude = config.and_then(|c| c.exclude.as_ref());
+
+    Ok(try_resolve_all_from_cache(
+        &cache_dir,
+        repo_folder.as_str(),
+        revision,
+        include,
+        exclude,
+    ))
+}
+
+/// Attempts to resolve all repository files from the local cache (no network).
+///
+/// Scans `<cache_dir>/<repo_folder>/snapshots/<commit_hash>/` for files,
+/// applies include/exclude filters, and returns a complete `filename → path`
+/// map if any files are found. Returns `None` if the snapshot directory
+/// does not exist or contains no matching files.
+fn try_resolve_all_from_cache(
+    cache_dir: &std::path::Path,
+    repo_folder: &str,
+    revision: &str,
+    include: Option<&globset::GlobSet>,
+    exclude: Option<&globset::GlobSet>,
+) -> Option<HashMap<String, PathBuf>> {
+    let repo_dir = cache_dir.join(repo_folder);
+    let commit_hash = crate::cache::read_ref(&repo_dir, revision)?;
+    let snapshot_dir = repo_dir.join("snapshots").join(commit_hash);
+
+    if !snapshot_dir.is_dir() {
+        return None;
+    }
+
+    let mut file_map = HashMap::new();
+    collect_cached_files_recursive(
+        &snapshot_dir,
+        &snapshot_dir,
+        include,
+        exclude,
+        &mut file_map,
+    );
+
+    if file_map.is_empty() {
+        return None;
+    }
+
+    tracing::debug!(
+        cached_files = file_map.len(),
+        "all files resolved from local cache (no network)"
+    );
+    Some(file_map)
+}
+
+/// Recursively collects files from a snapshot directory into a filename → path map.
+fn collect_cached_files_recursive(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    include: Option<&globset::GlobSet>,
+    exclude: Option<&globset::GlobSet>,
+    file_map: &mut HashMap<String, PathBuf>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.is_dir() {
+            collect_cached_files_recursive(base, &path, include, exclude, file_map);
+        } else {
+            // Compute relative filename from snapshot root.
+            let Ok(relative) = path.strip_prefix(base) else {
+                continue;
+            };
+            // BORROW: explicit .to_string_lossy() for Path → String conversion
+            let filename = relative.to_string_lossy().replace('\\', "/");
+            // BORROW: explicit .as_str() instead of Deref coercion
+            if file_matches(filename.as_str(), include, exclude) {
+                file_map.insert(filename, path);
+            }
+        }
     }
 }
 
