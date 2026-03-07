@@ -79,8 +79,8 @@ struct ApiModelInfo {
 
 /// Fetches extended file metadata (sizes and SHA256 hashes) via the `HuggingFace` REST API.
 ///
-/// This makes a direct HTTP call to `https://huggingface.co/api/models/{repo_id}`
-/// to retrieve LFS metadata that `hf-hub`'s `info()` does not expose.
+/// This makes a direct HTTP call to `https://huggingface.co/api/models/{repo_id}?blobs=true`
+/// to retrieve file sizes and LFS metadata that `hf-hub`'s `info()` does not expose.
 ///
 /// # Errors
 ///
@@ -91,9 +91,9 @@ pub async fn list_repo_files_with_metadata(
     token: Option<&str>,
     revision: Option<&str>,
 ) -> Result<Vec<RepoFile>, FetchError> {
-    let mut url = format!("https://huggingface.co/api/models/{repo_id}");
+    let mut url = format!("https://huggingface.co/api/models/{repo_id}?blobs=true");
     if let Some(rev) = revision {
-        url = format!("{url}?revision={rev}");
+        url = format!("{url}&revision={rev}");
     }
 
     let client = reqwest::Client::new();

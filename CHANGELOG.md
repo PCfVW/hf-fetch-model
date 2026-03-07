@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — Metadata & Progress Bar Fixes
+
+### Fixed
+
+- `list_repo_files_with_metadata()` did not pass `?blobs=true` to the HuggingFace API, so the response never included file sizes or LFS metadata. Without sizes, all files fell through to single-connection downloads regardless of the `chunk_threshold` setting. Now appends `?blobs=true` to the API URL, enabling chunked multi-connection downloads for large files as intended.
+- `IndicatifProgress` overall file counter showed `9/9` instead of `8/8` for an 8-file repo with one chunked download: the 8-connection chunked download path fired a streaming event with `percent=100.0` when all chunks completed, then the orchestrator fired a second `completed_event` for the same file. Added a `completed_files` `HashSet` to deduplicate completion events.
+
+### Changed
+
+- `IndicatifProgress::handle()` now creates per-file progress bars for in-progress streaming events, showing bytes downloaded, throughput, and ETA. Previously it only tracked completed files via an overall counter, providing no visual feedback during large file downloads.
+
 ## [0.7.0] — Phase 7: Default Chunked Downloads & Download Diagnostics
 
 ### Changed

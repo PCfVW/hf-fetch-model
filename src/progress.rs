@@ -84,8 +84,15 @@ pub(crate) fn streaming_event(
 /// ```
 #[cfg(feature = "indicatif")]
 pub struct IndicatifProgress {
+    // Multi-progress container for all bars.
     multi: indicatif::MultiProgress,
+    // Overall file-count bar (always the last bar in the display).
     overall: indicatif::ProgressBar,
+    /// Per-file progress bars, keyed by filename.
+    file_bars: std::sync::Mutex<std::collections::HashMap<String, indicatif::ProgressBar>>,
+    // Filenames already counted as complete (deduplicates chunked + orchestrator events).
+    completed_files: std::sync::Mutex<std::collections::HashSet<String>>,
+    // Guards against double-finish on drop.
     finished: std::sync::atomic::AtomicBool,
 }
 
@@ -109,6 +116,8 @@ impl IndicatifProgress {
         Self {
             multi,
             overall,
+            file_bars: std::sync::Mutex::new(std::collections::HashMap::new()),
+            completed_files: std::sync::Mutex::new(std::collections::HashSet::new()),
             finished: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -127,14 +136,54 @@ impl IndicatifProgress {
     }
 
     /// Handles a [`ProgressEvent`], updating progress bars.
+    ///
+    /// For in-progress events, creates or updates a per-file progress bar
+    /// showing bytes downloaded, throughput, and ETA. On completion, the
+    /// per-file bar is finished and the overall file counter is incremented.
     pub fn handle(&self, event: &ProgressEvent) {
         if event.percent >= 100.0 {
-            // Derive total: completed so far + this file + remaining
-            // EXPLICIT: try_from for usize → u64 (infallible on 64-bit, safe fallback otherwise)
-            let remaining = u64::try_from(event.files_remaining).unwrap_or(u64::MAX);
-            let total = self.overall.position() + 1 + remaining;
-            self.overall.set_length(total);
-            self.overall.inc(1);
+            // Remove and finish per-file bar if it exists.
+            if let Ok(mut bars) = self.file_bars.lock() {
+                if let Some(bar) = bars.remove(&event.filename) {
+                    bar.finish_and_clear();
+                }
+            }
+            // Deduplicate: chunked downloads fire a streaming 100% event,
+            // then the orchestrator fires a completed_event for the same file.
+            let is_new = self
+                .completed_files
+                .lock()
+                .is_ok_and(|mut set| set.insert(event.filename.clone()));
+            if is_new {
+                // Derive total: completed so far + this file + remaining
+                // EXPLICIT: try_from for usize → u64 (infallible on 64-bit, safe fallback otherwise)
+                let remaining = u64::try_from(event.files_remaining).unwrap_or(u64::MAX);
+                let total = self.overall.position() + 1 + remaining;
+                self.overall.set_length(total);
+                self.overall.inc(1);
+            }
+        } else if event.bytes_total > 0 {
+            // In-progress streaming update — create or update per-file bar.
+            if let Ok(mut bars) = self.file_bars.lock() {
+                let bar = bars.entry(event.filename.clone()).or_insert_with(|| {
+                    let pb = self.multi.insert_before(
+                        &self.overall,
+                        indicatif::ProgressBar::new(event.bytes_total),
+                    );
+                    pb.set_style(
+                        indicatif::ProgressStyle::default_bar()
+                            .template(
+                                "{msg} [{bar:40.green/dim}] {bytes}/{total_bytes} {bytes_per_sec} ({eta})",
+                            )
+                            .ok()
+                            .unwrap_or_else(indicatif::ProgressStyle::default_bar)
+                            .progress_chars("=> "),
+                    );
+                    pb.set_message(event.filename.clone());
+                    pb
+                });
+                bar.set_position(event.bytes_downloaded);
+            }
         }
     }
 
