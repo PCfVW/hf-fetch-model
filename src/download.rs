@@ -89,6 +89,7 @@ pub async fn download_all_files_map(
     let overall_start = tokio::time::Instant::now();
 
     // Fetch file list with basic metadata from hf-hub.
+    tracing::debug!(repo_id = %repo_id, "listing repository files");
     let all_files = repo::list_repo_files(&repo, repo_id.clone()).await?;
 
     // Apply include/exclude filters.
@@ -107,15 +108,34 @@ pub async fn download_all_files_map(
     let chunk_threshold = config.map_or(u64::MAX, |c| c.chunk_threshold);
     let needs_metadata = verify_checksums || chunk_threshold < u64::MAX;
     let metadata_map = if needs_metadata {
-        fetch_metadata_map(
+        tracing::debug!("fetching extended metadata (checksums={verify_checksums}, chunk_threshold={chunk_threshold} bytes)");
+        match fetch_metadata_map(
             // BORROW: explicit .as_str() instead of Deref coercion
             repo_id.as_str(),
             config.and_then(|c| c.token.as_deref()),
             config.and_then(|c| c.revision.as_deref()),
         )
         .await
-        .unwrap_or_default()
+        {
+            Ok(map) => {
+                let with_size = map.values().filter(|f| f.size.is_some()).count();
+                tracing::debug!(
+                    files_with_size = with_size,
+                    total_files = map.len(),
+                    "metadata fetch succeeded"
+                );
+                map
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "metadata fetch failed; chunked downloads disabled for this run"
+                );
+                HashMap::new()
+            }
+        }
     } else {
+        tracing::debug!("skipping metadata fetch (checksums disabled, chunk_threshold=MAX)");
         HashMap::new()
     };
 
@@ -158,6 +178,16 @@ pub async fn download_all_files_map(
     let chunked_token = Arc::new(config.and_then(|c| c.token.clone()));
 
     let total = files.len();
+    let chunked_enabled = chunked_client.is_some();
+    tracing::debug!(
+        total_files = total,
+        concurrency = concurrency,
+        connections_per_file = connections_per_file,
+        chunk_threshold_mib = chunk_threshold / 1_048_576,
+        chunked_enabled = chunked_enabled,
+        verify_checksums = verify_checksums,
+        "download plan"
+    );
 
     // Wrap shared state in Arc for concurrent task access.
     let repo = Arc::new(repo);
@@ -201,9 +231,16 @@ pub async fn download_all_files_map(
         join_set.spawn(async move {
             // Determine file size from metadata for chunked download decision.
             let file_size = task_meta.get(file.filename.as_str()).and_then(|m| m.size);
+            let file_start = tokio::time::Instant::now();
 
             let result = if let (Some(size), Some(ref client)) = (file_size, &task_chunked_client) {
                 if size >= chunk_threshold {
+                    tracing::debug!(
+                        filename = %file.filename,
+                        size_mib = size / 1_048_576,
+                        connections = connections_per_file,
+                        "chunked download (multi-connection)"
+                    );
                     download_single_file_chunked(
                         client,
                         &file,
@@ -221,6 +258,11 @@ pub async fn download_all_files_map(
                     )
                     .await
                 } else {
+                    tracing::debug!(
+                        filename = %file.filename,
+                        size_mib = size / 1_048_576,
+                        "single-connection download (below chunk threshold)"
+                    );
                     download_single_file(
                         &task_repo,
                         &file,
@@ -232,6 +274,17 @@ pub async fn download_all_files_map(
                     .await
                 }
             } else {
+                let reason = if file_size.is_none() {
+                    "file size unknown (metadata missing)"
+                } else {
+                    "chunked downloads disabled"
+                };
+                tracing::debug!(
+                    filename = %file.filename,
+                    file_size = ?file_size,
+                    reason = reason,
+                    "single-connection download"
+                );
                 download_single_file(
                     &task_repo,
                     &file,
@@ -257,6 +310,36 @@ pub async fn download_all_files_map(
             } else {
                 result
             };
+
+            let elapsed = file_start.elapsed();
+            match &result {
+                Ok(_) => {
+                    if let Some(size) = file_size {
+                        // CAST: u64 → f64, precision loss acceptable; value is a display-only throughput scalar
+                        #[allow(clippy::as_conversions, clippy::cast_precision_loss)]
+                        let mbps = (size as f64 * 8.0) / elapsed.as_secs_f64() / 1_000_000.0;
+                        tracing::debug!(
+                            filename = %file.filename,
+                            elapsed_secs = format_args!("{:.1}", elapsed.as_secs_f64()),
+                            throughput_mbps = format_args!("{mbps:.1}"),
+                            "download complete"
+                        );
+                    } else {
+                        tracing::debug!(
+                            filename = %file.filename,
+                            elapsed_secs = format_args!("{:.1}", elapsed.as_secs_f64()),
+                            "download complete (size unknown)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        filename = %file.filename,
+                        error = %e,
+                        "download failed"
+                    );
+                }
+            }
 
             drop(permit);
             (file, result)
@@ -323,6 +406,14 @@ pub async fn download_all_files_map(
             repo_id: String::from("(empty repository or all files filtered out)"),
         });
     }
+
+    let total_elapsed = overall_start.elapsed();
+    tracing::debug!(
+        files_downloaded = file_map.len(),
+        files_failed = failures.len(),
+        total_elapsed_secs = format_args!("{:.1}", total_elapsed.as_secs_f64()),
+        "download complete"
+    );
 
     Ok(file_map)
 }

@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — Phase 7: Default Chunked Downloads & Download Diagnostics
+
+### Changed
+
+- `download()` and `download_files()` now delegate to their `_with_config` counterparts with a default `FetchConfig`, enabling multi-connection chunked downloads (≥100 MiB, 8 connections per file) by default. Previously, these functions bypassed `FetchConfig` entirely and used single-connection downloads via hf-hub's `.get()`, even though the multi-connection infrastructure existed.
+- Eliminated duplicated `ApiBuilder` setup code in `download()` and `download_files()` — both are now 2-line delegating functions.
+
+### Added
+
+- `tracing` dependency (0.1) for structured download diagnostics at `debug` level:
+  - **Download plan**: total files, concurrency, connections per file, chunk threshold, checksums enabled/disabled.
+  - **Metadata fetch**: success with file count and size availability, or warning on failure (explains why chunked downloads may be disabled).
+  - **Per-file decision**: whether each file uses chunked (multi-connection) or single-connection download, with file size and reason.
+  - **Per-file completion**: elapsed time and throughput in Mbps (when file size is known).
+  - **Overall summary**: total files downloaded, failures, and elapsed time.
+- Enable diagnostics by initializing a `tracing` subscriber at `debug` level (e.g., `RUST_LOG=debug`).
+
+### Fixed
+
+- `download()` and `download_files()` silently using single-connection downloads because they passed `config: None` to the internal orchestrator, which set `chunk_threshold = u64::MAX` — effectively disabling the chunked download path that was available since 0.5.0.
+
 ## [0.6.0] — Phase 6: Single-File Download API
 
 ### Added

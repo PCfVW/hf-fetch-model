@@ -12,7 +12,8 @@
 
 - **Single-file download** — download one file by name, get its cache path
 - **Repo-level download** — give it a model ID, get all files
-- **Maximum throughput** — multi-connection parallel Range downloads for large files (8 connections by default), plus hf-hub's `.high()` mode
+- **Maximum throughput** — multi-connection parallel Range downloads for large files (≥100 MiB, 8 connections by default) enabled for **all** download functions, plus hf-hub's `.high()` mode
+- **Download diagnostics** — structured `tracing` events at `debug` level report download plan, per-file chunked/single decisions, throughput, and completion summary
 - **File filtering** — glob patterns (`*.safetensors`) and presets (`safetensors`, `gguf`, `config-only`)
 - **HF cache compatible** — files stored in `~/.cache/huggingface/hub/`
 - **Progress reporting** — per-file callbacks, optional `indicatif` progress bars
@@ -153,6 +154,26 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`).
 | `-V`, `--version` | Print version |
 
 Subcommands accept their own flags (e.g., `--limit` for `search` and `discover`). Run `hf-fm <command> --help` for details.
+
+## Download Diagnostics
+
+hf-fetch-model emits structured `tracing` events at `debug` level to help diagnose download performance. Enable them by setting `RUST_LOG=debug` (or `RUST_LOG=hf_fetch_model=debug` for this crate only) with a `tracing-subscriber`:
+
+```
+DEBUG hf_fetch_model: listing repository files repo_id="allenai/OLMo-1B-hf"
+DEBUG hf_fetch_model: metadata fetch succeeded files_with_size=8 total_files=8
+DEBUG hf_fetch_model: download plan total_files=8 concurrency=4 connections_per_file=8 chunk_threshold_mib=100 chunked_enabled=true
+DEBUG hf_fetch_model: chunked download (multi-connection) filename="model.safetensors" size_mib=2475 connections=8
+DEBUG hf_fetch_model: single-connection download (below chunk threshold) filename="config.json" size_mib=0
+DEBUG hf_fetch_model: download complete filename="model.safetensors" elapsed_secs="23.1" throughput_mbps="857.2"
+DEBUG hf_fetch_model: download complete files_downloaded=8 files_failed=0 total_elapsed_secs="24.3"
+```
+
+Key diagnostics:
+- **"metadata fetch failed"** (warning): file sizes are unknown, so chunked downloads are disabled — all files use single-connection download.
+- **"single-connection download" with reason "file size unknown"**: metadata was not available for this file.
+- **"chunked download"**: file exceeds `chunk_threshold` and is being downloaded with multiple parallel HTTP Range connections.
+- **throughput_mbps**: actual per-file throughput, useful for comparing single vs chunked performance.
 
 ## Architecture
 

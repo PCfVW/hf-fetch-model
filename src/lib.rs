@@ -71,8 +71,10 @@ use hf_hub::{Repo, RepoType};
 
 /// Downloads all files from a `HuggingFace` model repository.
 ///
-/// Uses high-throughput mode for maximum download speed. Files are stored
-/// in the standard `HuggingFace` cache layout (`~/.cache/huggingface/hub/`).
+/// Uses high-throughput mode for maximum download speed, including
+/// multi-connection chunked downloads for large files (≥100 MiB by default,
+/// 8 parallel connections per file). Files are stored in the standard
+/// `HuggingFace` cache layout (`~/.cache/huggingface/hub/`).
 ///
 /// Authentication is handled via the `HF_TOKEN` environment variable when set.
 ///
@@ -91,14 +93,10 @@ use hf_hub::{Repo, RepoType};
 /// * [`FetchError::Api`] — if the `HuggingFace` API or download fails.
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
 /// * [`FetchError::Auth`] — if authentication is required but fails.
+/// * [`FetchError::InvalidPattern`] — if the default config fails to build (should not happen).
 pub async fn download(repo_id: String) -> Result<PathBuf, FetchError> {
-    let api = hf_hub::api::tokio::ApiBuilder::new()
-        .high()
-        .build()
-        .map_err(FetchError::Api)?;
-
-    let repo = api.model(repo_id.clone());
-    download::download_all_files(repo, repo_id, None).await
+    let config = FetchConfig::builder().build()?;
+    download_with_config(repo_id, &config).await
 }
 
 /// Downloads files from a `HuggingFace` model repository using the given configuration.
@@ -192,6 +190,9 @@ pub fn download_with_config_blocking(
 /// `"config.json"`, `"model.safetensors"`), and each value is the
 /// absolute local path to the downloaded file.
 ///
+/// Uses the same high-throughput defaults as [`download()`]: multi-connection
+/// chunked downloads for large files (≥100 MiB, 8 parallel connections).
+///
 /// For filtering, progress, and other options, use
 /// [`download_files_with_config()`].
 ///
@@ -204,14 +205,10 @@ pub fn download_with_config_blocking(
 /// * [`FetchError::Api`] — if the `HuggingFace` API or download fails.
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
 /// * [`FetchError::Auth`] — if authentication is required but fails.
+/// * [`FetchError::InvalidPattern`] — if the default config fails to build (should not happen).
 pub async fn download_files(repo_id: String) -> Result<HashMap<String, PathBuf>, FetchError> {
-    let api = hf_hub::api::tokio::ApiBuilder::new()
-        .high()
-        .build()
-        .map_err(FetchError::Api)?;
-
-    let repo = api.model(repo_id.clone());
-    download::download_all_files_map(repo, repo_id, None).await
+    let config = FetchConfig::builder().build()?;
+    download_files_with_config(repo_id, &config).await
 }
 
 /// Downloads files from a `HuggingFace` model repository using the given
