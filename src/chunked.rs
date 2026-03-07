@@ -363,7 +363,7 @@ pub(crate) async fn download_chunked(
         match join_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => failures.push(e.to_string()),
-            Err(e) => failures.push(format!("task panicked: {e}")),
+            Err(e) => failures.push(format!("chunk task failed: {e}")),
         }
     }
 

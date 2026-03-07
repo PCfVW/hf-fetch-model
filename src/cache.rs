@@ -263,7 +263,7 @@ pub async fn repo_status(
                 } else {
                     FileStatus::Complete { local_size }
                 }
-            } else if has_partial_blob(&blobs_dir, remote.filename.as_str()) {
+            } else if has_partial_blob(&blobs_dir) {
                 // Check blobs for .chunked.part temp files
                 let part_size = find_partial_blob_size(&blobs_dir);
                 FileStatus::Partial {
@@ -417,9 +417,11 @@ fn read_ref(repo_dir: &Path, revision: &str) -> Option<String> {
 }
 
 /// Checks whether any `.chunked.part` temp file exists in the blobs directory.
-fn has_partial_blob(blobs_dir: &Path, _filename: &str) -> bool {
-    // We can't easily map filename → blob etag without the full metadata,
-    // so we just check for any .chunked.part files as a heuristic.
+///
+/// This is a repo-level heuristic: it cannot map a specific filename to its
+/// blob without full LFS metadata, so it checks for any `.chunked.part` file.
+/// A `true` result means *some* file in the repo has a partial download.
+fn has_partial_blob(blobs_dir: &Path) -> bool {
     find_partial_blob_size(blobs_dir) > 0
 }
 

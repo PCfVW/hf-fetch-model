@@ -561,7 +561,14 @@ pub(crate) async fn download_file_by_name(
             config.revision.as_deref(),
         )
         .await
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                filename = %filename,
+                error = %e,
+                "metadata fetch failed; file size unknown, chunked download disabled"
+            );
+            HashMap::new()
+        })
     } else {
         HashMap::new()
     };

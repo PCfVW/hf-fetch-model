@@ -90,9 +90,8 @@ use hf_hub::{Repo, RepoType};
 ///
 /// # Errors
 ///
-/// * [`FetchError::Api`] — if the `HuggingFace` API or download fails.
+/// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
-/// * [`FetchError::Auth`] — if authentication is required but fails.
 /// * [`FetchError::InvalidPattern`] — if the default config fails to build (should not happen).
 pub async fn download(repo_id: String) -> Result<PathBuf, FetchError> {
     let config = FetchConfig::builder().build()?;
@@ -115,9 +114,8 @@ pub async fn download(repo_id: String) -> Result<PathBuf, FetchError> {
 ///
 /// # Errors
 ///
-/// * [`FetchError::Api`] — if the `HuggingFace` API or download fails.
+/// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
-/// * [`FetchError::Auth`] — if authentication is required but fails.
 pub async fn download_with_config(
     repo_id: String,
     config: &FetchConfig,
@@ -202,9 +200,8 @@ pub fn download_with_config_blocking(
 ///
 /// # Errors
 ///
-/// * [`FetchError::Api`] — if the `HuggingFace` API or download fails.
+/// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
-/// * [`FetchError::Auth`] — if authentication is required but fails.
 /// * [`FetchError::InvalidPattern`] — if the default config fails to build (should not happen).
 pub async fn download_files(repo_id: String) -> Result<HashMap<String, PathBuf>, FetchError> {
     let config = FetchConfig::builder().build()?;
@@ -225,9 +222,8 @@ pub async fn download_files(repo_id: String) -> Result<HashMap<String, PathBuf>,
 ///
 /// # Errors
 ///
-/// * [`FetchError::Api`] — if the `HuggingFace` API or download fails.
+/// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
-/// * [`FetchError::Auth`] — if authentication is required but fails.
 pub async fn download_files_with_config(
     repo_id: String,
     config: &FetchConfig,

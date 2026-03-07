@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `download()` and `download_files()` silently using single-connection downloads because they passed `config: None` to the internal orchestrator, which set `chunk_threshold = u64::MAX` — effectively disabling the chunked download path that was available since 0.5.0.
 - `FetchError::RepoNotFound` was returned when a repository existed but had no files after filtering. Added `FetchError::NoFilesMatched` variant to distinguish "repo not found" from "repo exists but zero files matched".
+- Single-file download (`download_file_by_name`) silently swallowed metadata fetch failures via `.unwrap_or_default()`. Now logs a `tracing::warn!` explaining that file size is unknown and chunked download is disabled.
+- `search_models()` interpolated the query string directly into the URL without encoding. Now uses reqwest's `.query()` builder for proper URL encoding of special characters.
+- `has_partial_blob()` accepted a `_filename` parameter it never used. Removed the unused parameter; added doc comment clarifying the repo-level heuristic.
+- Public API docs on `download()`, `download_with_config()`, `download_files()`, and `download_files_with_config()` incorrectly promised `FetchError::Auth` for authentication failures. Auth errors currently surface as `FetchError::Api` via hf-hub; docs updated accordingly. The `Auth` variant is retained (reserved for future use).
+- Added field-level documentation to all `pub(crate)` fields in `FetchConfig`.
+- `retry_async()` used a `last_error` accumulator with an awkward synthetic fallback. Restructured with match guards so success and final-failure exits are explicit.
+- Chunked download error message said "task panicked" for all `JoinError`s, which can also represent cancellation. Changed to "chunk task failed".
 
 ## [0.6.0] — Phase 6: Single-File Download API
 

@@ -36,19 +36,32 @@ pub(crate) type ProgressCallback = Arc<dyn Fn(&ProgressEvent) + Send + Sync>;
 /// # }
 /// ```
 pub struct FetchConfig {
+    /// Git revision (branch, tag, or commit SHA). `None` means `"main"`.
     pub(crate) revision: Option<String>,
+    /// Authentication token for gated/private repositories.
     pub(crate) token: Option<String>,
+    /// Compiled include glob patterns. Only matching files are downloaded.
     pub(crate) include: Option<GlobSet>,
+    /// Compiled exclude glob patterns. Matching files are skipped.
     pub(crate) exclude: Option<GlobSet>,
+    /// Number of files to download in parallel.
     pub(crate) concurrency: usize,
+    /// Custom cache directory (overrides the default HF cache).
     pub(crate) output_dir: Option<PathBuf>,
+    /// Maximum time allowed for a single file download.
     pub(crate) timeout_per_file: Option<Duration>,
+    /// Maximum total time for the entire download operation.
     pub(crate) timeout_total: Option<Duration>,
+    /// Maximum retry attempts per file (exponential backoff with jitter).
     pub(crate) max_retries: u32,
+    /// Whether to verify SHA256 checksums against HF LFS metadata.
     pub(crate) verify_checksums: bool,
+    /// Minimum file size (bytes) for multi-connection chunked download.
     pub(crate) chunk_threshold: u64,
+    /// Number of parallel HTTP Range connections per large file.
     pub(crate) connections_per_file: usize,
     // TRAIT_OBJECT: heterogeneous progress handlers from different callers
+    /// Progress callback invoked for each download event.
     pub(crate) on_progress: Option<ProgressCallback>,
 }
 

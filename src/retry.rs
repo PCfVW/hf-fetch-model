@@ -44,26 +44,23 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, FetchError>>,
 {
-    let mut last_error: Option<FetchError> = None;
-
     for attempt in 0..=policy.max_retries {
         match operation().await {
             Ok(value) => return Ok(value),
-            Err(e) => {
-                if attempt == policy.max_retries || !is_retryable(&e) {
-                    return Err(e);
-                }
-                last_error = Some(e);
-
+            Err(e) if attempt == policy.max_retries || !is_retryable(&e) => {
+                return Err(e);
+            }
+            Err(_) => {
                 let delay = compute_delay(policy, attempt);
                 tokio::time::sleep(delay).await;
             }
         }
     }
 
-    // This is unreachable in practice (the loop always returns), but
-    // satisfies the compiler without unwrap().
-    Err(last_error.unwrap_or_else(|| FetchError::Http("retry exhausted".to_owned())))
+    // Structurally unreachable: the loop runs at least once (0..=0) and
+    // every iteration returns on Ok or final attempt. Required by the
+    // compiler because `for` ranges are not proven exhaustive.
+    Err(FetchError::Http("retry exhausted (unreachable)".to_owned()))
 }
 
 /// Computes the delay for a given attempt using exponential backoff + jitter.
