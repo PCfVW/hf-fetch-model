@@ -88,12 +88,18 @@ enum Commands {
         limit: usize,
     },
     /// Search the `HuggingFace` Hub for models matching a query.
+    ///
+    /// Supports comma-separated multi-term filtering (e.g., `"mistral,3B,12"`).
+    /// Slashes in queries are treated as spaces for broader matching.
     Search {
-        /// Search query (e.g., "RWKV-7", "llama 3").
+        /// Search query (e.g., `"RWKV-7"`, `"llama 3"`, `"mistral,3B,12"`).
         query: String,
         /// Maximum number of results.
         #[arg(long, default_value = "20")]
         limit: usize,
+        /// Return only the exact model ID match; show model card metadata if found.
+        #[arg(long)]
+        exact: bool,
     },
     /// Download a single file from a `HuggingFace` repository.
     DownloadFile {
@@ -210,7 +216,11 @@ fn run(cli: Cli) -> Result<(), FetchError> {
         Some(Commands::ListFamilies) => run_list_families(),
         Some(Commands::Discover { limit }) => run_discover(limit),
         // BORROW: explicit .as_str() for String → &str conversion
-        Some(Commands::Search { query, limit }) => run_search(query.as_str(), limit),
+        Some(Commands::Search {
+            query,
+            limit,
+            exact,
+        }) => run_search(query.as_str(), limit, exact),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::DownloadFile {
             verbose: _,
@@ -419,29 +429,136 @@ fn run_discover(limit: usize) -> Result<(), FetchError> {
     Ok(())
 }
 
-fn run_search(query: &str, limit: usize) -> Result<(), FetchError> {
+fn run_search(query: &str, limit: usize, exact: bool) -> Result<(), FetchError> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
         path: PathBuf::from("<runtime>"),
         source: e,
     })?;
 
-    let results = rt.block_on(discover::search_models(query, limit))?;
+    // When the query contains commas, treat both `,` and `/` as term separators
+    // so that "mistralai/3B,12" becomes ["mistralai", "3B", "12"].
+    // Without commas, just normalize `/` to space for the API query
+    // so that "mistralai/3B" becomes "mistralai 3B" (broader API matching).
+    let has_commas = query.contains(',');
+    let normalized = if has_commas {
+        query.replace('/', ",")
+    } else {
+        query.replace('/', " ")
+    };
 
-    if results.is_empty() {
-        println!("No models found matching \"{query}\".");
-        return Ok(());
-    }
+    // Split on `,` for multi-term filtering; first term goes to the API,
+    // all terms are used for client-side filtering.
+    let terms: Vec<&str> = normalized
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect();
 
-    println!("Models matching \"{query}\" (by downloads):\n");
-    for result in &results {
-        println!(
-            "  hf-fm {:<48} ({} downloads)",
-            result.model_id,
-            format_downloads(result.downloads)
-        );
+    let api_query = terms.first().copied().unwrap_or(normalized.as_str()); // BORROW: explicit .as_str()
+
+    let filter_terms: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+
+    // Oversample when filtering: request more from API to compensate for
+    // client-side filtering that will discard non-matching results.
+    let api_limit = if filter_terms.len() > 1 {
+        limit.saturating_mul(5)
+    } else {
+        limit
+    };
+
+    let results = rt.block_on(discover::search_models(api_query, api_limit))?;
+
+    // Client-side filtering: only applied when there are multiple comma-separated
+    // terms. Single-term queries trust the API results as-is.
+    // Model IDs are normalized the same way as the query (slash → space) so that
+    // mixed queries like "mistralai/3B,12" match "mistralai/Ministral-3-3B...".
+    let has_multi_term = filter_terms.len() > 1;
+    let filtered: Vec<&discover::SearchResult> = results
+        .iter()
+        .filter(|r| {
+            if !has_multi_term {
+                return true;
+            }
+            let id_normalized = r.model_id.replace('/', " ").to_lowercase();
+            filter_terms
+                .iter()
+                .all(|term| id_normalized.contains(term.as_str())) // BORROW: explicit .as_str()
+        })
+        .take(limit)
+        .collect();
+
+    if exact {
+        // Exact match: compare against the original query (not normalized)
+        let exact_match = filtered
+            .iter()
+            .find(|r| r.model_id.eq_ignore_ascii_case(query));
+
+        if let Some(matched) = exact_match {
+            println!("Exact match:\n");
+            print_search_result(matched);
+
+            // Fetch and display model card metadata
+            match rt.block_on(discover::fetch_model_card(
+                matched.model_id.as_str(), // BORROW: explicit .as_str()
+            )) {
+                Ok(card) => print_model_card(&card),
+                Err(e) => eprintln!("\n  (could not fetch model card: {e})"),
+            }
+        } else {
+            println!("No exact match for \"{query}\".");
+            if !filtered.is_empty() {
+                println!("\nDid you mean:\n");
+                for result in &filtered {
+                    print_search_result(result);
+                }
+            }
+        }
+    } else {
+        // Normal search display
+        if filtered.is_empty() {
+            println!("No models found matching \"{query}\".");
+        } else {
+            println!("Models matching \"{query}\" (by downloads):\n");
+            for result in &filtered {
+                print_search_result(result);
+            }
+        }
     }
 
     Ok(())
+}
+
+fn print_search_result(result: &discover::SearchResult) {
+    println!(
+        "  hf-fm {:<48} ({} downloads)",
+        result.model_id,
+        format_downloads(result.downloads)
+    );
+}
+
+fn print_model_card(card: &discover::ModelCardMetadata) {
+    println!();
+    if let Some(ref license) = card.license {
+        println!("  License:      {license}");
+    }
+    if card.gated.is_gated() {
+        println!(
+            "  Gated:        {} (requires accepting terms on HF)",
+            card.gated
+        );
+    }
+    if let Some(ref pipeline) = card.pipeline_tag {
+        println!("  Pipeline:     {pipeline}");
+    }
+    if let Some(ref library) = card.library_name {
+        println!("  Library:      {library}");
+    }
+    if !card.tags.is_empty() {
+        println!("  Tags:         {}", card.tags.join(", "));
+    }
+    if !card.languages.is_empty() {
+        println!("  Languages:    {}", card.languages.join(", "));
+    }
 }
 
 fn run_status_all() -> Result<(), FetchError> {

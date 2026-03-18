@@ -63,6 +63,7 @@ pub mod repo;
 mod retry;
 
 pub use config::{FetchConfig, FetchConfigBuilder, Filter};
+pub use discover::{GateStatus, ModelCardMetadata, SearchResult};
 pub use download::DownloadOutcome;
 pub use error::{FetchError, FileFailure};
 pub use progress::ProgressEvent;

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Model family discovery via the `HuggingFace` Hub API.
+//! Model family discovery and search via the `HuggingFace` Hub API.
 //!
 //! Queries the HF Hub for popular models, extracts `model_type` metadata,
-//! and compares against locally cached families.
+//! compares against locally cached families, and fetches model card metadata.
 
 use std::collections::BTreeMap;
 use std::hash::BuildHasher;
@@ -47,6 +47,106 @@ struct ApiModelEntry {
 #[derive(Debug, Deserialize)]
 struct ApiConfig {
     model_type: Option<String>,
+}
+
+/// Access control status of a model on the `HuggingFace` Hub.
+///
+/// Some models require users to accept license terms before downloading.
+/// The gating mode determines whether approval is automatic or manual.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GateStatus {
+    /// No gate — anyone can download without restrictions.
+    Open,
+    /// Automatic approval after the user accepts terms on the Hub.
+    Auto,
+    /// Manual approval by the model author after the user requests access.
+    Manual,
+}
+
+impl GateStatus {
+    /// Returns `true` if the model requires accepting terms before download.
+    #[must_use]
+    pub const fn is_gated(&self) -> bool {
+        matches!(self, Self::Auto | Self::Manual)
+    }
+}
+
+impl std::fmt::Display for GateStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open => write!(f, "open"),
+            Self::Auto => write!(f, "auto"),
+            Self::Manual => write!(f, "manual"),
+        }
+    }
+}
+
+/// Metadata from a `HuggingFace` model card.
+///
+/// Extracted from the single-model API endpoint
+/// (`GET /api/models/{owner}/{model}`). All fields are optional
+/// because model cards may omit any of them.
+#[derive(Debug, Clone)]
+pub struct ModelCardMetadata {
+    /// SPDX license identifier (e.g., `"apache-2.0"`).
+    pub license: Option<String>,
+    /// Pipeline tag (e.g., `"text-generation"`).
+    pub pipeline_tag: Option<String>,
+    /// Tags associated with the model (e.g., `["pytorch", "safetensors"]`).
+    pub tags: Vec<String>,
+    /// Library name (e.g., `"transformers"`, `"vllm"`).
+    pub library_name: Option<String>,
+    /// Languages the model supports (e.g., `["en", "fr"]`).
+    pub languages: Vec<String>,
+    /// Access control status (open, auto-gated, or manually gated).
+    pub gated: GateStatus,
+}
+
+/// JSON response for a single model from `GET /api/models/{model_id}`.
+#[derive(Debug, Deserialize)]
+struct ApiModelDetail {
+    #[serde(default)]
+    pipeline_tag: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    library_name: Option<String>,
+    #[serde(default)]
+    gated: ApiGated,
+    #[serde(default, rename = "cardData")]
+    card_data: Option<ApiCardData>,
+}
+
+/// The `cardData` sub-object (parsed YAML front matter from the model README).
+#[derive(Debug, Deserialize)]
+struct ApiCardData {
+    #[serde(default)]
+    license: Option<String>,
+    #[serde(default)]
+    language: Option<ApiLanguage>,
+}
+
+/// Languages in `cardData` can be a single string or a list of strings.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ApiLanguage {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+/// The `gated` field can be `false` (boolean) or a string like `"auto"` / `"manual"`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ApiGated {
+    Bool(bool),
+    Mode(String),
+}
+
+impl Default for ApiGated {
+    fn default() -> Self {
+        Self::Bool(false)
+    }
 }
 
 const PAGE_SIZE: usize = 100;
@@ -176,4 +276,65 @@ pub async fn search_models(query: &str, limit: usize) -> Result<Vec<SearchResult
         .collect();
 
     Ok(results)
+}
+
+/// Fetches model card metadata for a specific model from the `HuggingFace` Hub.
+///
+/// Queries `GET https://huggingface.co/api/models/{model_id}` and extracts
+/// license, pipeline tag, tags, library name, and languages from the response.
+///
+/// # Arguments
+///
+/// * `model_id` — The full model identifier (e.g., `"mistralai/Ministral-3-3B-Instruct-2512"`).
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`] if the API request fails or the model is not found.
+pub async fn fetch_model_card(model_id: &str) -> Result<ModelCardMetadata, FetchError> {
+    let client = reqwest::Client::new();
+    let url = format!("{HF_API_BASE}/{model_id}");
+
+    let response = client
+        .get(url.as_str()) // BORROW: explicit .as_str()
+        .send()
+        .await
+        .map_err(|e| FetchError::Http(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(FetchError::Http(format!(
+            "HF API returned status {} for model {model_id}",
+            response.status()
+        )));
+    }
+
+    let detail: ApiModelDetail = response
+        .json()
+        .await
+        .map_err(|e| FetchError::Http(e.to_string()))?;
+
+    let (license, languages) = if let Some(card) = detail.card_data {
+        let langs = match card.language {
+            Some(ApiLanguage::Single(s)) => vec![s],
+            Some(ApiLanguage::Multiple(v)) => v,
+            None => Vec::new(),
+        };
+        (card.license, langs)
+    } else {
+        (None, Vec::new())
+    };
+
+    let gated = match detail.gated {
+        ApiGated::Bool(false) => GateStatus::Open,
+        ApiGated::Mode(ref mode) if mode.eq_ignore_ascii_case("manual") => GateStatus::Manual,
+        ApiGated::Bool(true) | ApiGated::Mode(_) => GateStatus::Auto,
+    };
+
+    Ok(ModelCardMetadata {
+        license,
+        pipeline_tag: detail.pipeline_tag,
+        tags: detail.tags,
+        library_name: detail.library_name,
+        languages,
+        gated,
+    })
 }
