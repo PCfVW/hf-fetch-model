@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] — Smarter Search & Documentation Overhaul
+
+### Added
+
+- **Search: slash normalization** — `/` in search queries is now replaced with a space before querying the HF API, so `hf-fm search mistralai/3B` works as expected.
+- **Search: comma-separated multi-term filtering** — `hf-fm search mistral,3B,12` splits on `,`, sends the first term to the API, then filters results client-side to keep only models whose ID contains all terms.
+- **Search: `--exact` flag** — `hf-fm search <model_id> --exact` returns only the exact match. On miss, shows "Did you mean:" suggestions from the fuzzy results.
+- **Search: model card metadata** — when `--exact` finds a match, fetches and displays license, gating status, pipeline tag, library, tags, and languages from the HF model card API.
+- `ModelCardMetadata` struct and `fetch_model_card()` function in `discover` module.
+- `GateStatus` enum (`Open`, `Auto`, `Manual`) with `is_gated()` accessor and `Display` impl, re-exported at crate root.
+- Re-exported `SearchResult`, `ModelCardMetadata`, and `GateStatus` at the crate root.
+
+### Fixed
+
+- Backtick hygiene: wrapped all `hf-hub` references in doc comments with backticks across `chunked.rs`, `download.rs`, and `error.rs` (14 occurrences).
+
+### Changed
+
+- Rewrote `README.md` as a short landing page (~70 lines) with install, try-it flow, and library quick start. Moved detailed content to topic-specific docs: `docs/cli-reference.md`, `docs/search.md`, `docs/configuration.md`, `docs/architecture.md`, `docs/diagnostics.md`.
+- Added `homepage` and `documentation` fields to `Cargo.toml` for crates.io metadata links.
+- Tailored `CONVENTIONS.md` for hf-fetch-model: removed candle-mi-specific sections (PROMOTE, CONTIGUOUS, Shape Documentation, Hook Purity Contract, Memory Doc Section, OOM-safe Decoder Loading Pattern), added Intra-Doc Link Safety rules, adapted all examples and error types to use `FetchError` instead of `MIError`.
+
 ## [0.7.2] — Cache Fallback & Download Refactor
 
 ### Fixed

@@ -60,6 +60,7 @@ Filter, progress, auth, and more via the builder — see [Configuration](docs/co
 | [Configuration](docs/configuration.md) | Builder API, presets, progress callbacks |
 | [Architecture](docs/architecture.md) | How hf-fetch-model relates to `hf-hub` and `candle-mi` |
 | [Diagnostics](docs/diagnostics.md) | `--verbose` output, `tracing` setup for library users |
+| [Changelog](CHANGELOG.md) | Release history and migration notes |
 
 ## Used by
 
