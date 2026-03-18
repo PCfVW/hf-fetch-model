@@ -1,6 +1,6 @@
-# candle-mi Coding Conventions (Grit + Grit-MI Extensions)
+# hf-fetch-model Coding Conventions (Grit + Grit-MI Extensions)
 
-This document describes the [Amphigraphic coding](https://github.com/PCfVW/Amphigraphic-Strict) conventions used in candle-mi. It is a superset of
+This document describes the [Amphigraphic coding](https://github.com/PCfVW/Amphigraphic-Strict) conventions used in hf-fetch-model. It is a superset of
 the [Grit — Strict Rust for AI-Assisted Development](https://github.com/PCfVW/Amphigraphic-Strict/tree/master/Grit).
 
 ## Annotation Patterns
@@ -18,28 +18,7 @@ Required on `#[allow(clippy::exhaustive_enums)]`.
 ### `// EXPLICIT: <reason>`
 Required when a match arm is intentionally a no-op, or when an imperative
 loop is used instead of an iterator chain for a stateful computation.
-> Example: `// EXPLICIT: WKV recurrence is stateful; .map() would hide the state update`
-
-### `// PROMOTE: <reason>`
-Required immediately before any `.to_dtype(DType::F32)?` call that promotes
-a tensor from a lower-precision dtype (F16, BF16) to F32 for numerical
-correctness. Common reasons include:
-
-- **Numerical functions**: softmax, log, exp, norm, sqrt
-- **Matmul precision**: decoder weights stored as BF16 on disk
-- **Accumulation**: running sums, averages, WKV recurrence
-- **Dot-product precision**: matching a Python reference implementation
-- **DType extraction**: `to_vec1::<f32>()` from BF16 safetensors
-
-The reason must be specific to the call site, not a generic "numerical stability".
-
-> Example: `// PROMOTE: softmax over F16 produces NaN; compute in F32`
-> Example: `// PROMOTE: decoder weights are BF16 on disk; F32 for matmul precision`
-> Example: `// PROMOTE: WKV recurrence must be in F32 for numerical stability`
-
-### `// CONTIGUOUS: <reason>`
-Required immediately before any `.contiguous()?` call that precedes a matmul.
-> Example: `// CONTIGUOUS: transpose produces non-unit strides; matmul requires contiguous layout`
+> Example: `// EXPLICIT: retry loop carries mutable attempt counter; .map() would hide it`
 
 ### `// BORROW: <what is converted>`
 Required on explicit `.as_str()`, `.as_bytes()`, `.to_owned()` conversions (Grit Rule 2).
@@ -47,7 +26,7 @@ Required on explicit `.as_str()`, `.as_bytes()`, `.to_owned()` conversions (Grit
 
 ### `// SAFETY: <invariants>`
 Required on every `unsafe` block or function (inline comment, not a doc comment).
-Not expected in candle-mi (`#![forbid(unsafe_code)]`); included for completeness.
+Not expected in hf-fetch-model (`#![forbid(unsafe_code)]`); included for completeness.
 
 ### `// INDEX: <reason>`
 Required on every direct slice index (`slice[i]`, `slice[a..b]`) that cannot
@@ -76,12 +55,32 @@ file-format names in doc comments must be wrapped in backticks so that
 rustdoc renders them as inline code and Clippy's `doc_markdown` lint passes.
 
 Applies to: struct/enum/field names, method names (`fn foo`), types
-(`Vec<T>`, `Option<f32>`), crate names (`candle_core`, `safetensors`),
+(`Vec<T>`, `Option<f32>`), crate names (`hf_fetch_model`, `reqwest`),
 file extensions (`.npy`, `.npz`, `.safetensors`), and acronyms that double
 as types (`DType`, `NaN`, `CPU`, `GPU`).
 
 > ✅ `/// Loads weights from a [`.safetensors`] file into a [`Tensor`].`
 > ❌ `/// Loads weights from a .safetensors file into a Tensor.`
+
+### Intra-Doc Link Safety
+
+Rustdoc intra-doc links must resolve under all feature-flag combinations
+(enforced by `#![deny(warnings)]` → `rustdoc::broken_intra_doc_links`).
+
+Two patterns to watch:
+
+1. **Feature-gated items** — items behind `#[cfg(feature = "...")]` are absent
+   when that feature is off. Use plain backtick text, not link syntax:
+
+   > ✅ `` /// Implemented by `NpyArray` (requires `npz` feature). ``
+   > ❌ `` /// Implemented by [`NpyArray`](crate::npz::NpyArray). ``
+
+2. **Cross-module links** — items re-exported at the crate root (e.g.,
+   `FetchError`) are not automatically in scope inside submodules. Use explicit
+   `crate::` paths:
+
+   > ✅ `` /// Returns [`FetchError::Http`](crate::FetchError::Http) on failure. ``
+   > ❌ `` /// Returns [`FetchError::Http`] on failure. ``
 
 ### Field-Level Docs
 
@@ -95,13 +94,13 @@ purpose is not self-evident from the name alone.
 
 > Example:
 > ```rust
-> pub struct AttentionConfig {
->     /// Number of query heads. Must be a multiple of `n_kv_heads`.
->     pub n_heads: usize,
->     /// Number of key/value heads (grouped-query attention).
->     pub n_kv_heads: usize,
->     /// Per-head dimension. Total hidden size = `n_heads * head_dim`.
->     pub head_dim: usize,
+> pub struct FetchConfig {
+>     /// Maximum number of concurrent file downloads.
+>     pub concurrency: usize,
+>     /// Number of parallel connections per file for chunked transfers.
+>     pub connections_per_file: usize,
+>     /// Minimum file size (in bytes) before chunked transfer kicks in.
+>     pub chunk_threshold: u64,
 > }
 > ```
 
@@ -143,8 +142,8 @@ This applies to constructors, accessors, and pure arithmetic helpers.
 When in doubt, annotate and let the compiler reject it — do not omit `const`
 preemptively.
 
-> ✅ `pub const fn head_dim(&self) -> usize { self.hidden_size / self.n_heads }`
-> ❌ `pub fn head_dim(&self) -> usize { self.hidden_size / self.n_heads }`
+> ✅ `pub const fn max_retries(&self) -> usize { self.max_retries }`
+> ❌ `pub fn max_retries(&self) -> usize { self.max_retries }`
 
 ### Pass by Value vs Reference (`needless_pass_by_ref_mut`, `trivially_copy_pass_by_ref`)
 
@@ -165,39 +164,14 @@ to pass shared references.
 
 > ✅ `fn scale(x: f32, factor: f32) -> f32`
 > ❌ `fn scale(x: &f32, factor: &f32) -> f32`
-> ✅ `fn apply_mask(tensor: &mut Tensor, mask: &Tensor)`
-> ❌ `fn apply_mask(tensor: &mut Tensor, mask: &mut Tensor)` ← if mask is only read
 
 ---
-
-## Shape Documentation Format (Rule 12)
-
-All public functions that accept or return `Tensor` must document shapes in
-their doc comment using the following format:
-
-    /// # Shapes
-    /// - `q`: `[batch, n_heads, seq_q, head_dim]` -- query tensor
-    /// - `k`: `[batch, n_kv_heads, seq_k, head_dim]` -- key tensor
-    /// - returns: `[batch, n_heads, seq_q, head_dim]`
-
-Rules:
-- Use concrete dimension names, never `d0`/`d1`.
-- Batch dimension is always first.
-- Document every tensor argument and the return tensor.
 
 ## #[non_exhaustive] Policy (Rule 11)
 
 - Public enums that may gain new variants: `#[non_exhaustive]`.
 - Internal dispatch enums matched exhaustively by this crate:
   `#[allow(clippy::exhaustive_enums)] // EXHAUSTIVE: <reason>`.
-
-## Hook Purity Contract (Rule 16)
-
-- `HookSpec::capture()` takes only a hook point name -- no callback. The
-  captured tensor is stored in `HookCache` and retrieved after `forward()`.
-  The absence of a mutation mechanism is the enforcement.
-- `HookSpec::intervene()` takes a typed `Intervention` value. All mutations
-  go through this path and are visible at the call site.
 
 ## `#[must_use]` Policy (Rule 17)
 
@@ -216,80 +190,44 @@ All public fallible methods (`-> Result<T>`) must include an `# Errors` section
 in their doc comment. Each bullet uses the format:
 
     /// # Errors
-    /// Returns [`MIError::Config`] if the model type is unsupported.
-    /// Returns [`MIError::Model`] on weight loading failure.
+    /// Returns [`FetchError::Http`] if the API request fails.
+    /// Returns [`FetchError::Io`] on file system failure.
 
 Rules:
 - Start each bullet with `Returns` followed by the variant in rustdoc link
-  syntax, e.g., `` [`MIError::Config`] ``.
+  syntax, e.g., `` [`FetchError::Http`] ``.
 - Follow with `if` (condition), `on` (event), or `when` (circumstance).
-- Use the concrete variant name, not the generic `MIError`.
+- Use the concrete variant name, not the generic `FetchError`.
 - One bullet per distinct error path.
 
 ## Error Message Wording
 
-Error strings passed to `MIError` variants follow two patterns:
+Error strings passed to `FetchError` variants follow two patterns:
 
 - **External failures** (I/O, serde, network): `"failed to <verb>: {e}"`
-  > Example: `MIError::Config(format!("failed to parse config: {e}"))`
-- **Validation failures** (range, shape, lookup): `"<noun> <problem> (<context>)"`
-  > Example: `MIError::Config(format!("source_layer {src} out of range (max {max})"))`
-  > Example: `MIError::Hook(format!("hook point {point:?} not captured"))`
+  > Example: `FetchError::Http(format!("failed to fetch model listing: {e}"))`
+- **Validation failures** (range, lookup): `"<noun> <problem> (<context>)"`
+  > Example: `FetchError::Http(format!("HF API returned status {status}"))`
+  > Example: `FetchError::Checksum(format!("SHA mismatch for {filename}"))`
 
 Rules:
 - Use lowercase, no trailing period.
 - Include the offending value and the valid range or constraint when applicable.
 - Wrap external errors with `: {e}`, not `.to_string()`.
 
-## `# Memory` Doc Section
-
-Public methods that load large files (>100 MB, typically safetensors decoder
-files) must include a `# Memory` section documenting:
-
-1. **Peak allocation** — how much memory the method allocates at its peak.
-2. **Residency** — whether the large allocation lives on CPU, GPU, or both.
-3. **Lifetime** — whether the allocation is dropped before the method returns
-   or persists in the returned value.
-
-Format:
-
-    /// # Memory
-    /// Loads one decoder file (~2 GB) to CPU per source layer. Each file is
-    /// dropped before loading the next. Peak: ~2 GB CPU.
-
-## OOM-safe Decoder Loading Pattern
-
-When loading large safetensors files (decoder weights, encoder weights),
-follow the 7-step pattern to bound peak memory:
-
-1. `ensure_path()` — resolve the file path (may trigger download).
-2. `fs::read(&path)` — read the entire file into a `Vec<u8>` on CPU.
-3. `SafeTensors::deserialize(&bytes)` — zero-copy parse of the byte buffer.
-4. Extract the tensor view and build a candle `Tensor` on CPU.
-5. Slice or narrow to the needed subset.
-6. `drop(bytes)` (or let it go out of scope) — free the raw file buffer
-   **before** loading the next file.
-7. Optionally `.to_device(device)` if GPU computation follows.
-
-The key invariant is: **at most one large file buffer is alive at any time**.
-This bounds peak memory to roughly 1× the largest decoder file (~2 GB for
-Gemma 2 2B CLTs).
-
-> Example location: `CrossLayerTranscoder::score_features_by_decoder_projection`
-
 ## HashMap Grouping Idiom
 
-When operations must be batched by a key (e.g., grouping features by source
-layer to load each decoder file only once), use the `Entry` API:
+When operations must be batched by a key (e.g., grouping files by repository
+to avoid redundant API calls), use the `Entry` API:
 
 ```rust
-let mut by_source: HashMap<usize, Vec<Item>> = HashMap::new();
+let mut by_repo: HashMap<String, Vec<Item>> = HashMap::new();
 for item in items {
-    by_source.entry(item.key()).or_default().push(item);
+    by_repo.entry(item.key()).or_default().push(item);
 }
 ```
 
 Rules:
-- Name the map `by_<grouping_key>` (e.g., `by_source`, `by_layer`).
+- Name the map `by_<grouping_key>` (e.g., `by_repo`, `by_extension`).
 - Use `.entry(key).or_default().push()` — never `if let Some` + `else insert`.
-- Iterate the map to perform the batched operation (one file load per key).
+- Iterate the map to perform the batched operation (one API call per key).
