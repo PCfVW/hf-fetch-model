@@ -11,7 +11,7 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum FetchError {
-    /// The hf-hub API returned an error.
+    /// The `hf-hub` API returned an error.
     #[error("hf-hub API error: {0}")]
     Api(#[from] hf_hub::api::tokio::ApiError),
 
@@ -34,7 +34,7 @@ pub enum FetchError {
     /// Authentication failed (missing or invalid token).
     ///
     /// Reserved for future use. Currently, auth failures surface as
-    /// [`FetchError::Api`] because hf-hub does not distinguish them.
+    /// [`FetchError::Api`] because `hf-hub` does not distinguish them.
     #[error("authentication failed: {reason}")]
     Auth {
         /// Description of the authentication failure.

@@ -36,7 +36,7 @@ pub(crate) struct RangeInfo {
     pub content_length: u64,
     /// The commit SHA from `x-repo-commit` header.
     pub commit_hash: String,
-    /// The etag used for the blob path in the hf-hub cache.
+    /// The etag used for the blob path in the `hf-hub` cache.
     pub etag: String,
     /// The CDN URL to use for Range requests (after redirect).
     pub cdn_url: String,
@@ -50,7 +50,7 @@ pub(crate) fn build_download_url(repo_id: &str, revision: &str, filename: &str) 
     format!("{HF_ENDPOINT}/{repo_id}/resolve/{url_revision}/{filename}")
 }
 
-/// Constructs the repo folder name matching hf-hub's convention.
+/// Constructs the repo folder name matching `hf-hub`'s convention.
 ///
 /// `"google/gemma-2-2b"` → `"models--google--gemma-2-2b"`.
 #[must_use]
@@ -108,7 +108,7 @@ pub(crate) fn build_client(token: Option<&str>) -> Result<Client, FetchError> {
 
 /// Probes the HF download URL for Range support and extracts cache metadata.
 ///
-/// Sends a `Range: bytes=0-0` request mirroring hf-hub's `metadata()` method.
+/// Sends a `Range: bytes=0-0` request mirroring `hf-hub`'s `metadata()` method.
 /// Extracts `x-repo-commit` (commit hash) and `x-linked-etag`/`etag` from the
 /// HF API response, then follows the redirect to the CDN to get the file size
 /// from `Content-Range`.
@@ -223,7 +223,7 @@ fn parse_content_length_from_range(response: &reqwest::Response) -> Result<u64, 
         .ok_or_else(|| FetchError::Http(format!("invalid Content-Range header: {content_range}")))
 }
 
-/// Downloads a file using parallel Range requests and writes it to the hf-hub cache.
+/// Downloads a file using parallel Range requests and writes it to the `hf-hub` cache.
 ///
 /// # Arguments
 ///
@@ -622,12 +622,12 @@ async fn resolve_commit_hash(
     Ok(info.sha)
 }
 
-/// Downloads a file via a simple GET (no Range headers) and writes to the hf-hub cache.
+/// Downloads a file via a simple GET (no Range headers) and writes to the `hf-hub` cache.
 ///
-/// Used as a fallback when hf-hub's `.get()` fails with HTTP 416 Range Not Satisfiable,
+/// Used as a fallback when `hf-hub`'s `.get()` fails with HTTP 416 Range Not Satisfiable,
 /// which happens for small git-stored files that don't support Range requests.
 ///
-/// Reads the commit hash from the `refs/` file already written by hf-hub for other files
+/// Reads the commit hash from the `refs/` file already written by `hf-hub` for other files
 /// in the same repo, then downloads via a regular GET and writes directly to the snapshot
 /// directory.
 ///
@@ -705,7 +705,7 @@ pub(crate) async fn download_direct(
 
 /// Computes a relative path from `dst`'s parent to `src`, for symlink creation.
 ///
-/// Mirrors hf-hub's `make_relative()` logic.
+/// Mirrors `hf-hub`'s `make_relative()` logic.
 fn make_relative(src: &Path, dst: &Path) -> PathBuf {
     let src_components: Vec<Component<'_>> = src.components().collect();
     let dst_parent = dst.parent().unwrap_or(dst);
@@ -733,7 +733,7 @@ fn make_relative(src: &Path, dst: &Path) -> PathBuf {
 
 /// Creates a symlink from `dst` pointing to `src`, or falls back to rename on Windows.
 ///
-/// Mirrors hf-hub's `symlink_or_rename()`.
+/// Mirrors `hf-hub`'s `symlink_or_rename()`.
 fn symlink_or_rename(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     if dst.exists() {
         return Ok(());

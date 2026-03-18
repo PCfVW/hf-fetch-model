@@ -125,7 +125,7 @@ impl DownloadPlan {
 /// the `HuggingFace` cache layout (`~/.cache/huggingface/hub/`).
 ///
 /// - **Concurrency**: downloads up to `concurrency` files in parallel (default 4).
-/// - **Resume**: hf-hub skips already-cached files automatically.
+/// - **Resume**: `hf-hub` skips already-cached files automatically.
 /// - **Retry**: transient failures are retried with exponential backoff + jitter.
 /// - **Checksum**: SHA256 verification against `HuggingFace` LFS metadata.
 /// - **Timeout**: per-file and overall time limits.
@@ -999,7 +999,7 @@ fn collect_cached_files_recursive(
 
 /// Derives the snapshot root directory from a `(filename, downloaded_path)` pair.
 ///
-/// hf-hub cache layout: `.../snapshots/<sha>/<relative_filename>`
+/// `hf-hub` cache layout: `.../snapshots/<sha>/<relative_filename>`
 /// For a nested file like `subdir/file.bin`, the downloaded path is
 /// `.../snapshots/<sha>/subdir/file.bin`. Stripping the filename's
 /// path components from the tail recovers `.../snapshots/<sha>/`.
@@ -1016,7 +1016,7 @@ fn snapshot_root(filename: &str, path: &std::path::Path) -> PathBuf {
 
 /// Returns whether a download result contains an HTTP 416 Range Not Satisfiable error.
 ///
-/// hf-hub's `.get()` internally sends `Range: bytes=0-0` for all files. Small git-stored
+/// `hf-hub`'s `.get()` internally sends `Range: bytes=0-0` for all files. Small git-stored
 /// files (not LFS) may not support Range requests and return 416.
 fn is_range_not_satisfiable(result: &Result<PathBuf, FetchError>) -> bool {
     match result {
