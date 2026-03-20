@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **MSRV bumped to 1.88** — aligns with the actual dependency floor (`cookie_store`, `time` already require 1.88). Previously advertised 1.75 but compilation required 1.88 regardless.
+
+### Fixed
+
+- **CI: migrate GitHub Actions to Node.js 24** — `actions/checkout@v4` triggers Node.js 20 deprecation warnings; pinned `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` in CI and publish workflows.
+
 ## [0.7.3] — Smarter Search & Documentation Overhaul
 
 ### Added
