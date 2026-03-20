@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **CI: migrate GitHub Actions to Node.js 24** — `actions/checkout@v4` triggers Node.js 20 deprecation warnings; pinned `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` in CI and publish workflows.
+- **CI: upgrade `actions/checkout` from v4 to v5** — v4 runs on Node.js 20, which GitHub is deprecating in June 2026; v5 uses Node.js 24.
 
 ## [0.7.3] — Smarter Search & Documentation Overhaul
 
