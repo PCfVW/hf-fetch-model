@@ -102,9 +102,10 @@ fn list_files_nonexistent_repo() {
     let (_stdout, stderr, success) =
         run(hf_fm().args(["list-files", "fake/nonexistent-repo-12345"]));
     assert!(!success, "list-files with nonexistent repo should fail");
+    // CI environments without HF_TOKEN may get 401 instead of 404.
     assert!(
-        stderr.contains("not found"),
-        "error should mention 'not found', got:\n{stderr}"
+        stderr.contains("not found") || stderr.contains("401") || stderr.contains("Unauthorized"),
+        "error should indicate repo inaccessible, got:\n{stderr}"
     );
 }
 
