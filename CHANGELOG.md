@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] — Bug fixes, partial detection & CLI tests
+
 ### Added
 
-- **CLI integration tests** — 15 tests exercising the `list-files` subcommand, `--dry-run` flag, help text, error handling, and output formatting. Includes a regression test for the chunk threshold display bug. CI now runs `cargo test --all-features` to include CLI tests.
+- **CLI integration tests** — 16 tests exercising the `list-files` subcommand, `--dry-run` flag, help text, error handling, and output formatting. Includes a regression test for the chunk threshold display bug. CI now runs `cargo test --all-features` to include CLI tests.
 
 ### Fixed
 
