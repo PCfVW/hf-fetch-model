@@ -76,6 +76,10 @@ struct DownloadArgs {
     /// Number of parallel HTTP connections per large file.
     #[arg(long, default_value = "8")]
     connections_per_file: usize,
+
+    /// Preview what would be downloaded without actually downloading.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -300,7 +304,9 @@ fn run(cli: Cli) -> Result<(), FetchError> {
 }
 
 fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
-    let repo_id = args.repo_id.ok_or_else(|| {
+    let dry_run = args.dry_run;
+
+    let repo_id = args.repo_id.as_deref().ok_or_else(|| {
         FetchError::InvalidArgument(
             "REPO_ID is required for download. Usage: hf-fm <REPO_ID>".to_owned(),
         )
@@ -311,6 +317,14 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
             "invalid REPO_ID \"{repo_id}\": expected \"org/model\" format (e.g., \"EleutherAI/pythia-1.4b\")"
         )));
     }
+
+    if dry_run {
+        return run_dry_run(repo_id, &args);
+    }
+
+    // Consume repo_id for the download path.
+    // BORROW: explicit .to_owned() for &str → owned String
+    let repo_id = repo_id.to_owned();
 
     // Build FetchConfig from CLI args.
     let mut builder = match args.preset {
@@ -367,6 +381,102 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
     } else {
         println!("Downloaded to: {}", outcome.inner().display());
     }
+    Ok(())
+}
+
+/// Displays a download plan without downloading anything.
+fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
+    // Build FetchConfig from CLI args (same builder logic, minus on_progress).
+    let mut builder = match args.preset {
+        Some(Preset::Safetensors) => Filter::safetensors(),
+        Some(Preset::Gguf) => Filter::gguf(),
+        Some(Preset::ConfigOnly) => Filter::config_only(),
+        None => FetchConfig::builder(),
+    };
+
+    if let Some(rev) = args.revision.as_deref() {
+        builder = builder.revision(rev);
+    }
+    if let Some(tok) = args.token.as_deref() {
+        builder = builder.token(tok);
+    } else {
+        builder = builder.token_from_env();
+    }
+    for pattern in &args.filter {
+        // BORROW: explicit .as_str() instead of Deref coercion
+        builder = builder.filter(pattern.as_str());
+    }
+    for pattern in &args.exclude {
+        // BORROW: explicit .as_str() instead of Deref coercion
+        builder = builder.exclude(pattern.as_str());
+    }
+    if let Some(ref dir) = args.output_dir {
+        builder = builder.output_dir(dir.clone());
+    }
+
+    let config = builder.build()?;
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+
+    let plan = rt.block_on(hf_fetch_model::download_plan(repo_id, &config))?;
+
+    // Display header.
+    println!("  Repo:     {}", plan.repo_id);
+    println!("  Revision: {}", plan.revision);
+    if args.preset.is_some() || !args.filter.is_empty() {
+        println!("  Filter:   active (preset or --filter)");
+    }
+    println!();
+
+    // Display file table.
+    println!("  {:<48} {:>10}  Status", "File", "Size");
+    println!(
+        "  {:\u{2500}<48} {:\u{2500}<10}  {:\u{2500}<12}",
+        "", "", ""
+    );
+    for fp in &plan.files {
+        let status = if fp.cached {
+            "cached \u{2713}"
+        } else {
+            "to download"
+        };
+        println!(
+            "  {:<48} {:>10}  {status}",
+            fp.filename,
+            format_size(fp.size)
+        );
+    }
+
+    // Summary.
+    println!("{:\u{2500}<74}", "  ");
+    let cached_count = plan.files.len() - plan.files_to_download();
+    let to_dl = plan.files_to_download();
+    println!(
+        "  Total: {} ({} files, {} cached, {} to download)",
+        format_size(plan.total_bytes),
+        plan.files.len(),
+        cached_count,
+        to_dl
+    );
+    println!("  Download: {}", format_size(plan.download_bytes));
+
+    // Recommended config.
+    if !plan.fully_cached() {
+        let rec = plan.recommended_config()?;
+        println!();
+        println!("  Recommended config:");
+        println!("    concurrency:        {}", rec.concurrency());
+        println!("    connections/file:   {}", rec.connections_per_file());
+        // CAST: u64 → u64, display-only division
+        println!(
+            "    chunk threshold:  {} MiB",
+            rec.chunk_threshold() / 1_048_576
+        );
+    }
+
     Ok(())
 }
 

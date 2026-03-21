@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`DownloadPlan` type** — new public API (`download_plan()`) for computing a download plan (file list, sizes, cache status) without downloading. Includes `recommended_config()` for plan-based optimization of `FetchConfig`.
 - **`FilePlan` type** — per-file entry within a `DownloadPlan`.
 - **`FetchConfig` accessors** — `concurrency()`, `connections_per_file()`, `chunk_threshold()` public const methods.
+- **`--dry-run` flag** — preview what would be downloaded, compare against local cache, and display recommended download settings. Available on the default download command (`hf-fm <REPO_ID> --dry-run`).
 
 ### Changed
 
