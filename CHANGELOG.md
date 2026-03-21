@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI: auto-update candle-mi after publish** — the `publish.yml` workflow now automatically bumps the `hf-fetch-model` version in candle-mi's `Cargo.toml` and pushes to main after every crates.io release.
+
 ## [0.8.1] — Bug fixes, partial detection & CLI tests
 
 ### Added
