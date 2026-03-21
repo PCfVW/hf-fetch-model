@@ -63,6 +63,22 @@ pub struct FetchConfig {
     // TRAIT_OBJECT: heterogeneous progress handlers from different callers
     /// Progress callback invoked for each download event.
     pub(crate) on_progress: Option<ProgressCallback>,
+    /// Tracks which performance fields the user explicitly set via the builder.
+    pub(crate) explicit: ExplicitSettings,
+}
+
+/// Tracks which performance fields the user explicitly set via the builder.
+///
+/// Used by the implicit plan retrofit: when a field was not explicitly set,
+/// the plan-based optimizer may override it with a recommended value.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ExplicitSettings {
+    /// Whether `concurrency` was explicitly set by the caller.
+    pub(crate) concurrency: bool,
+    /// Whether `connections_per_file` was explicitly set by the caller.
+    pub(crate) connections_per_file: bool,
+    /// Whether `chunk_threshold` was explicitly set by the caller.
+    pub(crate) chunk_threshold: bool,
 }
 
 impl std::fmt::Debug for FetchConfig {
@@ -88,6 +104,7 @@ impl std::fmt::Debug for FetchConfig {
                     &"None"
                 },
             )
+            .field("explicit", &self.explicit)
             .finish()
     }
 }
@@ -298,6 +315,11 @@ impl FetchConfigBuilder {
             chunk_threshold: self.chunk_threshold.unwrap_or(104_857_600),
             connections_per_file: self.connections_per_file.unwrap_or(8).max(1),
             on_progress: self.on_progress,
+            explicit: ExplicitSettings {
+                concurrency: self.concurrency.is_some(),
+                connections_per_file: self.connections_per_file.is_some(),
+                chunk_threshold: self.chunk_threshold.is_some(),
+            },
         })
     }
 }

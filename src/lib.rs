@@ -371,3 +371,57 @@ pub fn download_files_with_config_blocking(
     })?;
     rt.block_on(download_files_with_config(repo_id, config))
 }
+
+/// Downloads files according to an existing [`DownloadPlan`].
+///
+/// Only uncached files in the plan are downloaded. The `config` controls
+/// authentication, progress, timeouts, and performance settings.
+/// Use [`DownloadPlan::recommended_config()`] to compute an optimized config,
+/// or override specific fields via [`DownloadPlan::recommended_config_builder()`].
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the cache directory cannot be resolved.
+/// Same error conditions as [`download_with_config()`] for the download itself.
+pub async fn download_with_plan(
+    plan: &DownloadPlan,
+    config: &FetchConfig,
+) -> Result<DownloadOutcome<PathBuf>, FetchError> {
+    if plan.fully_cached() {
+        // Resolve snapshot path from cache and return immediately.
+        let cache_dir = config
+            .output_dir
+            .clone()
+            .map_or_else(cache::hf_cache_dir, Ok)?;
+        let repo_folder = format!("models--{}", plan.repo_id.replace('/', "--"));
+        let snapshot_dir = cache_dir
+            .join(&repo_folder)
+            .join("snapshots")
+            .join(&plan.revision);
+        return Ok(DownloadOutcome::Cached(snapshot_dir));
+    }
+
+    // Delegate to the standard download path which will re-check cache
+    // internally. The plan's value is the dry-run preview and the
+    // recommended config computed by the caller.
+    download_with_config(plan.repo_id.clone(), config).await
+}
+
+/// Blocking version of [`download_with_plan()`] for non-async callers.
+///
+/// Creates a Tokio runtime internally. Do not call from within
+/// an existing async context (use [`download_with_plan()`] instead).
+///
+/// # Errors
+///
+/// Same as [`download_with_plan()`].
+pub fn download_with_plan_blocking(
+    plan: &DownloadPlan,
+    config: &FetchConfig,
+) -> Result<DownloadOutcome<PathBuf>, FetchError> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+    rt.block_on(download_with_plan(plan, config))
+}

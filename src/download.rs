@@ -205,7 +205,7 @@ pub async fn download_all_files_map(
         .collect();
 
     // Build download settings and fetch metadata.
-    let settings = DownloadSettings::from_config(config);
+    let mut settings = DownloadSettings::from_config(config);
     let on_progress = config.and_then(|c| c.on_progress.clone());
     let metadata_map = fetch_metadata_if_needed(
         config,
@@ -219,11 +219,24 @@ pub async fn download_all_files_map(
     let (http_client, chunked_client, cache_dir, repo_folder, revision, token) =
         build_shared_state(config, repo_id.as_str(), &settings)?;
 
+    // Implicit plan optimization: compute a lightweight plan from the
+    // already-fetched metadata and merge recommended settings into any
+    // fields the user did not explicitly set.
+    merge_plan_recommended(
+        &mut settings,
+        config,
+        &files,
+        &metadata_map,
+        &cache_dir,
+        &repo_folder,
+        &revision,
+    );
+
     let total = files.len();
     tracing::debug!(
         total_files = total,
         concurrency = settings.concurrency,
-        "download settings"
+        "download settings (after plan optimization)"
     );
 
     // Spawn concurrent download tasks.
@@ -1025,6 +1038,83 @@ fn is_range_not_satisfiable(result: &Result<PathBuf, FetchError>) -> bool {
             msg.contains("416") || msg.contains("Range Not Satisfiable")
         }
         Ok(_) => false,
+    }
+}
+
+/// Merges plan-recommended settings into `DownloadSettings` for fields the
+/// user did not explicitly set.
+///
+/// This enables implicit plan optimization: every download benefits from
+/// plan-based tuning automatically, without requiring `--dry-run`.
+#[allow(clippy::too_many_arguments)]
+fn merge_plan_recommended(
+    settings: &mut DownloadSettings,
+    config: Option<&FetchConfig>,
+    files: &[RepoFile],
+    metadata_map: &HashMap<String, RepoFile>,
+    cache_dir: &std::path::Path,
+    repo_folder: &str,
+    revision: &str,
+) {
+    let Some(cfg) = config else {
+        return;
+    };
+
+    // Build a lightweight plan from the already-fetched file list.
+    let plan_files: Vec<crate::plan::FilePlan> = files
+        .iter()
+        .map(|f| {
+            let size = metadata_map
+                // BORROW: explicit .as_str() instead of Deref coercion
+                .get(f.filename.as_str())
+                .and_then(|m| m.size)
+                .unwrap_or(0);
+            let cached = resolve_cached_file(
+                cache_dir,
+                repo_folder,
+                revision,
+                // BORROW: explicit .as_str() instead of Deref coercion
+                f.filename.as_str(),
+            )
+            .is_some();
+            crate::plan::FilePlan {
+                filename: f.filename.clone(),
+                size,
+                cached,
+            }
+        })
+        .collect();
+
+    let total_bytes: u64 = plan_files.iter().map(|f| f.size).sum();
+    let cached_bytes: u64 = plan_files.iter().filter(|f| f.cached).map(|f| f.size).sum();
+
+    let plan = crate::plan::DownloadPlan {
+        repo_id: String::new(), // Not used by recommended_config_builder.
+        revision: String::new(),
+        files: plan_files,
+        total_bytes,
+        cached_bytes,
+        download_bytes: total_bytes.saturating_sub(cached_bytes),
+    };
+
+    // Only override fields the user did not explicitly set.
+    if let Ok(rec) = plan.recommended_config() {
+        if !cfg.explicit.concurrency {
+            settings.concurrency = rec.concurrency();
+        }
+        if !cfg.explicit.connections_per_file {
+            settings.connections_per_file = rec.connections_per_file();
+        }
+        if !cfg.explicit.chunk_threshold {
+            settings.chunk_threshold = rec.chunk_threshold();
+        }
+
+        tracing::debug!(
+            concurrency = settings.concurrency,
+            connections_per_file = settings.connections_per_file,
+            chunk_threshold = settings.chunk_threshold,
+            "merged plan-recommended settings"
+        );
     }
 }
 

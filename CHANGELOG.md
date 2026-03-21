@@ -16,8 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`FilePlan` type** — per-file entry within a `DownloadPlan`.
 - **`FetchConfig` accessors** — `concurrency()`, `connections_per_file()`, `chunk_threshold()` public const methods.
 - **`--dry-run` flag** — preview what would be downloaded, compare against local cache, and display recommended download settings. Available on the default download command (`hf-fm <REPO_ID> --dry-run`).
+- **`download_with_plan()` / `download_with_plan_blocking()`** — execute a download using a precomputed plan and config.
 
 ### Changed
+
+- **Implicit plan optimization** — `download_with_config()` now internally computes a `DownloadPlan` and applies recommended settings for unset config fields. Every download benefits from plan-based tuning automatically.
 
 - **MSRV bumped to 1.88** — aligns with the actual dependency floor (`cookie_store`, `time` already require 1.88). Previously advertised 1.75 but compilation required 1.88 regardless.
 
