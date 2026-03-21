@@ -70,7 +70,7 @@ impl<T> DownloadOutcome<T> {
 }
 
 // ---------------------------------------------------------------------------
-// DownloadPlan — resolved config parameters
+// DownloadSettings — resolved config parameters
 // ---------------------------------------------------------------------------
 
 /// Resolved download parameters extracted from [`FetchConfig`].
@@ -78,7 +78,7 @@ impl<T> DownloadOutcome<T> {
 /// Groups all config-derived values controlling download behavior,
 /// avoiding repetitive option unpacking in the download pipeline.
 #[derive(Clone)]
-struct DownloadPlan {
+struct DownloadSettings {
     /// Retry policy for transient failures.
     retry_policy: RetryPolicy,
     /// Per-file timeout.
@@ -95,8 +95,8 @@ struct DownloadPlan {
     verify_checksums: bool,
 }
 
-impl DownloadPlan {
-    /// Builds a plan from optional config, using sensible defaults.
+impl DownloadSettings {
+    /// Builds settings from optional config, using sensible defaults.
     fn from_config(config: Option<&FetchConfig>) -> Self {
         Self {
             retry_policy: RetryPolicy {
@@ -204,37 +204,37 @@ pub async fn download_all_files_map(
         .filter(|f| file_matches(f.filename.as_str(), include, exclude))
         .collect();
 
-    // Build download plan and fetch metadata.
-    let plan = DownloadPlan::from_config(config);
+    // Build download settings and fetch metadata.
+    let settings = DownloadSettings::from_config(config);
     let on_progress = config.and_then(|c| c.on_progress.clone());
     let metadata_map = fetch_metadata_if_needed(
         config,
         repo_id.as_str(),
-        plan.verify_checksums,
-        plan.chunk_threshold,
+        settings.verify_checksums,
+        settings.chunk_threshold,
     )
     .await;
 
     // Build HTTP clients and resolve cache paths.
     let (http_client, chunked_client, cache_dir, repo_folder, revision, token) =
-        build_shared_state(config, repo_id.as_str(), &plan)?;
+        build_shared_state(config, repo_id.as_str(), &settings)?;
 
     let total = files.len();
     tracing::debug!(
         total_files = total,
-        concurrency = plan.concurrency,
-        "download plan"
+        concurrency = settings.concurrency,
+        "download settings"
     );
 
     // Spawn concurrent download tasks.
     let repo = Arc::new(repo);
     let metadata_map = Arc::new(metadata_map);
-    let semaphore = Arc::new(Semaphore::new(plan.concurrency));
+    let semaphore = Arc::new(Semaphore::new(settings.concurrency));
     let completed = Arc::new(AtomicUsize::new(0));
     let mut join_set = JoinSet::new();
 
     for file in files {
-        if let Some(total_limit) = plan.timeout_total {
+        if let Some(total_limit) = settings.timeout_total {
             if overall_start.elapsed() >= total_limit {
                 join_set.abort_all();
                 return Err(FetchError::Timeout {
@@ -259,7 +259,7 @@ pub async fn download_all_files_map(
         // BORROW: explicit .clone() for repo_id
         let task_repo_id = repo_id.clone();
         let task_token = Arc::clone(&token);
-        let task_plan = plan.clone();
+        let task_settings = settings.clone();
         let task_on_progress = on_progress.clone();
         let task_completed = Arc::clone(&completed);
 
@@ -275,7 +275,7 @@ pub async fn download_all_files_map(
                 &task_revision,
                 task_repo_id.as_str(),
                 (*task_token).clone(),
-                &task_plan,
+                &task_settings,
                 task_on_progress,
                 total.saturating_sub(task_completed.load(Ordering::Relaxed) + 1),
             )
@@ -288,7 +288,7 @@ pub async fn download_all_files_map(
     // Collect results and check for failures.
     let (file_map, failures) = collect_results(
         &mut join_set,
-        plan.timeout_total,
+        settings.timeout_total,
         overall_start,
         on_progress.as_ref(),
         total,
@@ -445,15 +445,15 @@ pub(crate) async fn download_file_by_name(
         return Ok(DownloadOutcome::Cached(cached));
     }
 
-    let plan = DownloadPlan::from_config(Some(config));
+    let settings = DownloadSettings::from_config(Some(config));
     // BORROW: explicit .clone() for Arc-wrapped callback
     let on_progress = config.on_progress.clone();
 
     let metadata_map = fetch_metadata_if_needed(
         Some(config),
         repo_id.as_str(),
-        plan.verify_checksums,
-        plan.chunk_threshold,
+        settings.verify_checksums,
+        settings.chunk_threshold,
     )
     .await;
 
@@ -474,7 +474,7 @@ pub(crate) async fn download_file_by_name(
     // BORROW: explicit .to_owned() for &str → owned String
     let revision = revision_str.to_owned();
 
-    let chunked_client = if plan.chunk_threshold < u64::MAX {
+    let chunked_client = if settings.chunk_threshold < u64::MAX {
         Some(&http_client)
     } else {
         None
@@ -493,7 +493,7 @@ pub(crate) async fn download_file_by_name(
         repo_id.as_str(),
         // BORROW: explicit .clone() for owned Option<String>
         config.token.clone(),
-        &plan,
+        &settings,
         on_progress.clone(),
         0, // files_remaining: only one file
     )
@@ -531,7 +531,7 @@ pub(crate) async fn download_file_by_name(
 fn build_shared_state(
     config: Option<&FetchConfig>,
     repo_id: &str,
-    plan: &DownloadPlan,
+    settings: &DownloadSettings,
 ) -> Result<
     (
         Arc<reqwest::Client>,
@@ -545,7 +545,7 @@ fn build_shared_state(
 > {
     let token_ref = config.and_then(|c| c.token.as_deref());
     let http_client = Arc::new(chunked::build_client(token_ref)?);
-    let chunked_client = if plan.chunk_threshold < u64::MAX {
+    let chunked_client = if settings.chunk_threshold < u64::MAX {
         Some(Arc::clone(&http_client))
     } else {
         None
@@ -596,7 +596,7 @@ async fn dispatch_download(
     revision: &str,
     repo_id: &str,
     token: Option<String>,
-    plan: &DownloadPlan,
+    settings: &DownloadSettings,
     on_progress: Option<ProgressCallback>,
     files_remaining: usize,
 ) -> Result<PathBuf, FetchError> {
@@ -614,11 +614,11 @@ async fn dispatch_download(
 
     // Choose download method based on file size and chunked client availability.
     let result = if let (Some(size), Some(client)) = (file_size, chunked_client) {
-        if size >= plan.chunk_threshold {
+        if size >= settings.chunk_threshold {
             tracing::debug!(
                 filename = %file.filename,
                 size_mib = size / 1_048_576,
-                connections = plan.connections_per_file,
+                connections = settings.connections_per_file,
                 "chunked download (multi-connection)"
             );
             download_single_file_chunked(
@@ -630,9 +630,9 @@ async fn dispatch_download(
                 repo_id,
                 token,
                 metadata_map,
-                plan.verify_checksums,
-                &plan.retry_policy,
-                plan.connections_per_file,
+                settings.verify_checksums,
+                &settings.retry_policy,
+                settings.connections_per_file,
                 on_progress,
                 files_remaining,
             )
@@ -647,9 +647,9 @@ async fn dispatch_download(
                 repo,
                 file,
                 metadata_map,
-                plan.verify_checksums,
-                &plan.retry_policy,
-                plan.timeout_per_file,
+                settings.verify_checksums,
+                &settings.retry_policy,
+                settings.timeout_per_file,
             )
             .await
         }
@@ -669,9 +669,9 @@ async fn dispatch_download(
             repo,
             file,
             metadata_map,
-            plan.verify_checksums,
-            &plan.retry_policy,
-            plan.timeout_per_file,
+            settings.verify_checksums,
+            &settings.retry_policy,
+            settings.timeout_per_file,
         )
         .await
     };
