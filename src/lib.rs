@@ -58,6 +58,7 @@ pub mod config;
 pub mod discover;
 pub mod download;
 pub mod error;
+pub mod plan;
 pub mod progress;
 pub mod repo;
 mod retry;
@@ -66,6 +67,7 @@ pub use config::{compile_glob_patterns, file_matches, FetchConfig, FetchConfigBu
 pub use discover::{GateStatus, ModelCardMetadata, SearchResult};
 pub use download::DownloadOutcome;
 pub use error::{FetchError, FileFailure};
+pub use plan::{download_plan, DownloadPlan, FilePlan};
 pub use progress::ProgressEvent;
 
 use std::collections::HashMap;

@@ -748,16 +748,10 @@ fn run_list_files(
             "*.json".to_owned(),
             "*.txt".to_owned(),
         ],
-        Some(&Preset::Gguf) => vec![
-            "*.gguf".to_owned(),
-            "*.json".to_owned(),
-            "*.txt".to_owned(),
-        ],
-        Some(&Preset::ConfigOnly) => vec![
-            "*.json".to_owned(),
-            "*.txt".to_owned(),
-            "*.md".to_owned(),
-        ],
+        Some(&Preset::Gguf) => vec!["*.gguf".to_owned(), "*.json".to_owned(), "*.txt".to_owned()],
+        Some(&Preset::ConfigOnly) => {
+            vec!["*.json".to_owned(), "*.txt".to_owned(), "*.md".to_owned()]
+        }
         None => Vec::new(),
     };
     for p in filter_patterns {
@@ -822,10 +816,7 @@ fn run_list_files(
             println!("  {:<48} {:>10}", "", "");
         }
     } else if show_cached {
-        println!(
-            "  {:<48} {:>10}  {:<12}  Cached",
-            "File", "Size", "SHA256"
-        );
+        println!("  {:<48} {:>10}  {:<12}  Cached", "File", "Size", "SHA256");
         println!("  {:<48} {:>10}  {:<12}  {:-<6}", "", "", "", "");
     } else {
         println!("  {:<48} {:>10}  {:<12}", "File", "Size", "SHA256");

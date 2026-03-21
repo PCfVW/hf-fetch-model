@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`list-files` subcommand** — inspect remote repo contents (filenames, sizes, SHA256) without downloading. Supports `--filter`, `--exclude`, `--preset`, `--no-checksum`, and `--show-cached` flags.
 - **`file_matches()` public function** — promoted from `pub(crate)` for use outside the download pipeline.
 - **`compile_glob_patterns()` public function** — builds compiled glob filters from pattern strings.
+- **`DownloadPlan` type** — new public API (`download_plan()`) for computing a download plan (file list, sizes, cache status) without downloading. Includes `recommended_config()` for plan-based optimization of `FetchConfig`.
+- **`FilePlan` type** — per-file entry within a `DownloadPlan`.
+- **`FetchConfig` accessors** — `concurrency()`, `connections_per_file()`, `chunk_threshold()` public const methods.
 
 ### Changed
 

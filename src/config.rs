@@ -98,6 +98,25 @@ impl FetchConfig {
     pub fn builder() -> FetchConfigBuilder {
         FetchConfigBuilder::default()
     }
+
+    /// Returns the configured concurrency level (parallel file downloads).
+    #[must_use]
+    pub const fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+
+    /// Returns the configured number of parallel HTTP connections per file.
+    #[must_use]
+    pub const fn connections_per_file(&self) -> usize {
+        self.connections_per_file
+    }
+
+    /// Returns the chunk threshold in bytes (minimum file size for
+    /// multi-connection chunked downloads).
+    #[must_use]
+    pub const fn chunk_threshold(&self) -> u64 {
+        self.chunk_threshold
+    }
 }
 
 /// Builder for [`FetchConfig`].
@@ -324,11 +343,7 @@ impl Filter {
 /// A file matches when it is not excluded by any `exclude` pattern **and**
 /// either there are no `include` patterns or it matches at least one.
 #[must_use]
-pub fn file_matches(
-    filename: &str,
-    include: Option<&GlobSet>,
-    exclude: Option<&GlobSet>,
-) -> bool {
+pub fn file_matches(filename: &str, include: Option<&GlobSet>, exclude: Option<&GlobSet>) -> bool {
     if let Some(exc) = exclude {
         if exc.is_match(filename) {
             return false;
