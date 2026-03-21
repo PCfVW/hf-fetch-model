@@ -45,3 +45,16 @@ jobs:
         run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      # Update candle-mi dependency
+      - name: Update hf-fetch-model version in candle-mi
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          git clone https://x-access-token:${{ secrets.CANDLE_MI_PAT }}@github.com/PCfVW/candle-mi.git /tmp/candle-mi
+          cd /tmp/candle-mi
+          sed -i "s/hf-fetch-model = { version = \"[^\"]*\"/hf-fetch-model = { version = \"${VERSION}\"/" Cargo.toml
+          cargo update -p hf-fetch-model
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git diff --cached --quiet || git commit -m "chore: bump hf-fetch-model to v${VERSION}" && git push
