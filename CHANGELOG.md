@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Plan-to-config optimization** — the "many small files" strategy no longer triggers when large files (≥1 GiB) are present. A repo with 2 × 4 GiB safetensors + 8 small config files now correctly uses the mixed strategy (concurrency 4, 8 connections/file, 100 MiB chunk threshold) instead of disabling chunked downloads.
+- **Dry-run display** — chunk threshold `u64::MAX` (disabled chunking) now displays as "disabled" instead of an astronomical MiB number.
 - **CI: upgrade `actions/checkout` from v4 to v5** — v4 runs on Node.js 20, which GitHub is deprecating in June 2026; v5 uses Node.js 24.
 
 ## [0.7.3] — Smarter Search & Documentation Overhaul

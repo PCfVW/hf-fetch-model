@@ -126,7 +126,9 @@ impl DownloadPlan {
         }
 
         // Strategy: many small files — parallelize at file level.
-        if small_count > count / 2 {
+        // Only applies when there are NO large files; otherwise fall through
+        // to the mixed strategy which handles both small and large files.
+        if small_count > count / 2 && large_count == 0 {
             return builder
                 .concurrency(8.min(count))
                 .connections_per_file(1)
@@ -317,6 +319,31 @@ mod tests {
         ]);
         assert_eq!(plan.files_to_download(), 5);
         let config = plan.recommended_config().unwrap();
+        assert_eq!(config.concurrency(), 4);
+        assert_eq!(config.connections_per_file(), 8);
+        assert_eq!(config.chunk_threshold(), DEFAULT_CHUNK_THRESHOLD);
+    }
+
+    #[test]
+    fn mostly_small_with_large_files_uses_mixed_strategy() {
+        // Mirrors the Ministral-3-3B case: 2 large files + 8 small files.
+        // Should NOT pick the "many small files" strategy because large
+        // files are present — falls through to "mixed" instead.
+        let plan = make_plan(&[
+            (4_672_561_152, false), // 4.35 GiB
+            (4_672_561_152, false), // 4.35 GiB
+            (2_355, false),         // 2.3 KiB
+            (1_946, false),         // 1.9 KiB
+            (131, false),           // 131 B
+            (1_229, false),         // 1.2 KiB
+            (976, false),           // 976 B
+            (16_756_736, false),    // 16 MiB
+            (17_081_344, false),    // 16.3 MiB
+            (21_197, false),        // 20.7 KiB
+        ]);
+        assert_eq!(plan.files_to_download(), 10);
+        let config = plan.recommended_config().unwrap();
+        // Mixed strategy: balanced concurrency with chunked downloads enabled.
         assert_eq!(config.concurrency(), 4);
         assert_eq!(config.connections_per_file(), 8);
         assert_eq!(config.chunk_threshold(), DEFAULT_CHUNK_THRESHOLD);

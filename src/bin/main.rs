@@ -474,10 +474,14 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
         println!("  Recommended config:");
         println!("    concurrency:        {}", rec.concurrency());
         println!("    connections/file:   {}", rec.connections_per_file());
-        println!(
-            "    chunk threshold:  {} MiB",
-            rec.chunk_threshold() / 1_048_576
-        );
+        if rec.chunk_threshold() == u64::MAX {
+            println!("    chunk threshold:  disabled (single-connection per file)");
+        } else {
+            println!(
+                "    chunk threshold:  {} MiB",
+                rec.chunk_threshold() / 1_048_576
+            );
+        }
     }
 
     Ok(())
