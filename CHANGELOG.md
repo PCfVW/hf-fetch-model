@@ -7,21 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — list-files, dry-run & download plan
+
 ### Added
 
 - **`list-files` subcommand** — inspect remote repo contents (filenames, sizes, SHA256) without downloading. Supports `--filter`, `--exclude`, `--preset`, `--no-checksum`, and `--show-cached` flags.
-- **`file_matches()` public function** — promoted from `pub(crate)` for use outside the download pipeline.
-- **`compile_glob_patterns()` public function** — builds compiled glob filters from pattern strings.
+- **`--dry-run` flag** — preview what would be downloaded, compare against local cache, and display recommended download settings. Available on the default download command (`hf-fm <REPO_ID> --dry-run`).
 - **`DownloadPlan` type** — new public API (`download_plan()`) for computing a download plan (file list, sizes, cache status) without downloading. Includes `recommended_config()` for plan-based optimization of `FetchConfig`.
 - **`FilePlan` type** — per-file entry within a `DownloadPlan`.
-- **`FetchConfig` accessors** — `concurrency()`, `connections_per_file()`, `chunk_threshold()` public const methods.
-- **`--dry-run` flag** — preview what would be downloaded, compare against local cache, and display recommended download settings. Available on the default download command (`hf-fm <REPO_ID> --dry-run`).
 - **`download_with_plan()` / `download_with_plan_blocking()`** — execute a download using a precomputed plan and config.
+- **`file_matches()` public function** — promoted from `pub(crate)` for use outside the download pipeline.
+- **`compile_glob_patterns()` public function** — builds compiled glob filters from pattern strings.
+- **`FetchConfig` accessors** — `concurrency()`, `connections_per_file()`, `chunk_threshold()` public const methods.
 
 ### Changed
 
 - **Implicit plan optimization** — `download_with_config()` now internally computes a `DownloadPlan` and applies recommended settings for unset config fields. Every download benefits from plan-based tuning automatically.
-
+- **Help text** — main command help now explains: "Downloads all files from a HuggingFace model repository. Use `--preset safetensors` to download only safetensors weights, config, and tokenizer files."
 - **MSRV bumped to 1.88** — aligns with the actual dependency floor (`cookie_store`, `time` already require 1.88). Previously advertised 1.75 but compilation required 1.88 regardless.
 
 ### Fixed

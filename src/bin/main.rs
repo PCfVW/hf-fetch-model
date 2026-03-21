@@ -18,7 +18,10 @@ use hf_fetch_model::progress::IndicatifProgress;
 use hf_fetch_model::repo;
 use hf_fetch_model::{compile_glob_patterns, file_matches, FetchConfig, FetchError, Filter};
 
-/// Fast `HuggingFace` model downloads.
+/// Downloads all files from a `HuggingFace` model repository.
+///
+/// Use `--preset safetensors` to download only safetensors weights,
+/// config, and tokenizer files.
 #[derive(Parser)]
 #[command(name = "hf-fetch-model", version, about)]
 #[command(args_conflicts_with_subcommands = true)]
