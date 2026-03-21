@@ -11,6 +11,7 @@ cargo install hf-fetch-model --features cli
 | Command | Description |
 |---------|-------------|
 | *(default)* | Download a model: `hf-fm <REPO_ID>` |
+| `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
 | `download-file <REPO_ID> <FILENAME>` | Download a single file and print its cache path |
 | `search <QUERY>` | Search the HuggingFace Hub for models (by downloads) |
 | `status [REPO_ID]` | Show download status — per-repo detail, or cache-wide summary |
@@ -18,6 +19,35 @@ cargo install hf-fetch-model --features cli
 | `discover` | Find new model families on the Hub not yet cached locally |
 
 `<ARG>` = required, `[ARG]` = optional.
+
+## List-files examples
+
+```sh
+# List all files in a repo
+hf-fm list-files google/gemma-2-2b-it
+
+# List only safetensors-related files
+hf-fm list-files google/gemma-2-2b-it --preset safetensors
+
+# Custom filter
+hf-fm list-files google/gemma-2-2b-it --filter "*.safetensors"
+
+# Hide SHA256 column
+hf-fm list-files google/gemma-2-2b-it --no-checksum
+
+# Show which files are already in local cache
+hf-fm list-files google/gemma-2-2b-it --show-cached
+```
+
+## Dry-run example
+
+Preview what would be downloaded before committing:
+
+```sh
+hf-fm google/gemma-2-2b-it --preset safetensors --dry-run
+```
+
+Output shows per-file status (cached / to download), total and download sizes, and a recommended config based on the file size distribution.
 
 ## Download examples
 
@@ -72,11 +102,12 @@ hf-fm discover
 
 ## Download flags
 
-These flags apply to the default download command (`hf-fm <REPO_ID>`) and `download-file`.
+These flags apply to the default download command (`hf-fm <REPO_ID>`). `download-file` shares the performance flags but not `--dry-run`, `--filter`, or `--preset`.
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-v`, `--verbose` | Enable download diagnostics (plan, per-file decisions, throughput) | off |
+| `--dry-run` | Preview what would be downloaded (no actual download) | off |
 | `--chunk-threshold-mib` | Min file size (MiB) for multi-connection download | 100 |
 | `--concurrency` | Parallel file downloads | 4 |
 | `--connections-per-file` | Parallel HTTP connections per large file | 8 |
@@ -84,6 +115,18 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`) and `downl
 | `--filter` | Include glob pattern (repeatable) | all files |
 | `--output-dir` | Custom output directory | HF cache |
 | `--preset` | Filter preset: `safetensors`, `gguf`, `config-only` | — |
+| `--revision` | Git revision (branch, tag, SHA) | main |
+| `--token` | Auth token (or set `HF_TOKEN` env var) | — |
+
+## List-files flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--filter` | Include glob pattern (repeatable) | all files |
+| `--exclude` | Exclude glob pattern (repeatable) | none |
+| `--preset` | Filter preset: `safetensors`, `gguf`, `config-only` | — |
+| `--no-checksum` | Suppress the SHA256 column | off |
+| `--show-cached` | Show whether each file exists in local cache | off |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 

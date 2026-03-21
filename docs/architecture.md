@@ -9,6 +9,7 @@ candle-mi
 hf-fetch-model
   • repo file listing
   • file filtering (glob patterns)
+  • download plan (dry-run, plan-to-config optimization)
   • parallel file orchestration
   • multi-connection Range downloads (large files)
   • progress callbacks
@@ -42,6 +43,7 @@ hf-hub (tokio, .high())
 |--------|-----------|------|
 | `lib.rs` | public | Top-level download functions and re-exports |
 | `config` | public | `FetchConfig` builder and `Filter` presets |
+| `plan` | public | `DownloadPlan`, `FilePlan`, plan-to-config optimization |
 | `download` | public | Download orchestration, `DownloadOutcome` |
 | `discover` | public | Search, model card, `GateStatus` |
 | `cache` | public | Cache inspection and status |

@@ -35,6 +35,29 @@ Exact match:
   Library:      vllm
   Languages:    en, fr, es, de, it, pt, nl, zh, ja, ko, ar
 
+$ hf-fm list-files mistralai/Ministral-3-3B-Instruct-2512 --preset safetensors
+  File                                               Size      SHA256
+  model-00001-of-00002.safetensors                 3.68 GiB    a1b2c3d4e5f6
+  model-00002-of-00002.safetensors                 2.88 GiB    f6e5d4c3b2a1
+  config.json                                        856 B     —
+  ...
+  7 files, 6.57 GiB total
+
+$ hf-fm mistralai/Ministral-3-3B-Instruct-2512 --preset safetensors --dry-run
+  Repo:     mistralai/Ministral-3-3B-Instruct-2512
+  Revision: main
+
+  File                                               Size      Status
+  model-00001-of-00002.safetensors                 3.68 GiB    to download
+  model-00002-of-00002.safetensors                 2.88 GiB    to download
+  ...
+  Total: 6.57 GiB (7 files, 0 cached, 7 to download)
+
+  Recommended config:
+    concurrency:        2
+    connections/file:   8
+    chunk threshold:  100 MiB
+
 $ hf-fm mistralai/Ministral-3-3B-Instruct-2512 --preset safetensors
 Downloaded to: ~/.cache/huggingface/hub/models--mistralai--Ministral-3-3B.../snapshots/...
 ```

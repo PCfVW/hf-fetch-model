@@ -94,6 +94,39 @@ let outcome = hf_fetch_model::download_file_blocking(
 )?;
 ```
 
+## Download plan (dry-run API)
+
+Before downloading, you can compute a plan that shows what needs downloading vs. what is already cached:
+
+```rust
+use hf_fetch_model::{FetchConfig, Filter, download_plan};
+
+let config = Filter::safetensors().build()?;
+let plan = download_plan("google/gemma-2-2b-it", &config).await?;
+
+println!("Total: {} bytes", plan.total_bytes);
+println!("Cached: {} bytes", plan.cached_bytes);
+println!("To download: {} bytes ({} files)",
+    plan.download_bytes, plan.files_to_download());
+```
+
+The plan also computes an optimized config based on the file size distribution:
+
+```rust
+// Get recommended settings (concurrency, connections/file, chunk threshold)
+let optimized = plan.recommended_config()?;
+
+// Or customize from the recommended baseline
+let custom = plan.recommended_config_builder()
+    .concurrency(2)
+    .build()?;
+
+// Execute with the optimized config
+let outcome = hf_fetch_model::download_with_plan(&plan, &optimized).await?;
+```
+
+When no explicit plan is used, `download_with_config()` internally computes a plan and applies recommended settings for any fields the caller did not explicitly set.
+
 ## Cache and download outcome
 
 All download functions return `DownloadOutcome<T>`, which distinguishes cache hits from network downloads:
