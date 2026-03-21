@@ -15,7 +15,8 @@ use tracing_subscriber::EnvFilter;
 use hf_fetch_model::cache;
 use hf_fetch_model::discover;
 use hf_fetch_model::progress::IndicatifProgress;
-use hf_fetch_model::{FetchConfig, FetchError, Filter};
+use hf_fetch_model::repo;
+use hf_fetch_model::{compile_glob_patterns, file_matches, FetchConfig, FetchError, Filter};
 
 /// Fast `HuggingFace` model downloads.
 #[derive(Parser)]
@@ -144,6 +145,32 @@ enum Commands {
         #[arg(long)]
         token: Option<String>,
     },
+    /// List files in a remote `HuggingFace` repository (no download).
+    ListFiles {
+        /// The repository identifier (e.g., `"google/gemma-2-2b-it"`).
+        repo_id: String,
+        /// Git revision (branch, tag, or commit SHA).
+        #[arg(long)]
+        revision: Option<String>,
+        /// Authentication token (or set `HF_TOKEN` env var).
+        #[arg(long)]
+        token: Option<String>,
+        /// Include glob pattern (repeatable).
+        #[arg(long, action = clap::ArgAction::Append)]
+        filter: Vec<String>,
+        /// Exclude glob pattern (repeatable).
+        #[arg(long, action = clap::ArgAction::Append)]
+        exclude: Vec<String>,
+        /// Filter preset (`safetensors`, `gguf`, `config-only`).
+        #[arg(long, value_enum)]
+        preset: Option<Preset>,
+        /// Suppress the SHA256 column.
+        #[arg(long)]
+        no_checksum: bool,
+        /// Show whether each file is in the local cache.
+        #[arg(long)]
+        show_cached: bool,
+    },
 }
 
 // EXHAUSTIVE: internal CLI dispatch enum; crate owns all variants
@@ -166,7 +193,8 @@ fn main() -> ExitCode {
             Commands::ListFamilies
             | Commands::Discover { .. }
             | Commands::Search { .. }
-            | Commands::Status { .. },
+            | Commands::Status { .. }
+            | Commands::ListFiles { .. },
         ) => false,
     };
 
@@ -247,6 +275,26 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         }) => run_status(repo_id.as_str(), revision.as_deref(), token.as_deref()),
         Some(Commands::Status { repo_id: None, .. }) => run_status_all(),
+        // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
+        Some(Commands::ListFiles {
+            repo_id,
+            revision,
+            token,
+            filter,
+            exclude,
+            preset,
+            no_checksum,
+            show_cached,
+        }) => run_list_files(
+            repo_id.as_str(),
+            revision.as_deref(),
+            token.as_deref(),
+            &filter,
+            &exclude,
+            preset.as_ref(),
+            no_checksum,
+            show_cached,
+        ),
         None => run_download(cli.download),
     }
 }
@@ -670,6 +718,171 @@ fn run_status(
     let missing = status.missing_count();
     println!();
     println!("{complete}/{total} complete, {partial} partial, {missing} missing");
+
+    Ok(())
+}
+
+/// Lists files in a remote `HuggingFace` repository without downloading.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn run_list_files(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    filter_patterns: &[String],
+    exclude_patterns: &[String],
+    preset: Option<&Preset>,
+    no_checksum: bool,
+    show_cached: bool,
+) -> Result<(), FetchError> {
+    if !repo_id.contains('/') {
+        return Err(FetchError::InvalidArgument(format!(
+            "invalid REPO_ID \"{repo_id}\": expected \"org/model\" format \
+             (e.g., \"google/gemma-2-2b-it\")"
+        )));
+    }
+
+    // Build glob filters from preset + explicit patterns.
+    let mut include_patterns: Vec<String> = match preset {
+        Some(&Preset::Safetensors) => vec![
+            "*.safetensors".to_owned(),
+            "*.json".to_owned(),
+            "*.txt".to_owned(),
+        ],
+        Some(&Preset::Gguf) => vec![
+            "*.gguf".to_owned(),
+            "*.json".to_owned(),
+            "*.txt".to_owned(),
+        ],
+        Some(&Preset::ConfigOnly) => vec![
+            "*.json".to_owned(),
+            "*.txt".to_owned(),
+            "*.md".to_owned(),
+        ],
+        None => Vec::new(),
+    };
+    for p in filter_patterns {
+        include_patterns.push(p.clone());
+    }
+    let include = compile_glob_patterns(&include_patterns)?;
+    let exclude = compile_glob_patterns(exclude_patterns)?;
+
+    // Resolve token from arg or env.
+    let resolved_token = token
+        .map(ToOwned::to_owned)
+        .or_else(|| std::env::var("HF_TOKEN").ok());
+
+    // Fetch remote file list with metadata.
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+    let files = rt.block_on(repo::list_repo_files_with_metadata(
+        repo_id,
+        resolved_token.as_deref(),
+        revision,
+    ))?;
+
+    // Apply glob filters.
+    let filtered: Vec<_> = files
+        .into_iter()
+        .filter(|f| {
+            // BORROW: explicit .as_str() instead of Deref coercion
+            file_matches(f.filename.as_str(), include.as_ref(), exclude.as_ref())
+        })
+        .collect();
+
+    // Resolve cache state if requested.
+    let cache_status: Vec<bool> = if show_cached {
+        let cache_dir = cache::hf_cache_dir()?;
+        let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
+        let repo_dir = cache_dir.join(&repo_folder);
+        let revision_str = revision.unwrap_or("main");
+        let commit_hash = cache::read_ref(&repo_dir, revision_str);
+        let snapshot_dir = commit_hash.map(|h| repo_dir.join("snapshots").join(h));
+
+        filtered
+            .iter()
+            .map(|f| {
+                snapshot_dir
+                    .as_ref()
+                    .is_some_and(|dir| dir.join(f.filename.as_str()).exists())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Print table header.
+    if no_checksum {
+        if show_cached {
+            println!("  {:<48} {:>10}  Cached", "File", "Size");
+            println!("  {:<48} {:>10}  {:-<6}", "", "", "");
+        } else {
+            println!("  {:<48} {:>10}", "File", "Size");
+            println!("  {:<48} {:>10}", "", "");
+        }
+    } else if show_cached {
+        println!(
+            "  {:<48} {:>10}  {:<12}  Cached",
+            "File", "Size", "SHA256"
+        );
+        println!("  {:<48} {:>10}  {:<12}  {:-<6}", "", "", "", "");
+    } else {
+        println!("  {:<48} {:>10}  {:<12}", "File", "Size", "SHA256");
+        println!("  {:<48} {:>10}  {:<12}", "", "", "");
+    }
+
+    // Print each file row.
+    let mut total_bytes: u64 = 0;
+    let mut cached_count: usize = 0;
+
+    for (i, f) in filtered.iter().enumerate() {
+        let size = f.size.unwrap_or(0);
+        total_bytes = total_bytes.saturating_add(size);
+
+        let size_str = format_size(size);
+        let sha_str = if no_checksum {
+            String::new()
+        } else {
+            f.sha256
+                .as_deref()
+                .and_then(|s| s.get(..12))
+                .unwrap_or("\u{2014}")
+                .to_owned()
+        };
+
+        if show_cached {
+            let is_cached = cache_status.get(i).copied().unwrap_or(false);
+            if is_cached {
+                cached_count += 1;
+            }
+            let cached_mark = if is_cached { "\u{2713}" } else { "\u{2717}" };
+            if no_checksum {
+                println!("  {:<48} {:>10}  {cached_mark}", f.filename, size_str);
+            } else {
+                println!(
+                    "  {:<48} {:>10}  {:<12}  {cached_mark}",
+                    f.filename, size_str, sha_str
+                );
+            }
+        } else if no_checksum {
+            println!("  {:<48} {:>10}", f.filename, size_str);
+        } else {
+            println!("  {:<48} {:>10}  {sha_str}", f.filename, size_str);
+        }
+    }
+
+    // Summary line.
+    let count = filtered.len();
+    println!("  {:\u{2500}<72}", "");
+    if show_cached {
+        println!(
+            "  {count} files, {} total ({cached_count} cached)",
+            format_size(total_bytes)
+        );
+    } else {
+        println!("  {count} files, {} total", format_size(total_bytes));
+    }
 
     Ok(())
 }

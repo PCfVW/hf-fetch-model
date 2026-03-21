@@ -319,9 +319,12 @@ impl Filter {
     }
 }
 
-/// Returns whether a filename passes the include/exclude filters.
+/// Returns whether `filename` passes the given include/exclude glob filters.
+///
+/// A file matches when it is not excluded by any `exclude` pattern **and**
+/// either there are no `include` patterns or it matches at least one.
 #[must_use]
-pub(crate) fn file_matches(
+pub fn file_matches(
     filename: &str,
     include: Option<&GlobSet>,
     exclude: Option<&GlobSet>,
@@ -355,6 +358,19 @@ fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>, FetchError> {
         reason: e.to_string(),
     })?;
     Ok(Some(set))
+}
+
+/// Builds a compiled [`GlobSet`] from a list of pattern strings.
+///
+/// Returns `None` if the pattern list is empty. This is useful for callers
+/// that need glob filtering outside the download pipeline (e.g., the
+/// `list-files` subcommand).
+///
+/// # Errors
+///
+/// Returns [`FetchError::InvalidPattern`] if any pattern fails to compile.
+pub fn compile_glob_patterns(patterns: &[String]) -> Result<Option<GlobSet>, FetchError> {
+    build_globset(patterns)
 }
 
 #[cfg(test)]
