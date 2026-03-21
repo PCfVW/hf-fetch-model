@@ -6,48 +6,32 @@ hf-fetch-model installs two binaries: `hf-fetch-model` (explicit) and `hf-fm` (s
 cargo install hf-fetch-model --features cli
 ```
 
+## Table of contents
+
+- [Subcommands](#subcommands)
+- [Download examples](#download-examples)
+- [Dry-run example](#dry-run-example)
+- [List-files examples](#list-files-examples)
+- [Search examples](#search-examples)
+- [Other commands](#other-commands)
+- [Download flags](#download-flags)
+- [List-files flags](#list-files-flags)
+- [Search flags](#search-flags)
+- [General flags](#general-flags)
+
 ## Subcommands
 
 | Command | Description |
 |---------|-------------|
 | *(default)* | Download a model: `hf-fm <REPO_ID>` |
-| `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
+| `discover` | Find new model families on the Hub not yet cached locally |
 | `download-file <REPO_ID> <FILENAME>` | Download a single file and print its cache path |
+| `list-families` | List model families (`model_type`) in local cache |
+| `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
 | `search <QUERY>` | Search the HuggingFace Hub for models (by downloads) |
 | `status [REPO_ID]` | Show download status — per-repo detail, or cache-wide summary |
-| `list-families` | List model families (`model_type`) in local cache |
-| `discover` | Find new model families on the Hub not yet cached locally |
 
 `<ARG>` = required, `[ARG]` = optional.
-
-## List-files examples
-
-```sh
-# List all files in a repo
-hf-fm list-files google/gemma-2-2b-it
-
-# List only safetensors-related files
-hf-fm list-files google/gemma-2-2b-it --preset safetensors
-
-# Custom filter
-hf-fm list-files google/gemma-2-2b-it --filter "*.safetensors"
-
-# Hide SHA256 column
-hf-fm list-files google/gemma-2-2b-it --no-checksum
-
-# Show which files are already in local cache
-hf-fm list-files google/gemma-2-2b-it --show-cached
-```
-
-## Dry-run example
-
-Preview what would be downloaded before committing:
-
-```sh
-hf-fm google/gemma-2-2b-it --preset safetensors --dry-run
-```
-
-Output shows per-file status (cached / to download), total and download sizes, and a recommended config based on the file size distribution.
 
 ## Download examples
 
@@ -69,6 +53,35 @@ hf-fm download-file mntss/clt-gemma-2-2b-426k W_dec_0.safetensors
 
 # Download with diagnostics
 hf-fm google/gemma-2-2b-it -v
+```
+
+## Dry-run example
+
+Preview what would be downloaded before committing:
+
+```sh
+hf-fm google/gemma-2-2b-it --preset safetensors --dry-run
+```
+
+Output shows per-file status (cached / to download), total and download sizes, and a recommended config based on the file size distribution.
+
+## List-files examples
+
+```sh
+# List all files in a repo
+hf-fm list-files google/gemma-2-2b-it
+
+# List only safetensors-related files
+hf-fm list-files google/gemma-2-2b-it --preset safetensors
+
+# Custom filter
+hf-fm list-files google/gemma-2-2b-it --filter "*.safetensors"
+
+# Hide SHA256 column
+hf-fm list-files google/gemma-2-2b-it --no-checksum
+
+# Show which files are already in local cache
+hf-fm list-files google/gemma-2-2b-it --show-cached
 ```
 
 ## Search examples
@@ -122,20 +135,20 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--filter` | Include glob pattern (repeatable) | all files |
 | `--exclude` | Exclude glob pattern (repeatable) | none |
-| `--preset` | Filter preset: `safetensors`, `gguf`, `config-only` | — |
+| `--filter` | Include glob pattern (repeatable) | all files |
 | `--no-checksum` | Suppress the SHA256 column | off |
-| `--show-cached` | Show whether each file exists in local cache | off |
+| `--preset` | Filter preset: `safetensors`, `gguf`, `config-only` | — |
 | `--revision` | Git revision (branch, tag, SHA) | main |
+| `--show-cached` | Show whether each file exists in local cache | off |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
 ## Search flags
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--limit` | Maximum number of results | 20 |
 | `--exact` | Return only the exact model ID match; show model card metadata | off |
+| `--limit` | Maximum number of results | 20 |
 
 ## General flags
 
