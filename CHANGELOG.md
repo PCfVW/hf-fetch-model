@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Implicit plan optimization** — `download_with_config()` now internally computes a `DownloadPlan` and applies recommended settings for unset config fields. Every download benefits from plan-based tuning automatically.
 - **Help text** — main command help now explains: "Downloads all files from a HuggingFace model repository. Use `--preset safetensors` to download only safetensors weights, config, and tokenizer files."
 - **MSRV bumped to 1.88** — aligns with the actual dependency floor (`cookie_store`, `time` already require 1.88). Previously advertised 1.75 but compilation required 1.88 regardless.
+- **Documentation** — README, CLI reference, configuration guide, and architecture doc updated for `list-files` and `--dry-run`. New download plan (dry-run API) section in configuration guide.
 
 ### Fixed
 
