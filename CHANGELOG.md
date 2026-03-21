@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CLI integration tests** — 15 tests exercising the `list-files` subcommand, `--dry-run` flag, help text, error handling, and output formatting. Includes a regression test for the chunk threshold display bug. CI now runs `cargo test --all-features` to include CLI tests.
+
 ### Fixed
 
 - **Plan-to-config optimization** — the "many small files" strategy no longer triggers when large files (≥1 GiB) are present. A repo with 2 × 4 GiB safetensors + 8 small config files now correctly uses the mixed strategy (concurrency 4, 8 connections/file, 100 MiB chunk threshold) instead of disabling chunked downloads.
