@@ -404,6 +404,7 @@ pub async fn download_with_plan(
     // Delegate to the standard download path which will re-check cache
     // internally. The plan's value is the dry-run preview and the
     // recommended config computed by the caller.
+    // BORROW: explicit .clone() for owned String argument
     download_with_config(plan.repo_id.clone(), config).await
 }
 

@@ -414,6 +414,7 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
         builder = builder.exclude(pattern.as_str());
     }
     if let Some(ref dir) = args.output_dir {
+        // BORROW: explicit .clone() for owned PathBuf
         builder = builder.output_dir(dir.clone());
     }
 
@@ -473,7 +474,6 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
         println!("  Recommended config:");
         println!("    concurrency:        {}", rec.concurrency());
         println!("    connections/file:   {}", rec.connections_per_file());
-        // CAST: u64 → u64, display-only division
         println!(
             "    chunk threshold:  {} MiB",
             rec.chunk_threshold() / 1_048_576
@@ -868,12 +868,14 @@ fn run_list_files(
         None => Vec::new(),
     };
     for p in filter_patterns {
+        // BORROW: explicit .clone() for owned String
         include_patterns.push(p.clone());
     }
     let include = compile_glob_patterns(&include_patterns)?;
     let exclude = compile_glob_patterns(exclude_patterns)?;
 
     // Resolve token from arg or env.
+    // BORROW: explicit .to_owned() for Option<&str> → Option<String>
     let resolved_token = token
         .map(ToOwned::to_owned)
         .or_else(|| std::env::var("HF_TOKEN").ok());

@@ -207,6 +207,7 @@ pub async fn download_plan(
         }
 
         files.push(FilePlan {
+            // BORROW: explicit .clone() for owned String field
             filename: rf.filename.clone(),
             size,
             cached,
@@ -216,7 +217,9 @@ pub async fn download_plan(
     let download_bytes = total_bytes.saturating_sub(cached_bytes);
 
     Ok(DownloadPlan {
+        // BORROW: explicit .to_owned() for &str → owned String
         repo_id: repo_id.to_owned(),
+        // BORROW: explicit .to_owned() for &str → owned String
         revision: commit_hash.unwrap_or_else(|| revision_str.to_owned()),
         files,
         total_bytes,

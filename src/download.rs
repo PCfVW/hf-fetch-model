@@ -1078,6 +1078,7 @@ fn merge_plan_recommended(
             )
             .is_some();
             crate::plan::FilePlan {
+                // BORROW: explicit .clone() for owned String field
                 filename: f.filename.clone(),
                 size,
                 cached,
