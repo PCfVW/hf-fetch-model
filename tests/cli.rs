@@ -164,6 +164,28 @@ fn list_files_show_cached_adds_column() {
 }
 
 #[test]
+fn list_files_show_cached_marks_complete_files() {
+    // julien-c/dummy-unknown should be fully cached from other tests.
+    // Complete files must show ✓, never "partial".
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["list-files", "julien-c/dummy-unknown", "--show-cached"]));
+    assert!(success, "list-files --show-cached failed: {stderr}");
+    assert!(
+        stdout.contains('\u{2713}'),
+        "cached files should show \u{2713} mark, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("partial"),
+        "fully cached files should not show 'partial', got:\n{stdout}"
+    );
+    // Summary should report cached count.
+    assert!(
+        stdout.contains("cached"),
+        "summary should mention cached count, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn list_files_filter_limits_output() {
     let (stdout, stderr, success) =
         run(hf_fm().args(["list-files", "julien-c/dummy-unknown", "--filter", "*.json"]));

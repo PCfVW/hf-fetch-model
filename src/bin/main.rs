@@ -905,7 +905,9 @@ fn run_list_files(
         .collect();
 
     // Resolve cache state if requested.
-    let cache_status: Vec<bool> = if show_cached {
+    // Three states: "✓" (complete), "partial" (local < expected), "✗" (missing).
+    // Uses the same size-comparison logic as `status` (cache.rs).
+    let cache_marks: Vec<String> = if show_cached {
         let cache_dir = cache::hf_cache_dir()?;
         let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
         let repo_dir = cache_dir.join(&repo_folder);
@@ -916,9 +918,22 @@ fn run_list_files(
         filtered
             .iter()
             .map(|f| {
-                snapshot_dir
+                let local_path = snapshot_dir
                     .as_ref()
-                    .is_some_and(|dir| dir.join(f.filename.as_str()).exists())
+                    // BORROW: explicit .as_str() instead of Deref coercion
+                    .map(|dir| dir.join(f.filename.as_str()));
+                match local_path {
+                    Some(ref path) if path.exists() => {
+                        let local_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                        let expected = f.size.unwrap_or(0);
+                        if expected > 0 && local_size < expected {
+                            "partial".to_owned()
+                        } else {
+                            "\u{2713}".to_owned()
+                        }
+                    }
+                    _ => "\u{2717}".to_owned(),
+                }
             })
             .collect()
     } else {
@@ -962,16 +977,15 @@ fn run_list_files(
         };
 
         if show_cached {
-            let is_cached = cache_status.get(i).copied().unwrap_or(false);
-            if is_cached {
+            let mark = cache_marks.get(i).map_or("\u{2717}", String::as_str);
+            if mark == "\u{2713}" {
                 cached_count += 1;
             }
-            let cached_mark = if is_cached { "\u{2713}" } else { "\u{2717}" };
             if no_checksum {
-                println!("  {:<48} {:>10}  {cached_mark}", f.filename, size_str);
+                println!("  {:<48} {:>10}  {mark}", f.filename, size_str);
             } else {
                 println!(
-                    "  {:<48} {:>10}  {:<12}  {cached_mark}",
+                    "  {:<48} {:>10}  {:<12}  {mark}",
                     f.filename, size_str, sha_str
                 );
             }
