@@ -4,6 +4,7 @@
 //!
 //! These tests exercise the binary output directly using `std::process::Command`.
 //! They require the `cli` feature to compile (the binary needs `clap`).
+//! Network tests use `julien-c/dummy-unknown`, a tiny public `HuggingFace` Hub repo.
 //! Run with: `cargo test --all-features`
 
 #![cfg(feature = "cli")]
