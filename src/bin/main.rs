@@ -174,7 +174,7 @@ enum Commands {
         /// Suppress the SHA256 column.
         #[arg(long)]
         no_checksum: bool,
-        /// Show cache status for each file (`\u{2713}` complete, `partial`, `\u{2717}` missing).
+        /// Show cache status for each file (complete, partial, or missing).
         #[arg(long)]
         show_cached: bool,
     },

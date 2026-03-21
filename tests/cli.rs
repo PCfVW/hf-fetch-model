@@ -71,6 +71,11 @@ fn list_files_help_shows_all_flags() {
             "list-files help should contain {flag}, got:\n{stdout}"
         );
     }
+    // --show-cached help should describe the three cache states.
+    assert!(
+        stdout.contains("partial"),
+        "list-files help should describe partial state, got:\n{stdout}"
+    );
 }
 
 // -----------------------------------------------------------------------
