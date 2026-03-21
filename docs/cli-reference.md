@@ -140,7 +140,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--no-checksum` | Suppress the SHA256 column | off |
 | `--preset` | Filter preset: `safetensors`, `gguf`, `config-only` | — |
 | `--revision` | Git revision (branch, tag, SHA) | main |
-| `--show-cached` | Show whether each file exists in local cache | off |
+| `--show-cached` | Show cache status: complete (✓), partial, or missing (✗) | off |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
 ## Search flags
