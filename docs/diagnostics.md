@@ -29,7 +29,8 @@ tracing_subscriber::fmt()
 ```
 DEBUG hf_fetch_model: listing repository files repo_id="allenai/OLMo-1B-hf"
 DEBUG hf_fetch_model: metadata fetch succeeded files_with_size=8 total_files=8
-DEBUG hf_fetch_model: download plan total_files=8 concurrency=4 connections_per_file=8 chunk_threshold_mib=100 chunked_enabled=true
+DEBUG hf_fetch_model: merged plan-recommended settings concurrency=4 connections_per_file=8 chunk_threshold=104857600
+DEBUG hf_fetch_model: download settings (after plan optimization) total_files=8 concurrency=4
 DEBUG hf_fetch_model: chunked download (multi-connection) filename="model.safetensors" size_mib=2475 connections=8
 DEBUG hf_fetch_model: single-connection download (below chunk threshold) filename="config.json" size_mib=0
 DEBUG hf_fetch_model: download complete filename="model.safetensors" elapsed_secs="23.1" throughput_mbps="857.2"

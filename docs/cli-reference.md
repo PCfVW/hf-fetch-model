@@ -55,6 +55,26 @@ hf-fm download-file mntss/clt-gemma-2-2b-426k W_dec_0.safetensors
 hf-fm google/gemma-2-2b-it -v
 ```
 
+After a successful download, a summary line shows total size, elapsed time, and throughput:
+
+```
+Downloaded to: ~/.cache/huggingface/hub/models--google--gemma-2-2b-it/snapshots/...
+  4.89 GiB in 114.9s (43.5 MiB/s)
+```
+
+In non-TTY contexts (pipes, CI), periodic progress lines are emitted to stderr instead of progress bars:
+
+```
+[hf-fm] model-00002-of-00002.safetensors: 22.96 MiB/229.54 MiB (10%)
+[hf-fm] model-00001-of-00002.safetensors: 475.71 MiB/4.65 GiB (10%)
+```
+
+A warning is emitted when `--filter` duplicates a pattern already included by `--preset`:
+
+```
+warning: --filter "*.safetensors" is redundant with --preset safetensors
+```
+
 ## Dry-run example
 
 Preview what would be downloaded before committing:
@@ -99,6 +119,8 @@ hf-fm search mistral,3B,instruct
 hf-fm search mistralai/Ministral-3-3B-Instruct-2512 --exact
 ```
 
+Common quantization synonyms are normalized automatically: `8bit`, `8-bit`, `int8`, and `INT8` all produce the same results. Same for `4bit`/`4-bit`/`int4` and `fp8`/`float8`.
+
 ## Other commands
 
 ```sh
@@ -121,9 +143,9 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 |------|-------------|---------|
 | `-v`, `--verbose` | Enable download diagnostics (plan, per-file decisions, throughput) | off |
 | `--dry-run` | Preview what would be downloaded (no actual download) | off |
-| `--chunk-threshold-mib` | Min file size (MiB) for multi-connection download | 100 |
-| `--concurrency` | Parallel file downloads | 4 |
-| `--connections-per-file` | Parallel HTTP connections per large file | 8 |
+| `--chunk-threshold-mib` | Min file size (MiB) for multi-connection download | auto-tuned |
+| `--concurrency` | Parallel file downloads | auto-tuned |
+| `--connections-per-file` | Parallel HTTP connections per large file | auto-tuned |
 | `--exclude` | Exclude glob pattern (repeatable) | none |
 | `--filter` | Include glob pattern (repeatable) | all files |
 | `--output-dir` | Custom output directory | HF cache |

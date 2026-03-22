@@ -200,7 +200,9 @@ impl FetchConfigBuilder {
 
     /// Sets the number of files to download concurrently.
     ///
-    /// Defaults to 4.
+    /// When omitted, the download plan optimizer auto-tunes this value
+    /// based on file count and size distribution. Falls back to 4 if
+    /// no plan recommendation is available.
     #[must_use]
     pub fn concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = Some(concurrency);
@@ -265,8 +267,11 @@ impl FetchConfigBuilder {
     ///
     /// Files at or above this threshold are downloaded using multiple HTTP
     /// Range connections in parallel. Files below use the standard single
-    /// connection. Defaults to 100 MiB (104\_857\_600 bytes). Set to
-    /// `u64::MAX` to disable chunked downloads entirely.
+    /// connection. Set to `u64::MAX` to disable chunked downloads entirely.
+    ///
+    /// When omitted, the download plan optimizer auto-tunes this value
+    /// based on file size distribution. Falls back to 100 MiB
+    /// (104\_857\_600 bytes) if no plan recommendation is available.
     #[must_use]
     pub fn chunk_threshold(mut self, bytes: u64) -> Self {
         self.chunk_threshold = Some(bytes);
@@ -275,7 +280,9 @@ impl FetchConfigBuilder {
 
     /// Sets the number of parallel HTTP connections per large file.
     ///
-    /// Only applies to files at or above `chunk_threshold`. Defaults to 8.
+    /// Only applies to files at or above `chunk_threshold`. When omitted,
+    /// the download plan optimizer auto-tunes this value based on file size
+    /// distribution. Falls back to 8 if no plan recommendation is available.
     #[must_use]
     pub fn connections_per_file(mut self, connections: usize) -> Self {
         self.connections_per_file = Some(connections);

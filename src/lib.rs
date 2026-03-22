@@ -78,9 +78,10 @@ use hf_hub::{Repo, RepoType};
 /// Downloads all files from a `HuggingFace` model repository.
 ///
 /// Uses high-throughput mode for maximum download speed, including
-/// multi-connection chunked downloads for large files (≥100 MiB by default,
-/// 8 parallel connections per file). Files are stored in the standard
-/// `HuggingFace` cache layout (`~/.cache/huggingface/hub/`).
+/// auto-tuned concurrency, chunked multi-connection downloads for large
+/// files, and plan-optimized settings based on file size distribution.
+/// Files are stored in the standard `HuggingFace` cache layout
+/// (`~/.cache/huggingface/hub/`).
 ///
 /// Authentication is handled via the `HF_TOKEN` environment variable when set.
 ///
@@ -194,8 +195,8 @@ pub fn download_with_config_blocking(
 /// `"config.json"`, `"model.safetensors"`), and each value is the
 /// absolute local path to the downloaded file.
 ///
-/// Uses the same high-throughput defaults as [`download()`]: multi-connection
-/// chunked downloads for large files (≥100 MiB, 8 parallel connections).
+/// Uses the same high-throughput defaults as [`download()`]: auto-tuned
+/// concurrency and chunked multi-connection downloads for large files.
 ///
 /// For filtering, progress, and other options, use
 /// [`download_files_with_config()`].
@@ -286,10 +287,10 @@ pub fn download_files_blocking(
 /// checksums match when `verify_checksums` is enabled), the download
 /// is skipped and the cached path is returned immediately.
 ///
-/// Files at or above [`FetchConfig`]'s `chunk_threshold` (default 100 MiB)
-/// are downloaded using multiple parallel HTTP Range connections
-/// (`connections_per_file`, default 8). Smaller files use a single
-/// connection.
+/// Files at or above [`FetchConfig`]'s `chunk_threshold` (auto-tuned by
+/// the download plan optimizer, or 100 MiB fallback) are downloaded using
+/// multiple parallel HTTP Range connections (`connections_per_file`,
+/// auto-tuned or 8 fallback). Smaller files use a single connection.
 ///
 /// # Arguments
 ///

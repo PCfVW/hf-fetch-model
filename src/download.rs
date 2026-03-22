@@ -124,7 +124,7 @@ impl DownloadSettings {
 /// Each file is downloaded via `hf-hub`'s `.get()` method, which respects
 /// the `HuggingFace` cache layout (`~/.cache/huggingface/hub/`).
 ///
-/// - **Concurrency**: downloads up to `concurrency` files in parallel (default 4).
+/// - **Concurrency**: downloads up to `concurrency` files in parallel (auto-tuned by the plan optimizer, or 4 fallback).
 /// - **Resume**: `hf-hub` skips already-cached files automatically.
 /// - **Retry**: transient failures are retried with exponential backoff + jitter.
 /// - **Checksum**: SHA256 verification against `HuggingFace` LFS metadata.

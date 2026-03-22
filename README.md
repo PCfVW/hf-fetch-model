@@ -20,15 +20,15 @@ cargo install hf-fetch-model --features cli
 $ hf-fm search mistral,3B,instruct
 Models matching "mistral,3B,instruct" (by downloads):
 
-  hf-fm mistralai/Ministral-3-3B-Instruct-2512           (159.7K downloads)
-  hf-fm mistralai/Ministral-3-3B-Instruct-2512-BF16      (62.6K downloads)
-  hf-fm mistralai/Ministral-3-3B-Instruct-2512-GGUF      (32.7K downloads)
+  hf-fm mistralai/Ministral-3-3B-Instruct-2512           (159,700 downloads)
+  hf-fm mistralai/Ministral-3-3B-Instruct-2512-BF16      (62,600 downloads)
+  hf-fm mistralai/Ministral-3-3B-Instruct-2512-GGUF      (32,700 downloads)
   ...
 
 $ hf-fm search mistralai/Ministral-3-3B-Instruct-2512 --exact
 Exact match:
 
-  hf-fm mistralai/Ministral-3-3B-Instruct-2512           (159.7K downloads)
+  hf-fm mistralai/Ministral-3-3B-Instruct-2512           (159,700 downloads)
 
   License:      apache-2.0
   Pipeline:     text-generation
@@ -60,6 +60,7 @@ $ hf-fm mistralai/Ministral-3-3B-Instruct-2512 --preset safetensors --dry-run
 
 $ hf-fm mistralai/Ministral-3-3B-Instruct-2512 --preset safetensors
 Downloaded to: ~/.cache/huggingface/hub/models--mistralai--Ministral-3-3B.../snapshots/...
+  6.57 GiB in 18.2s (369.1 MiB/s)
 ```
 
 ## Library quick start

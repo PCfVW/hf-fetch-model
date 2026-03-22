@@ -27,14 +27,14 @@ let outcome = hf_fetch_model::download_with_config(
 | `.token_from_env()` | Read `HF_TOKEN` env var | — |
 | `.filter(glob)` | Include pattern (repeatable) | all files |
 | `.exclude(glob)` | Exclude pattern (repeatable) | none |
-| `.concurrency(n)` | Parallel file downloads | 4 |
+| `.concurrency(n)` | Parallel file downloads | auto-tuned |
 | `.output_dir(path)` | Custom cache directory | HF default |
 | `.timeout_per_file(dur)` | Per-file timeout | 300s |
 | `.timeout_total(dur)` | Overall timeout | unlimited |
 | `.max_retries(n)` | Retries per file | 3 |
 | `.verify_checksums(bool)` | SHA256 verification | true |
-| `.chunk_threshold(bytes)` | Min file size for multi-connection download | 100 MiB |
-| `.connections_per_file(n)` | Parallel connections per large file | 8 |
+| `.chunk_threshold(bytes)` | Min file size for multi-connection download | auto-tuned |
+| `.connections_per_file(n)` | Parallel connections per large file | auto-tuned |
 | `.on_progress(closure)` | Progress callback | — |
 
 ## Filter presets

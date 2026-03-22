@@ -28,7 +28,7 @@ hf-hub (tokio, .high())
 `hf-hub` provides single-file downloads with HuggingFace cache compatibility. hf-fetch-model wraps it and adds:
 
 - **Repo-level orchestration** — download all files in a model repository with one call
-- **Multi-connection chunked downloads** — large files (≥100 MiB) are split into chunks downloaded in parallel via HTTP Range requests (8 connections by default)
+- **Multi-connection chunked downloads** — large files are split into chunks downloaded in parallel via HTTP Range requests (concurrency and connection count auto-tuned by the download plan optimizer based on file size distribution)
 - **File filtering** — glob patterns and presets to select which files to download
 - **Progress reporting** — per-file callbacks with optional `indicatif` progress bars
 - **Checksum verification** — SHA256 against HuggingFace LFS metadata

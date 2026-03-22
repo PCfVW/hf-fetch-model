@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **CI: auto-update candle-mi after publish** — the `publish.yml` workflow now automatically bumps the `hf-fetch-model` version in candle-mi's `Cargo.toml` and pushes to main after every crates.io release.
 - **Download count formatting** — search results now display download counts with thousand separators (e.g., `1,234,567`) instead of abbreviated suffixes (`1.2M`).
+- **Docs: auto-tuning** — updated rustdoc, CLI reference, and configuration docs to reflect that `concurrency`, `chunk_threshold`, and `connections_per_file` are now auto-tuned by the download plan optimizer when not explicitly set.
 
 ## [0.8.1] — Bug fixes, partial detection & CLI tests
 
