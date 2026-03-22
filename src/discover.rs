@@ -228,7 +228,42 @@ pub async fn discover_new_families<S: BuildHasher>(
     Ok(discovered)
 }
 
+/// Normalizes common quantization synonyms in a search query so that
+/// variant spellings (e.g., `"8bit"`, `"8-bit"`, `"int8"`) produce
+/// consistent results.
+#[must_use]
+fn normalize_quantization_terms(query: &str) -> String {
+    /// Synonym groups: all variants map to the first (canonical) form.
+    const SYNONYMS: &[(&[&str], &str)] = &[
+        (&["8bit", "8-bit", "int8"], "8-bit"),
+        (&["4bit", "4-bit", "int4"], "4-bit"),
+        (&["fp8", "float8"], "fp8"),
+    ];
+
+    query
+        .split_whitespace()
+        .map(|token| {
+            // BORROW: explicit .to_lowercase() for case-insensitive comparison
+            let lower = token.to_lowercase();
+            for &(variants, canonical) in SYNONYMS {
+                // BORROW: explicit .as_str() instead of Deref coercion
+                if variants.contains(&lower.as_str()) {
+                    // BORROW: explicit .to_owned() for &str → owned String
+                    return (*canonical).to_owned();
+                }
+            }
+            // BORROW: explicit .to_owned() for &str → owned String
+            token.to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Searches the `HuggingFace` Hub for models matching a query string.
+///
+/// Common quantization synonyms (`"8bit"` / `"8-bit"` / `"int8"`,
+/// `"4bit"` / `"4-bit"` / `"int4"`, `"fp8"` / `"float8"`) are normalized
+/// before querying the API so that variant spellings return consistent results.
 ///
 /// Results are sorted by download count (most popular first).
 ///
@@ -241,12 +276,13 @@ pub async fn discover_new_families<S: BuildHasher>(
 ///
 /// Returns [`FetchError::Http`] if the API request fails.
 pub async fn search_models(query: &str, limit: usize) -> Result<Vec<SearchResult>, FetchError> {
+    let normalized = normalize_quantization_terms(query);
     let client = reqwest::Client::new();
 
     let response = client
         .get(HF_API_BASE)
         .query(&[
-            ("search", query),
+            ("search", normalized.as_str()), // BORROW: explicit .as_str()
             ("sort", "downloads"),
             ("direction", "-1"),
         ])
@@ -337,4 +373,37 @@ pub async fn fetch_model_card(model_id: &str) -> Result<ModelCardMetadata, Fetch
         languages,
         gated,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_8bit_variants() {
+        assert_eq!(normalize_quantization_terms("AWQ 8bit"), "AWQ 8-bit");
+        assert_eq!(normalize_quantization_terms("AWQ 8-bit"), "AWQ 8-bit");
+        assert_eq!(normalize_quantization_terms("AWQ int8"), "AWQ 8-bit");
+        assert_eq!(normalize_quantization_terms("AWQ INT8"), "AWQ 8-bit");
+    }
+
+    #[test]
+    fn normalize_4bit_variants() {
+        assert_eq!(normalize_quantization_terms("GPTQ 4bit"), "GPTQ 4-bit");
+        assert_eq!(normalize_quantization_terms("GPTQ INT4"), "GPTQ 4-bit");
+        assert_eq!(normalize_quantization_terms("GPTQ 4-bit"), "GPTQ 4-bit");
+    }
+
+    #[test]
+    fn normalize_fp8_variants() {
+        assert_eq!(normalize_quantization_terms("FP8"), "fp8");
+        assert_eq!(normalize_quantization_terms("float8"), "fp8");
+        assert_eq!(normalize_quantization_terms("fp8"), "fp8");
+    }
+
+    #[test]
+    fn normalize_passthrough() {
+        assert_eq!(normalize_quantization_terms("llama 3"), "llama 3");
+        assert_eq!(normalize_quantization_terms("RWKV-7"), "RWKV-7");
+    }
 }

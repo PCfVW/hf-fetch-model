@@ -4,10 +4,12 @@
 //!
 //! Installed as both `hf-fetch-model` and `hf-fm`.
 
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
@@ -68,17 +70,17 @@ struct DownloadArgs {
     #[arg(long)]
     output_dir: Option<PathBuf>,
 
-    /// Number of concurrent file downloads.
-    #[arg(long, default_value = "4")]
-    concurrency: usize,
+    /// Number of concurrent file downloads (auto-tuned if omitted).
+    #[arg(long)]
+    concurrency: Option<usize>,
 
-    /// Minimum file size (MiB) for parallel chunked download.
-    #[arg(long, default_value = "100")]
-    chunk_threshold_mib: u64,
+    /// Minimum file size (MiB) for parallel chunked download (auto-tuned if omitted).
+    #[arg(long)]
+    chunk_threshold_mib: Option<u64>,
 
-    /// Number of parallel HTTP connections per large file.
-    #[arg(long, default_value = "8")]
-    connections_per_file: usize,
+    /// Number of parallel HTTP connections per large file (auto-tuned if omitted).
+    #[arg(long)]
+    connections_per_file: Option<usize>,
 
     /// Preview what would be downloaded without actually downloading.
     #[arg(long)]
@@ -133,13 +135,13 @@ enum Commands {
         #[arg(long)]
         output_dir: Option<PathBuf>,
 
-        /// Minimum file size (MiB) for parallel chunked download.
-        #[arg(long, default_value = "100")]
-        chunk_threshold_mib: u64,
+        /// Minimum file size (MiB) for parallel chunked download (auto-tuned if omitted).
+        #[arg(long)]
+        chunk_threshold_mib: Option<u64>,
 
-        /// Number of parallel HTTP connections per large file.
-        #[arg(long, default_value = "8")]
-        connections_per_file: usize,
+        /// Number of parallel HTTP connections per large file (auto-tuned if omitted).
+        #[arg(long)]
+        connections_per_file: Option<usize>,
     },
     /// Show download status (all models, or a specific one).
     Status {
@@ -306,6 +308,78 @@ fn run(cli: Cli) -> Result<(), FetchError> {
     }
 }
 
+/// Progress reporter for non-TTY contexts (pipes, CI).
+///
+/// Emits periodic one-line progress to stderr every 5 seconds or every 10%
+/// of total size, whichever comes first.
+struct NonTtyProgress {
+    /// Timestamp of the last progress line emitted.
+    last_report: Mutex<Instant>,
+    /// Last reported 10%-bucket per file (to detect 10% boundary crossings).
+    last_bucket: Mutex<HashMap<String, u64>>,
+}
+
+impl NonTtyProgress {
+    fn new() -> Self {
+        Self {
+            last_report: Mutex::new(Instant::now()),
+            last_bucket: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Handles a `ProgressEvent`, emitting a progress line to stderr when the
+    /// reporting threshold is reached.
+    fn handle(&self, event: &hf_fetch_model::progress::ProgressEvent) {
+        // Skip completion events (the summary line handles those).
+        if event.percent >= 100.0 {
+            return;
+        }
+
+        // CAST: f64 → u64, precision loss acceptable; bucket index for 10% increments
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::as_conversions
+        )]
+        let bucket = (event.percent / 10.0) as u64;
+
+        let elapsed_ok = self
+            .last_report
+            .lock()
+            .is_ok_and(|guard| guard.elapsed().as_secs() >= 5);
+
+        let bucket_crossed = self.last_bucket.lock().is_ok_and(|mut map| {
+            // BORROW: explicit .clone() for owned String as HashMap key
+            let prev = map.entry(event.filename.clone()).or_insert(0);
+            if bucket > *prev {
+                *prev = bucket;
+                true
+            } else {
+                false
+            }
+        });
+
+        if elapsed_ok || bucket_crossed {
+            if let Ok(mut ts) = self.last_report.lock() {
+                *ts = Instant::now();
+            }
+            // CAST: f64 → u64, precision loss acceptable; display-only percentage
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::as_conversions
+            )]
+            let pct = event.percent as u64;
+            eprintln!(
+                "[hf-fm] {}: {}/{} ({pct}%)",
+                event.filename,
+                format_size(event.bytes_downloaded),
+                format_size(event.bytes_total)
+            );
+        }
+    }
+}
+
 fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
     let dry_run = args.dry_run;
 
@@ -337,6 +411,10 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
         None => FetchConfig::builder(),
     };
 
+    if let Some(ref preset) = args.preset {
+        warn_redundant_filters(preset, &args.filter);
+    }
+
     if let Some(rev) = args.revision.as_deref() {
         builder = builder.revision(rev);
     }
@@ -353,18 +431,32 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
         // BORROW: explicit .as_str() instead of Deref coercion
         builder = builder.exclude(pattern.as_str());
     }
-    builder = builder.concurrency(args.concurrency);
-    builder = builder.chunk_threshold(args.chunk_threshold_mib.saturating_mul(1024 * 1024));
-    builder = builder.connections_per_file(args.connections_per_file);
+    if let Some(c) = args.concurrency {
+        builder = builder.concurrency(c);
+    }
+    if let Some(ct) = args.chunk_threshold_mib {
+        builder = builder.chunk_threshold(ct.saturating_mul(1024 * 1024));
+    }
+    if let Some(cpf) = args.connections_per_file {
+        builder = builder.connections_per_file(cpf);
+    }
     if let Some(dir) = args.output_dir {
         builder = builder.output_dir(dir);
     }
 
-    // Set up indicatif progress bars.
-    // Shared via Arc so we can call finish() before printing the result.
-    let progress = Arc::new(IndicatifProgress::new());
-    let progress_handle = Arc::clone(&progress);
-    builder = builder.on_progress(move |e| progress_handle.handle(e));
+    // Set up progress reporting: indicatif bars for TTY, periodic stderr for non-TTY.
+    let is_tty = std::io::stderr().is_terminal();
+    let indicatif = if is_tty {
+        let p = Arc::new(IndicatifProgress::new());
+        let handle = Arc::clone(&p);
+        builder = builder.on_progress(move |e| handle.handle(e));
+        Some(p)
+    } else {
+        let p = Arc::new(NonTtyProgress::new());
+        let handle = Arc::clone(&p);
+        builder = builder.on_progress(move |e| handle.handle(e));
+        None
+    };
 
     let config = builder.build()?;
 
@@ -374,15 +466,20 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
         source: e,
     })?;
 
+    let start = Instant::now();
     let outcome = rt.block_on(hf_fetch_model::download_with_config(repo_id, &config))?;
+    let elapsed = start.elapsed();
 
     // Finalize progress bar before printing to avoid interleaved output.
-    progress.finish();
+    if let Some(ref p) = indicatif {
+        p.finish();
+    }
 
     if outcome.is_cached() {
         println!("Cached at: {}", outcome.inner().display());
     } else {
         println!("Downloaded to: {}", outcome.inner().display());
+        print_download_summary(outcome.inner(), elapsed);
     }
     Ok(())
 }
@@ -396,6 +493,10 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
         Some(Preset::ConfigOnly) => Filter::config_only(),
         None => FetchConfig::builder(),
     };
+
+    if let Some(ref preset) = args.preset {
+        warn_redundant_filters(preset, &args.filter);
+    }
 
     if let Some(rev) = args.revision.as_deref() {
         builder = builder.revision(rev);
@@ -493,8 +594,8 @@ fn run_download_file(
     revision: Option<&str>,
     token: Option<&str>,
     output_dir: Option<PathBuf>,
-    chunk_threshold_mib: u64,
-    connections_per_file: usize,
+    chunk_threshold_mib: Option<u64>,
+    connections_per_file: Option<usize>,
 ) -> Result<(), FetchError> {
     if !repo_id.contains('/') {
         return Err(FetchError::InvalidArgument(format!(
@@ -513,16 +614,29 @@ fn run_download_file(
     } else {
         builder = builder.token_from_env();
     }
-    builder = builder.chunk_threshold(chunk_threshold_mib.saturating_mul(1024 * 1024));
-    builder = builder.connections_per_file(connections_per_file);
+    if let Some(ct) = chunk_threshold_mib {
+        builder = builder.chunk_threshold(ct.saturating_mul(1024 * 1024));
+    }
+    if let Some(cpf) = connections_per_file {
+        builder = builder.connections_per_file(cpf);
+    }
     if let Some(dir) = output_dir {
         builder = builder.output_dir(dir);
     }
 
-    // Set up indicatif progress bars.
-    let progress = Arc::new(IndicatifProgress::new());
-    let progress_handle = Arc::clone(&progress);
-    builder = builder.on_progress(move |e| progress_handle.handle(e));
+    // Set up progress reporting: indicatif bars for TTY, periodic stderr for non-TTY.
+    let is_tty = std::io::stderr().is_terminal();
+    let indicatif = if is_tty {
+        let p = Arc::new(IndicatifProgress::new());
+        let handle = Arc::clone(&p);
+        builder = builder.on_progress(move |e| handle.handle(e));
+        Some(p)
+    } else {
+        let p = Arc::new(NonTtyProgress::new());
+        let handle = Arc::clone(&p);
+        builder = builder.on_progress(move |e| handle.handle(e));
+        None
+    };
 
     let config = builder.build()?;
 
@@ -533,19 +647,24 @@ fn run_download_file(
     })?;
 
     // BORROW: explicit .to_owned() for &str → owned String
+    let start = Instant::now();
     let outcome = rt.block_on(hf_fetch_model::download_file(
         repo_id.to_owned(),
         filename,
         &config,
     ))?;
+    let elapsed = start.elapsed();
 
     // Finalize progress bar before printing to avoid interleaved output.
-    progress.finish();
+    if let Some(ref p) = indicatif {
+        p.finish();
+    }
 
     if outcome.is_cached() {
         println!("Cached at: {}", outcome.inner().display());
     } else {
         println!("Downloaded to: {}", outcome.inner().display());
+        print_download_summary(outcome.inner(), elapsed);
     }
     Ok(())
 }
@@ -1037,24 +1156,73 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Formats a download count with K/M/B suffixes for readability.
-fn format_downloads(n: u64) -> String {
-    if n >= 1_000_000_000 {
-        // CAST: u64 → f64, precision loss acceptable; value is a display-only download count
-        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-        let val = n as f64 / 1_000_000_000.0;
-        format!("{val:.1}B")
-    } else if n >= 1_000_000 {
-        // CAST: u64 → f64, precision loss acceptable; value is a display-only download count
-        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-        let val = n as f64 / 1_000_000.0;
-        format!("{val:.1}M")
-    } else if n >= 1_000 {
-        // CAST: u64 → f64, precision loss acceptable; value is a display-only download count
-        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-        let val = n as f64 / 1_000.0;
-        format!("{val:.1}K")
-    } else {
-        n.to_string()
+/// Warns when `--filter` globs are redundant with the active `--preset`.
+fn warn_redundant_filters(preset: &Preset, filters: &[String]) {
+    let (preset_globs, preset_name): (&[&str], &str) = match preset {
+        Preset::Safetensors => (&["*.safetensors", "*.json", "*.txt"], "safetensors"),
+        Preset::Gguf => (&["*.gguf", "*.json", "*.txt"], "gguf"),
+        Preset::ConfigOnly => (&["*.json", "*.txt", "*.md"], "config-only"),
+    };
+    for filter in filters {
+        // BORROW: explicit .as_str() instead of Deref coercion
+        if preset_globs.contains(&filter.as_str()) {
+            eprintln!("warning: --filter \"{filter}\" is redundant with --preset {preset_name}");
+        }
     }
+}
+
+/// Recursively sums the sizes of all files under `dir`.
+///
+/// Returns `0` if the directory cannot be read.
+fn walk_dir_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            total = total.saturating_add(walk_dir_size(&entry.path()));
+        } else {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
+/// Prints a download summary line showing total size, elapsed time, and throughput.
+fn print_download_summary(path: &Path, elapsed: Duration) {
+    let total_bytes = if path.is_dir() {
+        walk_dir_size(path)
+    } else {
+        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    };
+    let elapsed_secs = elapsed.as_secs_f64();
+    if total_bytes > 0 && elapsed_secs > 0.0 {
+        // CAST: u64 → f64, precision loss acceptable; display-only throughput
+        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+        let throughput = total_bytes as f64 / elapsed_secs / (1024.0 * 1024.0);
+        println!(
+            "  {} in {:.1}s ({:.1} MiB/s)",
+            format_size(total_bytes),
+            elapsed_secs,
+            throughput
+        );
+    }
+}
+
+/// Formats a download count with thousand separators (e.g., `1,234,567`).
+fn format_downloads(n: u64) -> String {
+    // BORROW: explicit .to_string() for u64 → String
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result
 }

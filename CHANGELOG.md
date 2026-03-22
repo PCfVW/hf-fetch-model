@@ -7,9 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] — Download performance & observability
+
+### Fixed
+
+- **auto_plan never applied** — CLI default values for `--concurrency`, `--chunk-threshold-mib`, and `--connections-per-file` marked all three as explicit, preventing the data-driven download plan from optimizing settings. Now uses `Option` types so the plan optimizer applies automatically when flags are omitted.
+
+### Added
+
+- **Download summary line** — after a successful download, prints total size, elapsed time, and throughput (e.g., `923 MiB in 12.3s (75.0 MiB/s)`).
+- **Non-TTY progress** — when stderr is not a terminal (pipes, CI), emits periodic progress lines to stderr every 5 seconds or 10% of total size.
+- **Redundant filter warning** — warns when `--filter` globs duplicate patterns already included by `--preset`.
+- **Search term normalization** — common quantization synonyms (`8bit`/`8-bit`/`int8`, `4bit`/`4-bit`/`int4`, `fp8`/`float8`) are normalized before searching the HuggingFace Hub API.
+
 ### Changed
 
 - **CI: auto-update candle-mi after publish** — the `publish.yml` workflow now automatically bumps the `hf-fetch-model` version in candle-mi's `Cargo.toml` and pushes to main after every crates.io release.
+- **Download count formatting** — search results now display download counts with thousand separators (e.g., `1,234,567`) instead of abbreviated suffixes (`1.2M`).
 
 ## [0.8.1] — Bug fixes, partial detection & CLI tests
 
