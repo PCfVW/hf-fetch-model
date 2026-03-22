@@ -19,5 +19,8 @@ Thumbs.db
 # Environment
 .env
 
+# Test artifacts
+stderr.txt
+
 # Claude Code
 CLAUDE.md
