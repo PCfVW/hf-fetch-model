@@ -154,6 +154,11 @@ enum Commands {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Show disk usage for cached models.
+    Du {
+        /// The repository identifier (omit to show all cached repos).
+        repo_id: Option<String>,
+    },
     /// List files in a remote `HuggingFace` repository (no download).
     ListFiles {
         /// The repository identifier (e.g., `"google/gemma-2-2b-it"`).
@@ -203,6 +208,7 @@ fn main() -> ExitCode {
             | Commands::Discover { .. }
             | Commands::Search { .. }
             | Commands::Status { .. }
+            | Commands::Du { .. }
             | Commands::ListFiles { .. },
         ) => false,
     };
@@ -284,6 +290,11 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         }) => run_status(repo_id.as_str(), revision.as_deref(), token.as_deref()),
         Some(Commands::Status { repo_id: None, .. }) => run_status_all(),
+        // BORROW: explicit .as_str() for String → &str conversion
+        Some(Commands::Du {
+            repo_id: Some(repo_id),
+        }) => run_du_repo(repo_id.as_str()),
+        Some(Commands::Du { repo_id: None }) => run_du(),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::ListFiles {
             repo_id,
@@ -873,6 +884,71 @@ fn run_status_all() -> Result<(), FetchError> {
     }
 
     println!("\n{} model(s) cached", summaries.len());
+
+    Ok(())
+}
+
+/// Shows disk usage summary for all cached repos, sorted by size descending.
+fn run_du() -> Result<(), FetchError> {
+    let mut summaries = cache::cache_summary()?;
+
+    if summaries.is_empty() {
+        println!("No models found in local cache.");
+        return Ok(());
+    }
+
+    summaries.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+
+    let mut total_size: u64 = 0;
+    let mut total_files: usize = 0;
+
+    for s in &summaries {
+        total_size = total_size.saturating_add(s.total_size);
+        total_files = total_files.saturating_add(s.file_count);
+
+        let partial_marker = if s.has_partial { "  PARTIAL" } else { "" };
+        println!(
+            "  {:>10}  {:<48} ({} files){}",
+            format_size(s.total_size),
+            s.repo_id,
+            s.file_count,
+            partial_marker,
+        );
+    }
+
+    println!("  {}", "\u{2500}".repeat(50),);
+    println!(
+        "  {:>10}  total ({} repos, {} files)",
+        format_size(total_size),
+        summaries.len(),
+        total_files,
+    );
+
+    Ok(())
+}
+
+/// Shows per-file disk usage for a specific cached repo, sorted by size descending.
+fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
+    let files = cache::cache_repo_usage(repo_id)?;
+
+    if files.is_empty() {
+        println!("No cached files found for {repo_id}.");
+        return Ok(());
+    }
+
+    let mut total_size: u64 = 0;
+
+    for f in &files {
+        total_size = total_size.saturating_add(f.size);
+        println!("  {:>10}  {}", format_size(f.size), f.filename);
+    }
+
+    println!("  {}", "\u{2500}".repeat(50),);
+    println!(
+        "  {:>10}  total ({} files)",
+        format_size(total_size),
+        files.len(),
+    );
 
     Ok(())
 }

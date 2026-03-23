@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! `HuggingFace` cache directory resolution and local model family scanning.
+//! `HuggingFace` cache directory resolution, model family scanning, and disk usage.
 //!
 //! [`hf_cache_dir()`] locates the local HF cache. [`list_cached_families()`]
 //! scans downloaded models and groups them by `model_type`.
+//! [`cache_summary()`] provides per-repo size totals, and
+//! [`cache_repo_usage()`] returns per-file disk usage for a single repo.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -447,4 +449,88 @@ fn find_partial_blob_size(blobs_dir: &Path) -> u64 {
     }
 
     0
+}
+
+/// Per-file disk usage entry within a cached repository.
+#[derive(Debug, Clone)]
+pub struct CacheFileUsage {
+    /// Filename relative to the snapshot directory.
+    pub filename: String,
+    /// File size in bytes.
+    pub size: u64,
+}
+
+/// Returns per-file disk usage for a specific cached repository.
+///
+/// Walks the snapshot directories under
+/// `<cache_dir>/models--<org>--<name>/snapshots/` and collects each file's
+/// relative path and size. Results are sorted by size descending.
+///
+/// Returns an empty `Vec` if the repository is not cached.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the cache directory cannot be determined.
+pub fn cache_repo_usage(repo_id: &str) -> Result<Vec<CacheFileUsage>, FetchError> {
+    let cache_dir = hf_cache_dir()?;
+    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
+    let repo_dir = cache_dir.join(&repo_folder);
+
+    if !repo_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let snapshots_dir = repo_dir.join("snapshots");
+    let Ok(snapshots) = std::fs::read_dir(&snapshots_dir) else {
+        return Ok(Vec::new());
+    };
+
+    let mut files: Vec<CacheFileUsage> = Vec::new();
+
+    for snap_entry in snapshots {
+        let Ok(snap_entry) = snap_entry else { continue };
+        let snap_path = snap_entry.path();
+        if !snap_path.is_dir() {
+            continue;
+        }
+        collect_snapshot_files(&snap_path, "", &mut files);
+    }
+
+    files.sort_by(|a, b| b.size.cmp(&a.size));
+
+    Ok(files)
+}
+
+/// Recursively collects files from a snapshot directory into `CacheFileUsage` entries.
+///
+/// The `prefix` parameter tracks the relative path from the snapshot root,
+/// so that files in subdirectories get paths like `"tokenizer/vocab.json"`.
+fn collect_snapshot_files(dir: &Path, prefix: &str, files: &mut Vec<CacheFileUsage>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        // BORROW: explicit .to_string_lossy() for OsString → str conversion
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_dir() {
+            let child_prefix = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            collect_snapshot_files(&path, &child_prefix, files);
+        } else {
+            let filename = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            files.push(CacheFileUsage { filename, size });
+        }
+    }
 }

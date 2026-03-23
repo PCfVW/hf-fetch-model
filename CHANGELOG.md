@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`du` subcommand** — shows disk usage for cached models. Without arguments, lists all cached repos sorted by size. With a repo ID, shows per-file breakdown. Repos with incomplete downloads show a `PARTIAL` marker.
+- **`cache_repo_usage()` API** — returns per-file disk usage for a specific cached repository.
+
 ## [0.8.2] — Download performance & observability
 
 ### Fixed

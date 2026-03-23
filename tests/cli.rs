@@ -286,3 +286,63 @@ fn dry_run_with_filter_shows_filter_info() {
         "filtered dry-run should NOT contain pytorch_model.bin, got:\n{stdout}"
     );
 }
+
+// -----------------------------------------------------------------------
+// du subcommand
+// -----------------------------------------------------------------------
+
+#[test]
+fn help_shows_du_subcommand() {
+    let (stdout, _stderr, success) = run(hf_fm().arg("--help"));
+    assert!(success, "help should succeed");
+    assert!(
+        stdout.contains("du"),
+        "help should mention du subcommand, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn du_summary_lists_cached_repos() {
+    // Pre-cache the test repo (list-files triggers a cache entry via API, but
+    // a download ensures files exist in snapshots). Use dry-run to avoid
+    // large downloads — the cache_summary() function only reads snapshot dirs,
+    // so the repo must have been downloaded at least once.
+    // Rely on previous test runs having cached julien-c/dummy-unknown.
+    let (stdout, stderr, success) = run(hf_fm().args(["du"]));
+    // du should succeed even if no models are cached (prints "No models found").
+    assert!(success, "du should succeed: {stderr}");
+    // If models are cached, output contains "total"; if not, "No models found".
+    assert!(
+        stdout.contains("total") || stdout.contains("No models found"),
+        "du should show total or empty message, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn du_repo_shows_files() {
+    // First ensure the test repo is cached by downloading it.
+    let (_, _, dl_success) = run(hf_fm().args(["julien-c/dummy-unknown"]));
+    assert!(dl_success, "download should succeed to populate cache");
+
+    let (stdout, stderr, success) = run(hf_fm().args(["du", "julien-c/dummy-unknown"]));
+    assert!(success, "du repo should succeed: {stderr}");
+    assert!(
+        stdout.contains("config.json"),
+        "du repo should list config.json, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("total"),
+        "du repo should show total line, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn du_nonexistent_repo_shows_empty() {
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["du", "nonexistent-org/nonexistent-model-xyz"]));
+    assert!(success, "du for missing repo should succeed: {stderr}");
+    assert!(
+        stdout.contains("No cached files found"),
+        "du for missing repo should say no files found, got:\n{stdout}"
+    );
+}
