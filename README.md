@@ -6,7 +6,20 @@
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org)
 [![License](https://img.shields.io/crates/l/hf-fetch-model)](LICENSE-MIT)
 
-A Rust library and CLI for downloading HuggingFace models at maximum speed. Multi-connection parallel downloads, file filtering, checksum verification, retry — and a search command to find models before you download them.
+A Rust library and CLI for downloading and inspecting HuggingFace models. Multi-connection parallel downloads, file filtering, checksum verification, retry — plus safetensors header inspection and tensor layout comparison between models, all without downloading weight data.
+
+## Table of contents
+
+- [Install](#install)
+- [Commands](#commands)
+- [Try it](#try-it)
+- [Inspect & compare](#inspect--compare)
+- [Disk usage](#disk-usage)
+- [Library quick start](#library-quick-start)
+- [Documentation](#documentation)
+- [Used by](#used-by)
+- [License](#license)
+- [Development](#development)
 
 ## Install
 
@@ -78,6 +91,41 @@ $ hf-fm mistralai/Ministral-3-3B-Instruct-2512 --preset safetensors --dry-run
 $ hf-fm mistralai/Ministral-3-3B-Instruct-2512 --preset safetensors
 Downloaded to: ~/.cache/huggingface/hub/models--mistralai--Ministral-3-3B.../snapshots/...
   6.57 GiB in 18.2s (369.1 MiB/s)
+```
+
+## Inspect & compare
+
+```
+$ hf-fm inspect EleutherAI/pythia-1.4b model.safetensors --cached --filter "layers.0."
+  Repo:     EleutherAI/pythia-1.4b
+  File:     model.safetensors
+  Source:   cached
+
+  Tensor                                             Dtype    Shape                  Size     Params
+  gpt_neox.layers.0.attention.dense.weight           F16      [2048, 2048]       8.00 MiB       4.2M
+  gpt_neox.layers.0.mlp.dense_h_to_4h.weight         F16      [8192, 2048]      32.00 MiB      16.8M
+  ...
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+  15/364 tensors, 54.6M/1.52B params (filter: "layers.0.")
+
+$ hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq --cached --summary
+  A: RedHatAI/Llama-3.2-1B-Instruct-FP8
+  B: casperhansen/llama-3.2-1b-instruct-awq
+  ──────────────────────────────────────────────────────────────────────────────────────────────
+  A: 371 tensors | B: 370 tensors | only-A: 337 | only-B: 336 | differ: 34 | match: 0
+```
+
+Inspect reads tensor metadata via HTTP Range requests (2 requests per file) — no weight data downloaded. Diff compares tensor names, dtypes, and shapes between any two models (remote or cached).
+
+## Disk usage
+
+```
+$ hf-fm du
+    5.10 GiB  google/gemma-2-2b-it          (8 files)
+    2.80 GiB  EleutherAI/pythia-1.4b        (12 files)
+    1.20 GiB  google/gemma-scope-2b-pt-res  (3 files)
+    ──────────────────────────────────────────────────
+    9.10 GiB  total (3 repos, 23 files)
 ```
 
 ## Library quick start
