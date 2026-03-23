@@ -184,6 +184,9 @@ enum Commands {
         /// Output the full header as JSON instead of a human-readable table.
         #[arg(long)]
         json: bool,
+        /// Show only tensors whose name contains this substring.
+        #[arg(long)]
+        filter: Option<String>,
     },
     /// List files in a remote `HuggingFace` repository (no download).
     ListFiles {
@@ -345,6 +348,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             cached,
             no_metadata,
             json,
+            filter,
         }) => run_inspect(
             repo_id.as_str(),
             filename.as_deref(),
@@ -353,6 +357,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             cached,
             no_metadata,
             json,
+            filter.as_deref(),
         ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::ListFiles {
@@ -1022,10 +1027,20 @@ fn run_inspect(
     cached: bool,
     no_metadata: bool,
     json: bool,
+    filter: Option<&str>,
 ) -> Result<(), FetchError> {
     match filename {
-        Some(f) => run_inspect_single(repo_id, f, revision, token, cached, no_metadata, json),
-        None => run_inspect_repo(repo_id, revision, token, cached, json),
+        Some(f) => run_inspect_single(
+            repo_id,
+            f,
+            revision,
+            token,
+            cached,
+            no_metadata,
+            json,
+            filter,
+        ),
+        None => run_inspect_repo(repo_id, revision, token, cached, json, filter),
     }
 }
 
@@ -1039,8 +1054,9 @@ fn run_inspect_single(
     cached: bool,
     no_metadata: bool,
     json: bool,
+    filter: Option<&str>,
 ) -> Result<(), FetchError> {
-    let (info, source) = if cached {
+    let (mut info, source) = if cached {
         let info = inspect::inspect_safetensors_cached(repo_id, filename, revision)?;
         (info, inspect::InspectSource::Cached)
     } else {
@@ -1061,6 +1077,14 @@ fn run_inspect_single(
             revision,
         ))?
     };
+
+    // Apply tensor name filter.
+    let total_tensor_count = info.tensors.len();
+    let total_params = info.total_params();
+    if let Some(pattern) = filter {
+        // BORROW: explicit .as_str() instead of Deref coercion
+        info.tensors.retain(|t| t.name.as_str().contains(pattern));
+    }
 
     if json {
         let output = serde_json::to_string_pretty(&info)
@@ -1113,32 +1137,45 @@ fn run_inspect_single(
     }
 
     println!("  {}", "\u{2500}".repeat(96));
-    let tensor_label = if info.tensors.len() == 1 {
+    let filtered_count = info.tensors.len();
+    let filtered_params = info.total_params();
+    let tensor_label = if filtered_count == 1 {
         "tensor"
     } else {
         "tensors"
     };
-    println!(
-        "  {} {tensor_label}, {} params",
-        info.tensors.len(),
-        inspect::format_params(info.total_params())
-    );
+
+    if filter.is_some() {
+        println!(
+            "  {filtered_count}/{total_tensor_count} {tensor_label}, {}/{} params (filter: {:?})",
+            inspect::format_params(filtered_params),
+            inspect::format_params(total_params),
+            filter.unwrap_or_default(),
+        );
+    } else {
+        println!(
+            "  {filtered_count} {tensor_label}, {} params",
+            inspect::format_params(filtered_params)
+        );
+    }
 
     Ok(())
 }
 
 /// Inspects all `.safetensors` files in a repository (summary or per-file).
+#[allow(clippy::too_many_arguments)]
 fn run_inspect_repo(
     repo_id: &str,
     revision: Option<&str>,
     token: Option<&str>,
     cached: bool,
     json: bool,
+    filter: Option<&str>,
 ) -> Result<(), FetchError> {
     if cached {
         // Cache-only: try shard index first, then walk snapshot.
         if let Some(index) = inspect::fetch_shard_index_cached(repo_id, revision)? {
-            print_shard_index_summary(repo_id, &index);
+            print_shard_index_summary(repo_id, &index, filter);
             return Ok(());
         }
 
@@ -1150,10 +1187,10 @@ fn run_inspect_repo(
         }
 
         if json {
-            return print_multi_file_json(&results);
+            return print_multi_file_json(&results, filter);
         }
 
-        print_multi_file_summary(repo_id, "cached", &results);
+        print_multi_file_summary(repo_id, "cached", &results, filter);
         return Ok(());
     }
 
@@ -1176,7 +1213,7 @@ fn run_inspect_repo(
     ))?;
 
     if let Some(index) = shard_index {
-        print_shard_index_summary(repo_id, &index);
+        print_shard_index_summary(repo_id, &index, filter);
         return Ok(());
     }
 
@@ -1198,64 +1235,105 @@ fn run_inspect_repo(
             .into_iter()
             .map(|(name, info, _source)| (name, info))
             .collect();
-        return print_multi_file_json(&mapped);
+        return print_multi_file_json(&mapped, filter);
     }
 
     let mapped: Vec<(String, inspect::SafetensorsHeaderInfo)> = results
         .into_iter()
         .map(|(name, info, _source)| (name, info))
         .collect();
-    print_multi_file_summary(repo_id, "mixed", &mapped);
+    print_multi_file_summary(repo_id, "mixed", &mapped, filter);
     Ok(())
 }
 
 /// Prints shard index summary (tensor counts per shard).
-fn print_shard_index_summary(repo_id: &str, index: &inspect::ShardedIndex) {
+fn print_shard_index_summary(repo_id: &str, index: &inspect::ShardedIndex, filter: Option<&str>) {
     println!("  Repo:   {repo_id}");
     println!("  Source: shard index (model.safetensors.index.json)");
     println!();
 
-    // Count tensors per shard.
+    // Count tensors per shard, optionally filtering by tensor name.
+    let total_tensors = index.weight_map.len();
     let mut by_shard: HashMap<String, usize> = HashMap::new();
-    for shard_name in index.weight_map.values() {
+    let mut filtered_total: usize = 0;
+    for (tensor_name, shard_name) in &index.weight_map {
+        if let Some(pattern) = filter {
+            if !tensor_name.contains(pattern) {
+                continue;
+            }
+        }
         // BORROW: explicit .clone() for owned String key
         *by_shard.entry(shard_name.clone()).or_default() += 1;
+        filtered_total += 1;
     }
 
     println!("  {:<48} {:>8}", "File", "Tensors");
 
     for shard in &index.shards {
         let count = by_shard.get(shard).copied().unwrap_or(0);
+        if filter.is_some() && count == 0 {
+            continue;
+        }
         println!("  {shard:<48} {count:>8}");
     }
 
     println!("  {}", "\u{2500}".repeat(58));
 
-    let total_tensors = index.weight_map.len();
-    let shard_label = if index.shards.len() == 1 {
+    let displayed_shards = if filter.is_some() {
+        by_shard.len()
+    } else {
+        index.shards.len()
+    };
+    let shard_label = if displayed_shards == 1 {
         "shard"
     } else {
         "shards"
     };
-    let tensor_label = if total_tensors == 1 {
+    let tensor_label = if filtered_total == 1 {
         "tensor"
     } else {
         "tensors"
     };
-    println!(
-        "  {} {shard_label}, {total_tensors} {tensor_label}",
-        index.shards.len()
-    );
+
+    if filter.is_some() {
+        println!(
+            "  {displayed_shards} {shard_label}, {filtered_total}/{total_tensors} {tensor_label} (filter: {:?})",
+            filter.unwrap_or_default(),
+        );
+    } else {
+        println!("  {displayed_shards} {shard_label}, {filtered_total} {tensor_label}",);
+    }
     println!("  Hint: use `hf-fm inspect {repo_id} <filename>` for per-tensor detail");
 }
 
-/// Prints multi-file inspection results as JSON.
+/// Prints multi-file inspection results as JSON, optionally filtering tensors.
 fn print_multi_file_json(
     results: &[(String, inspect::SafetensorsHeaderInfo)],
+    filter: Option<&str>,
 ) -> Result<(), FetchError> {
-    let output = serde_json::to_string_pretty(results)
-        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
-    println!("{output}");
+    if let Some(pattern) = filter {
+        // Filter tensors in each file before serializing.
+        let filtered: Vec<(String, inspect::SafetensorsHeaderInfo)> = results
+            .iter()
+            .map(|(name, info)| {
+                let mut filtered_info = info.clone();
+                // BORROW: explicit .as_str() instead of Deref coercion
+                filtered_info
+                    .tensors
+                    .retain(|t| t.name.as_str().contains(pattern));
+                // BORROW: explicit .clone() for owned String
+                (name.clone(), filtered_info)
+            })
+            .filter(|(_, info)| !info.tensors.is_empty())
+            .collect();
+        let output = serde_json::to_string_pretty(&filtered)
+            .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+        println!("{output}");
+    } else {
+        let output = serde_json::to_string_pretty(results)
+            .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+        println!("{output}");
+    }
     Ok(())
 }
 
@@ -1264,20 +1342,43 @@ fn print_multi_file_summary(
     repo_id: &str,
     source: &str,
     results: &[(String, inspect::SafetensorsHeaderInfo)],
+    filter: Option<&str>,
 ) {
     println!("  Repo:   {repo_id}");
     println!("  Source: {source}");
     println!();
     println!("  {:<48} {:>8} {:>12}", "File", "Tensors", "Params");
 
-    let mut total_tensors: usize = 0;
-    let mut total_params: u64 = 0;
+    let mut total_tensors_unfiltered: usize = 0;
+    let mut total_params_unfiltered: u64 = 0;
+    let mut total_tensors_filtered: usize = 0;
+    let mut total_params_filtered: u64 = 0;
+    let mut files_with_matches: usize = 0;
 
     for (name, info) in results {
-        let tensor_count = info.tensors.len();
-        let params = info.total_params();
-        total_tensors = total_tensors.saturating_add(tensor_count);
-        total_params = total_params.saturating_add(params);
+        total_tensors_unfiltered = total_tensors_unfiltered.saturating_add(info.tensors.len());
+        total_params_unfiltered = total_params_unfiltered.saturating_add(info.total_params());
+
+        let (tensor_count, params) = if let Some(pattern) = filter {
+            let matching: Vec<&inspect::TensorInfo> = info
+                .tensors
+                .iter()
+                // BORROW: explicit .as_str() instead of Deref coercion
+                .filter(|t| t.name.as_str().contains(pattern))
+                .collect();
+            let p: u64 = matching.iter().map(|t| t.num_elements()).sum();
+            (matching.len(), p)
+        } else {
+            (info.tensors.len(), info.total_params())
+        };
+
+        if filter.is_some() && tensor_count == 0 {
+            continue;
+        }
+
+        files_with_matches += 1;
+        total_tensors_filtered = total_tensors_filtered.saturating_add(tensor_count);
+        total_params_filtered = total_params_filtered.saturating_add(params);
         println!(
             "  {name:<48} {tensor_count:>8} {:>12}",
             inspect::format_params(params)
@@ -1285,17 +1386,32 @@ fn print_multi_file_summary(
     }
 
     println!("  {}", "\u{2500}".repeat(70));
-    let file_label = if results.len() == 1 { "file" } else { "files" };
-    let tensor_label = if total_tensors == 1 {
+    let file_label = if files_with_matches == 1 {
+        "file"
+    } else {
+        "files"
+    };
+    let tensor_label = if total_tensors_filtered == 1 {
         "tensor"
     } else {
         "tensors"
     };
-    println!(
-        "  {} {file_label}, {total_tensors} {tensor_label}, {} params",
-        results.len(),
-        inspect::format_params(total_params)
-    );
+
+    if filter.is_some() {
+        println!(
+            "  {} {file_label}, {total_tensors_filtered}/{total_tensors_unfiltered} {tensor_label}, {}/{} params (filter: {:?})",
+            files_with_matches,
+            inspect::format_params(total_params_filtered),
+            inspect::format_params(total_params_unfiltered),
+            filter.unwrap_or_default(),
+        );
+    } else {
+        println!(
+            "  {} {file_label}, {total_tensors_filtered} {tensor_label}, {} params",
+            files_with_matches,
+            inspect::format_params(total_params_filtered)
+        );
+    }
 }
 
 fn run_status(

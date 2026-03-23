@@ -641,3 +641,58 @@ fn inspect_cached_sharded_model() {
         "should show per-tensor detail hint, got:\n{stdout}"
     );
 }
+
+#[test]
+fn inspect_cached_filter() {
+    let Some((repo_id, filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    // Run unfiltered to get total tensor count.
+    let (stdout_all, _stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, &filename, "--cached"]));
+    assert!(success, "inspect --cached should succeed");
+    // Extract total from summary line (e.g., "364 tensors").
+    let has_tensors = stdout_all.contains("tensor");
+    assert!(has_tensors, "unfiltered output should show tensors");
+
+    // Run with --filter "embed" (most models have an embedding tensor).
+    let (stdout, stderr, success) = run(hf_fm().args([
+        "inspect", &repo_id, &filename, "--cached", "--filter", "embed",
+    ]));
+    assert!(
+        success,
+        "inspect --cached --filter should succeed: {stderr}"
+    );
+    // Every displayed tensor name should contain "embed".
+    for line in stdout.lines() {
+        // Skip header, separator, summary, and metadata lines.
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("Repo:")
+            || trimmed.starts_with("File:")
+            || trimmed.starts_with("Source:")
+            || trimmed.starts_with("Header:")
+            || trimmed.starts_with("Metadata:")
+            || trimmed.starts_with("Tensor")
+            || trimmed.starts_with('\u{2500}')
+            || trimmed.contains("tensor")
+            || trimmed.contains("params")
+        {
+            continue;
+        }
+        assert!(
+            trimmed.contains("embed"),
+            "filtered line should contain 'embed': {trimmed}"
+        );
+    }
+    // Summary should show filtered/total format.
+    assert!(
+        stdout.contains('/'),
+        "filtered summary should show filtered/total format, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("filter:"),
+        "filtered summary should mention filter, got:\n{stdout}"
+    );
+}

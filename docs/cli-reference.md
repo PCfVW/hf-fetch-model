@@ -211,6 +211,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--cached` | Cache-only mode: fail if the file is not cached locally | off |
+| `--filter` | Show only tensors whose name contains this substring | — |
 | `--json` | Output the full header as JSON instead of a human-readable table | off |
 | `--no-metadata` | Suppress the `Metadata:` line in human-readable output | off |
 | `--revision` | Git revision (branch, tag, SHA) | main |
