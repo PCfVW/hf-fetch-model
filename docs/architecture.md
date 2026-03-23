@@ -15,7 +15,8 @@ hf-fetch-model
   • progress callbacks
   • checksum verification
   • resume / retry
-  • cache diagnostics & model search
+  • safetensors header inspection (HTTP Range)
+  • cache diagnostics, disk usage & model search
          │ dep
 hf-hub (tokio, .high())
   • single-connection download (.high() mode)
@@ -34,7 +35,8 @@ hf-hub (tokio, .high())
 - **Checksum verification** — SHA256 against HuggingFace LFS metadata
 - **Retry with backoff** — exponential backoff + jitter for transient failures
 - **Timeout control** — per-file and overall time limits
-- **Cache diagnostics** — inspect download state (complete / partial / missing) per file
+- **Safetensors header inspection** — read tensor metadata (names, shapes, dtypes, offsets) from local cache or remote repos via HTTP Range requests, without downloading full files
+- **Cache diagnostics** — inspect download state (complete / partial / missing) per file; disk usage per repo and globally
 - **Model search** — query the HuggingFace Hub API for models, with multi-term filtering and model card metadata
 
 ## Module layout
@@ -46,7 +48,8 @@ hf-hub (tokio, .high())
 | `plan` | public | `DownloadPlan`, `FilePlan`, plan-to-config optimization |
 | `download` | public | Download orchestration, `DownloadOutcome` |
 | `discover` | public | Search, model card, `GateStatus` |
-| `cache` | public | Cache inspection and status |
+| `cache` | public | Cache inspection, status, and disk usage |
+| `inspect` | public | Safetensors header parsing, `TensorInfo`, `SafetensorsHeaderInfo`, `ShardedIndex` |
 | `checksum` | public | SHA256 verification |
 | `error` | public | `FetchError` and `FileFailure` |
 | `progress` | public | `ProgressEvent` and `IndicatifProgress` |

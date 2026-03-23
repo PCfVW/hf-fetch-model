@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`inspect` subcommand** — read safetensors tensor metadata (names, shapes, dtypes, offsets) from local cache or remote repos via HTTP Range requests, without downloading full files. Supports `--json`, `--no-metadata`, `--cached` flags. For sharded models, uses the shard index as a fast path (1 request instead of 2×N). Cross-validated against Python on 199 cached files (16,501 tensors, 0 discrepancies).
+- **`inspect_safetensors()` / `inspect_safetensors_local()` / `inspect_safetensors_cached()` API** — single-file header inspection (cache-first, local-only, or cache-only).
+- **`inspect_repo_safetensors()` / `inspect_repo_safetensors_cached()` API** — multi-file inspection with concurrent fetching.
+- **`fetch_shard_index()` / `fetch_shard_index_cached()` API** — shard index parsing for sharded safetensors models.
+- **`TensorInfo` / `SafetensorsHeaderInfo` / `ShardedIndex` types** — lightweight tensor metadata types with `Serialize` support for JSON output.
+- **`FetchError::SafetensorsHeader` variant** — for malformed safetensors headers.
+- **Disk space check before download** — shows current cache size, projected size after download, and available disk space. Warns if space is tight or insufficient.
+- **`RepoNotFound` search hint** — when a repository is not found, suggests `hf-fm search <model-name>` to help find the correct name.
+- **`inspect` no-safetensors hint** — when a repo has no `.safetensors` files, suggests `hf-fm list-files <repo>` to see available file types.
 - **`du` subcommand** — shows disk usage for cached models. Without arguments, lists all cached repos sorted by size. With a repo ID, shows per-file breakdown. Repos with incomplete downloads show a `PARTIAL` marker.
 - **`cache_repo_usage()` API** — returns per-file disk usage for a specific cached repository.
 

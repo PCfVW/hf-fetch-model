@@ -14,6 +14,22 @@ A Rust library and CLI for downloading HuggingFace models at maximum speed. Mult
 cargo install hf-fetch-model --features cli
 ```
 
+## Commands
+
+| Command | |
+|---------|---|
+| `hf-fm <REPO_ID>` | Download a model (multi-connection, auto-tuned) |
+| `hf-fm discover` | Find new model families on the Hub |
+| `hf-fm download-file <REPO_ID> <FILE>` | Download a single file |
+| `hf-fm du [REPO_ID]` | Show cache disk usage |
+| `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) |
+| `hf-fm list-families` | List model families in local cache |
+| `hf-fm list-files <REPO_ID>` | List remote files (sizes, SHA256) without downloading |
+| `hf-fm search <QUERY>` | Search the HuggingFace Hub for models |
+| `hf-fm status [REPO_ID]` | Show download status (complete / partial / missing) |
+
+See [CLI Reference](docs/cli-reference.md) for all flags and output examples.
+
 ## Try it
 
 ```

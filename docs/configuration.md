@@ -142,3 +142,57 @@ if outcome.is_cached() {
 
 let path = outcome.into_inner();
 ```
+
+## Safetensors header inspection
+
+Read tensor metadata without downloading full weight files. The library checks the local cache first and only makes HTTP Range requests on cache miss.
+
+```rust
+use hf_fetch_model::inspect;
+
+// Single file (cache-first, falls back to 2 HTTP Range requests)
+let (info, source) = inspect::inspect_safetensors(
+    "google/gemma-2-2b-it",
+    "model-00001-of-00002.safetensors",
+    None,  // token
+    None,  // revision (defaults to "main")
+).await?;
+
+for tensor in &info.tensors {
+    println!("{}: {:?} {}", tensor.name, tensor.shape, tensor.dtype);
+}
+println!("{} tensors, {} params", info.tensors.len(), info.total_params());
+
+// Local file only (no network)
+let info = inspect::inspect_safetensors_local(Path::new("model.safetensors"))?;
+
+// Cache-only (fail if not cached)
+let info = inspect::inspect_safetensors_cached("google/gemma-2-2b-it", "model.safetensors", None)?;
+
+// Shard index for sharded models (1 request instead of 2×N)
+if let Some(index) = inspect::fetch_shard_index("google/gemma-2-2b-it", None, None).await? {
+    println!("{} shards, {} tensors", index.shards.len(), index.weight_map.len());
+}
+```
+
+`TensorInfo` provides helpers: `num_elements()` (product of shape), `byte_len()` (data size from offsets), and `dtype_bytes()` (bytes per element for known dtypes).
+
+All types derive `serde::Serialize` for JSON output.
+
+## Cache disk usage
+
+```rust
+use hf_fetch_model::cache;
+
+// Per-repo file breakdown (sorted by size descending)
+let files = cache::cache_repo_usage("google/gemma-2-2b-it")?;
+for f in &files {
+    println!("{}: {} bytes", f.filename, f.size);
+}
+
+// Cache-wide summary (all repos)
+let summaries = cache::cache_summary()?;
+for s in &summaries {
+    println!("{}: {} bytes, {} files", s.repo_id, s.total_size, s.file_count);
+}
+```

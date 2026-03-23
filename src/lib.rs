@@ -58,6 +58,7 @@ pub mod config;
 pub mod discover;
 pub mod download;
 pub mod error;
+pub mod inspect;
 pub mod plan;
 pub mod progress;
 pub mod repo;

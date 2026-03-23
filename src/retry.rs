@@ -102,7 +102,8 @@ pub(crate) fn is_retryable(error: &FetchError) -> bool {
         | FetchError::Checksum { .. }
         | FetchError::PartialDownload { .. }
         | FetchError::InvalidArgument(_)
-        | FetchError::NoFilesMatched { .. } => false,
+        | FetchError::NoFilesMatched { .. }
+        | FetchError::SafetensorsHeader { .. } => false,
     }
 }
 

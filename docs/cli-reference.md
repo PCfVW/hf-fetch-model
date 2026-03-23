@@ -13,8 +13,11 @@ cargo install hf-fetch-model --features cli
 - [Dry-run example](#dry-run-example)
 - [List-files examples](#list-files-examples)
 - [Search examples](#search-examples)
+- [Inspect examples](#inspect-examples)
+- [Disk usage examples](#disk-usage-examples)
 - [Other commands](#other-commands)
 - [Download flags](#download-flags)
+- [Inspect flags](#inspect-flags)
 - [List-files flags](#list-files-flags)
 - [Search flags](#search-flags)
 - [General flags](#general-flags)
@@ -26,6 +29,8 @@ cargo install hf-fetch-model --features cli
 | *(default)* | Download a model: `hf-fm <REPO_ID>` |
 | `discover` | Find new model families on the Hub not yet cached locally |
 | `download-file <REPO_ID> <FILENAME>` | Download a single file and print its cache path |
+| `du [REPO_ID]` | Show cache disk usage — per-repo breakdown, or cache-wide summary |
+| `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes) |
 | `list-families` | List model families (`model_type`) in local cache |
 | `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
 | `search <QUERY>` | Search the HuggingFace Hub for models (by downloads) |
@@ -121,6 +126,35 @@ hf-fm search mistralai/Ministral-3-3B-Instruct-2512 --exact
 
 Common quantization synonyms are normalized automatically: `8bit`, `8-bit`, `int8`, and `INT8` all produce the same results. Same for `4bit`/`4-bit`/`int4` and `fp8`/`float8`.
 
+## Inspect examples
+
+```sh
+# Inspect a single safetensors file (cache-first, falls back to HTTP Range requests)
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors
+
+# Inspect from cache only (no network)
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --cached
+
+# JSON output for programmatic consumption
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --json
+
+# Inspect all safetensors in a repo (uses shard index fast path when available)
+hf-fm inspect google/gemma-2-2b-it
+
+# Suppress metadata line
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --no-metadata
+```
+
+## Disk usage examples
+
+```sh
+# Show all cached repos sorted by size
+hf-fm du
+
+# Show per-file breakdown for a specific repo
+hf-fm du google/gemma-2-2b-it
+```
+
 ## Other commands
 
 ```sh
@@ -171,6 +205,16 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 |------|-------------|---------|
 | `--exact` | Return only the exact model ID match; show model card metadata | off |
 | `--limit` | Maximum number of results | 20 |
+
+## Inspect flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--cached` | Cache-only mode: fail if the file is not cached locally | off |
+| `--json` | Output the full header as JSON instead of a human-readable table | off |
+| `--no-metadata` | Suppress the `Metadata:` line in human-readable output | off |
+| `--revision` | Git revision (branch, tag, SHA) | main |
+| `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
 ## General flags
 

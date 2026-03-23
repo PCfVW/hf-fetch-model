@@ -16,6 +16,7 @@ use tracing_subscriber::EnvFilter;
 
 use hf_fetch_model::cache;
 use hf_fetch_model::discover;
+use hf_fetch_model::inspect;
 use hf_fetch_model::progress::IndicatifProgress;
 use hf_fetch_model::repo;
 use hf_fetch_model::{compile_glob_patterns, file_matches, FetchConfig, FetchError, Filter};
@@ -159,6 +160,31 @@ enum Commands {
         /// The repository identifier (omit to show all cached repos).
         repo_id: Option<String>,
     },
+    /// Inspect `.safetensors` file headers (tensor names, shapes, dtypes).
+    ///
+    /// Reads tensor metadata without downloading full weight data.
+    /// Checks the local cache first; falls back to HTTP Range requests.
+    Inspect {
+        /// The repository identifier (e.g., `"google/gemma-2-2b-it"`).
+        repo_id: String,
+        /// Specific `.safetensors` file to inspect (omit for all).
+        filename: Option<String>,
+        /// Git revision (branch, tag, or commit SHA).
+        #[arg(long)]
+        revision: Option<String>,
+        /// Authentication token (or set `HF_TOKEN` env var).
+        #[arg(long)]
+        token: Option<String>,
+        /// Cache-only mode: fail if the file is not cached locally.
+        #[arg(long)]
+        cached: bool,
+        /// Suppress the `Metadata:` line in human-readable output.
+        #[arg(long)]
+        no_metadata: bool,
+        /// Output the full header as JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
     /// List files in a remote `HuggingFace` repository (no download).
     ListFiles {
         /// The repository identifier (e.g., `"google/gemma-2-2b-it"`).
@@ -209,6 +235,7 @@ fn main() -> ExitCode {
             | Commands::Search { .. }
             | Commands::Status { .. }
             | Commands::Du { .. }
+            | Commands::Inspect { .. }
             | Commands::ListFiles { .. },
         ) => false,
     };
@@ -245,6 +272,20 @@ fn main() -> ExitCode {
                      (already-downloaded files will be skipped)"
                 );
             }
+            ExitCode::FAILURE
+        }
+        Err(FetchError::RepoNotFound { ref repo_id }) => {
+            // BORROW: explicit .clone() for owned String in Display formatting
+            eprintln!(
+                "error: {e}",
+                e = FetchError::RepoNotFound {
+                    repo_id: repo_id.clone()
+                }
+            );
+            // Extract model name (part after '/') as a search hint.
+            // BORROW: explicit .as_str() instead of Deref coercion
+            let search_term = repo_id.split('/').nth(1).unwrap_or(repo_id.as_str());
+            eprintln!("hint: try `hf-fm search {search_term}` to find matching models");
             ExitCode::FAILURE
         }
         Err(e) => {
@@ -295,6 +336,24 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             repo_id: Some(repo_id),
         }) => run_du_repo(repo_id.as_str()),
         Some(Commands::Du { repo_id: None }) => run_du(),
+        // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
+        Some(Commands::Inspect {
+            repo_id,
+            filename,
+            revision,
+            token,
+            cached,
+            no_metadata,
+            json,
+        }) => run_inspect(
+            repo_id.as_str(),
+            filename.as_deref(),
+            revision.as_deref(),
+            token.as_deref(),
+            cached,
+            no_metadata,
+            json,
+        ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::ListFiles {
             repo_id,
@@ -951,6 +1010,292 @@ fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
     );
 
     Ok(())
+}
+
+/// Inspects `.safetensors` file headers for tensor metadata.
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+fn run_inspect(
+    repo_id: &str,
+    filename: Option<&str>,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+    no_metadata: bool,
+    json: bool,
+) -> Result<(), FetchError> {
+    match filename {
+        Some(f) => run_inspect_single(repo_id, f, revision, token, cached, no_metadata, json),
+        None => run_inspect_repo(repo_id, revision, token, cached, json),
+    }
+}
+
+/// Inspects a single `.safetensors` file and prints the result.
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+fn run_inspect_single(
+    repo_id: &str,
+    filename: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+    no_metadata: bool,
+    json: bool,
+) -> Result<(), FetchError> {
+    let (info, source) = if cached {
+        let info = inspect::inspect_safetensors_cached(repo_id, filename, revision)?;
+        (info, inspect::InspectSource::Cached)
+    } else {
+        // BORROW: explicit String::from for Option<&str> → Option<String>
+        let token = token
+            .map(String::from)
+            .or_else(|| std::env::var("HF_TOKEN").ok());
+
+        let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+            path: PathBuf::from("<runtime>"),
+            source: e,
+        })?;
+        // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+        rt.block_on(inspect::inspect_safetensors(
+            repo_id,
+            filename,
+            token.as_deref(),
+            revision,
+        ))?
+    };
+
+    if json {
+        let output = serde_json::to_string_pretty(&info)
+            .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+        println!("{output}");
+        return Ok(());
+    }
+
+    // Human-readable output.
+    let source_label = match source {
+        inspect::InspectSource::Cached => "cached",
+        inspect::InspectSource::Remote => "remote (2 HTTP requests)",
+    };
+    println!("  Repo:     {repo_id}");
+    println!("  File:     {filename}");
+    println!("  Source:   {source_label}");
+
+    let header_display = format_size(info.header_size);
+    if let Some(fs) = info.file_size {
+        println!(
+            "  Header:   {header_display} (JSON), {} total",
+            format_size(fs)
+        );
+    } else {
+        println!("  Header:   {header_display} (JSON)");
+    }
+
+    if !no_metadata {
+        if let Some(ref meta) = info.metadata {
+            let entries: Vec<String> = meta.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            // BORROW: explicit .join() on slice
+            println!("  Metadata: {}", entries.join(", "));
+        }
+    }
+
+    println!();
+    println!(
+        "  {:<50} {:<8} {:<16} {:>10} {:>10}",
+        "Tensor", "Dtype", "Shape", "Size", "Params"
+    );
+
+    for t in &info.tensors {
+        let shape_str = format!("{:?}", t.shape);
+        let size_str = format_size(t.byte_len());
+        let params_str = inspect::format_params(t.num_elements());
+        println!(
+            "  {:<50} {:<8} {:<16} {:>10} {:>10}",
+            t.name, t.dtype, shape_str, size_str, params_str
+        );
+    }
+
+    println!("  {}", "\u{2500}".repeat(96));
+    let tensor_label = if info.tensors.len() == 1 {
+        "tensor"
+    } else {
+        "tensors"
+    };
+    println!(
+        "  {} {tensor_label}, {} params",
+        info.tensors.len(),
+        inspect::format_params(info.total_params())
+    );
+
+    Ok(())
+}
+
+/// Inspects all `.safetensors` files in a repository (summary or per-file).
+fn run_inspect_repo(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+    json: bool,
+) -> Result<(), FetchError> {
+    if cached {
+        // Cache-only: try shard index first, then walk snapshot.
+        if let Some(index) = inspect::fetch_shard_index_cached(repo_id, revision)? {
+            print_shard_index_summary(repo_id, &index);
+            return Ok(());
+        }
+
+        let results = inspect::inspect_repo_safetensors_cached(repo_id, revision)?;
+        if results.is_empty() {
+            println!("No cached .safetensors files found for {repo_id}.");
+            println!("Hint: use `hf-fm list-files {repo_id}` to see available file types");
+            return Ok(());
+        }
+
+        if json {
+            return print_multi_file_json(&results);
+        }
+
+        print_multi_file_summary(repo_id, "cached", &results);
+        return Ok(());
+    }
+
+    // Network-enabled: try shard index first, then full inspection.
+    // BORROW: explicit String::from for Option<&str> → Option<String>
+    let token = token
+        .map(String::from)
+        .or_else(|| std::env::var("HF_TOKEN").ok());
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+
+    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+    let shard_index = rt.block_on(inspect::fetch_shard_index(
+        repo_id,
+        token.as_deref(),
+        revision,
+    ))?;
+
+    if let Some(index) = shard_index {
+        print_shard_index_summary(repo_id, &index);
+        return Ok(());
+    }
+
+    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+    let results = rt.block_on(inspect::inspect_repo_safetensors(
+        repo_id,
+        token.as_deref(),
+        revision,
+    ))?;
+
+    if results.is_empty() {
+        println!("No .safetensors files found in {repo_id}.");
+        println!("Hint: use `hf-fm list-files {repo_id}` to see available file types");
+        return Ok(());
+    }
+
+    if json {
+        let mapped: Vec<(String, inspect::SafetensorsHeaderInfo)> = results
+            .into_iter()
+            .map(|(name, info, _source)| (name, info))
+            .collect();
+        return print_multi_file_json(&mapped);
+    }
+
+    let mapped: Vec<(String, inspect::SafetensorsHeaderInfo)> = results
+        .into_iter()
+        .map(|(name, info, _source)| (name, info))
+        .collect();
+    print_multi_file_summary(repo_id, "mixed", &mapped);
+    Ok(())
+}
+
+/// Prints shard index summary (tensor counts per shard).
+fn print_shard_index_summary(repo_id: &str, index: &inspect::ShardedIndex) {
+    println!("  Repo:   {repo_id}");
+    println!("  Source: shard index (model.safetensors.index.json)");
+    println!();
+
+    // Count tensors per shard.
+    let mut by_shard: HashMap<String, usize> = HashMap::new();
+    for shard_name in index.weight_map.values() {
+        // BORROW: explicit .clone() for owned String key
+        *by_shard.entry(shard_name.clone()).or_default() += 1;
+    }
+
+    println!("  {:<48} {:>8}", "File", "Tensors");
+
+    for shard in &index.shards {
+        let count = by_shard.get(shard).copied().unwrap_or(0);
+        println!("  {shard:<48} {count:>8}");
+    }
+
+    println!("  {}", "\u{2500}".repeat(58));
+
+    let total_tensors = index.weight_map.len();
+    let shard_label = if index.shards.len() == 1 {
+        "shard"
+    } else {
+        "shards"
+    };
+    let tensor_label = if total_tensors == 1 {
+        "tensor"
+    } else {
+        "tensors"
+    };
+    println!(
+        "  {} {shard_label}, {total_tensors} {tensor_label}",
+        index.shards.len()
+    );
+    println!("  Hint: use `hf-fm inspect {repo_id} <filename>` for per-tensor detail");
+}
+
+/// Prints multi-file inspection results as JSON.
+fn print_multi_file_json(
+    results: &[(String, inspect::SafetensorsHeaderInfo)],
+) -> Result<(), FetchError> {
+    let output = serde_json::to_string_pretty(results)
+        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+    println!("{output}");
+    Ok(())
+}
+
+/// Prints multi-file inspection results as a human-readable summary.
+fn print_multi_file_summary(
+    repo_id: &str,
+    source: &str,
+    results: &[(String, inspect::SafetensorsHeaderInfo)],
+) {
+    println!("  Repo:   {repo_id}");
+    println!("  Source: {source}");
+    println!();
+    println!("  {:<48} {:>8} {:>12}", "File", "Tensors", "Params");
+
+    let mut total_tensors: usize = 0;
+    let mut total_params: u64 = 0;
+
+    for (name, info) in results {
+        let tensor_count = info.tensors.len();
+        let params = info.total_params();
+        total_tensors = total_tensors.saturating_add(tensor_count);
+        total_params = total_params.saturating_add(params);
+        println!(
+            "  {name:<48} {tensor_count:>8} {:>12}",
+            inspect::format_params(params)
+        );
+    }
+
+    println!("  {}", "\u{2500}".repeat(70));
+    let file_label = if results.len() == 1 { "file" } else { "files" };
+    let tensor_label = if total_tensors == 1 {
+        "tensor"
+    } else {
+        "tensors"
+    };
+    println!(
+        "  {} {file_label}, {total_tensors} {tensor_label}, {} params",
+        results.len(),
+        inspect::format_params(total_params)
+    );
 }
 
 fn run_status(

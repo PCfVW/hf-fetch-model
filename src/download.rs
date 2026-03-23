@@ -239,6 +239,15 @@ pub async fn download_all_files_map(
         "download settings (after plan optimization)"
     );
 
+    // Check available disk space before starting downloads.
+    check_disk_space(
+        &cache_dir,
+        &files,
+        &metadata_map,
+        repo_folder.as_str(),
+        revision.as_str(),
+    );
+
     // Spawn concurrent download tasks.
     let repo = Arc::new(repo);
     let metadata_map = Arc::new(metadata_map);
@@ -469,6 +478,22 @@ pub(crate) async fn download_file_by_name(
         settings.chunk_threshold,
     )
     .await;
+
+    // Check disk space for the single file.
+    if let Some(size) = metadata_map.get(filename).and_then(|m| m.size) {
+        let single_file = RepoFile {
+            filename: filename.to_owned(),
+            size: Some(size),
+            sha256: None,
+        };
+        check_disk_space(
+            &cache_dir,
+            &[single_file],
+            &metadata_map,
+            repo_folder.as_str(),
+            revision_str,
+        );
+    }
 
     // Build a RepoFile for this filename from metadata (or with no metadata).
     let file_meta = metadata_map.get(filename);
@@ -880,6 +905,103 @@ fn log_download_result(
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
+
+/// Checks available disk space and prints a cache size summary before download.
+///
+/// Shows current cache size, projected size after download, and available
+/// disk space. Warns if space is tight (less than 10% margin) or
+/// insufficient.
+fn check_disk_space(
+    cache_dir: &std::path::Path,
+    files: &[RepoFile],
+    metadata_map: &HashMap<String, RepoFile>,
+    repo_folder: &str,
+    revision: &str,
+) {
+    use fs2::available_space;
+
+    // Sum sizes of files that are NOT already cached.
+    let mut download_bytes: u64 = 0;
+    for file in files {
+        // Skip files already in cache.
+        if resolve_cached_file(cache_dir, repo_folder, revision, file.filename.as_str()).is_some() {
+            continue;
+        }
+        // Use metadata size if available, otherwise the file's own size.
+        let size = metadata_map
+            .get(file.filename.as_str())
+            .and_then(|m| m.size)
+            .or(file.size)
+            .unwrap_or(0);
+        download_bytes = download_bytes.saturating_add(size);
+    }
+
+    if download_bytes == 0 {
+        return;
+    }
+
+    let available = match available_space(cache_dir) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::debug!(error = %e, "could not check available disk space");
+            return;
+        }
+    };
+
+    // Compute current cache size (lightweight, local-only scan).
+    let current_cache = crate::cache::cache_summary().ok().map_or(0, |summaries| {
+        summaries
+            .iter()
+            .map(|s| s.total_size)
+            .fold(0u64, u64::saturating_add)
+    });
+
+    let projected_cache = current_cache.saturating_add(download_bytes);
+    let after_available = available.saturating_sub(download_bytes);
+
+    // CAST: u64 → f64, precision loss acceptable; display-only size scalars
+    #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+    let fmt_gib = |v: u64| -> String {
+        let gib = v as f64 / (1024.0 * 1024.0 * 1024.0);
+        format!("{gib:.2} GiB")
+    };
+
+    if available < download_bytes {
+        eprintln!(
+            "warning: insufficient disk space \u{2014} download needs {}, only {} available \
+             (cache: {})",
+            fmt_gib(download_bytes),
+            fmt_gib(available),
+            fmt_gib(current_cache),
+        );
+        tracing::warn!(
+            download_bytes,
+            available,
+            current_cache,
+            "insufficient disk space"
+        );
+    } else {
+        eprintln!(
+            "  Disk: cache {} \u{2192} {} after download ({} to fetch, {} available)",
+            fmt_gib(current_cache),
+            fmt_gib(projected_cache),
+            fmt_gib(download_bytes),
+            fmt_gib(after_available),
+        );
+
+        // Warn if less than 10% margin.
+        // CAST: u64 → f64, precision loss acceptable; ratio comparison
+        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+        let ratio = available as f64 / download_bytes as f64;
+        if ratio < 1.1 {
+            eprintln!(
+                "warning: disk space is tight \u{2014} only {} will remain after download",
+                fmt_gib(after_available),
+            );
+            tracing::warn!(after_available, "disk space is tight after download");
+        }
+    }
+}
 
 /// Attempts to resolve a single file from the local `HuggingFace` cache.
 ///

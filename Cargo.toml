@@ -20,6 +20,7 @@ cli = ["dep:clap", "dep:tracing-subscriber", "indicatif"]
 [dependencies]
 clap = { version = "4", features = ["derive"], optional = true }
 dirs = "6"
+fs2 = "0.4"
 globset = "0.4"
 hf-hub = { version = "0.5", features = ["tokio"] }
 indicatif = { version = "0.17", optional = true }

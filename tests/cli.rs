@@ -346,3 +346,298 @@ fn du_nonexistent_repo_shows_empty() {
         "du for missing repo should say no files found, got:\n{stdout}"
     );
 }
+
+// -----------------------------------------------------------------------
+// inspect subcommand (cache-only tests — no network)
+// -----------------------------------------------------------------------
+
+#[test]
+fn help_shows_inspect_subcommand() {
+    let (stdout, _stderr, success) = run(hf_fm().arg("--help"));
+    assert!(success, "help should succeed");
+    assert!(
+        stdout.contains("inspect"),
+        "help should mention inspect subcommand, got:\n{stdout}"
+    );
+}
+
+/// Finds a cached repo with `.safetensors` files by scanning the HF cache.
+///
+/// Returns `(repo_id, safetensors_filename)` or `None` if no suitable repo
+/// is cached.
+fn find_cached_safetensors_repo() -> Option<(String, String)> {
+    let cache_dir = dirs::home_dir()?.join(".cache/huggingface/hub");
+    if !cache_dir.exists() {
+        return None;
+    }
+    for entry in std::fs::read_dir(&cache_dir).ok()? {
+        let entry = entry.ok()?;
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let Some(repo_part) = dir_name.strip_prefix("models--") else {
+            continue;
+        };
+        let repo_id = match repo_part.find("--") {
+            Some(pos) => {
+                let (org, name_with_sep) = repo_part.split_at(pos);
+                let name = name_with_sep.get(2..).unwrap_or_default();
+                format!("{org}/{name}")
+            }
+            None => continue,
+        };
+        // Walk snapshots to find a .safetensors file.
+        let snapshots_dir = entry.path().join("snapshots");
+        let Ok(snapshots) = std::fs::read_dir(&snapshots_dir) else {
+            continue;
+        };
+        for snap in snapshots.flatten() {
+            if !snap.path().is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(snap.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let fname = file.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".safetensors") {
+                    return Some((repo_id, fname));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Finds a cached .safetensors file that has `__metadata__` in its header.
+///
+/// Reads the raw header JSON and checks for the `__metadata__` key.
+fn find_cached_safetensors_with_metadata() -> Option<(String, String)> {
+    use std::io::Read;
+
+    let cache_dir = dirs::home_dir()?.join(".cache/huggingface/hub");
+    if !cache_dir.exists() {
+        return None;
+    }
+    for entry in std::fs::read_dir(&cache_dir).ok()? {
+        let entry = entry.ok()?;
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let Some(repo_part) = dir_name.strip_prefix("models--") else {
+            continue;
+        };
+        let repo_id = match repo_part.find("--") {
+            Some(pos) => {
+                let (org, name_with_sep) = repo_part.split_at(pos);
+                let name = name_with_sep.get(2..).unwrap_or_default();
+                format!("{org}/{name}")
+            }
+            None => continue,
+        };
+        let snapshots_dir = entry.path().join("snapshots");
+        let Ok(snapshots) = std::fs::read_dir(&snapshots_dir) else {
+            continue;
+        };
+        for snap in snapshots.flatten() {
+            if !snap.path().is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(snap.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let fname = file.file_name().to_string_lossy().to_string();
+                if !fname.ends_with(".safetensors") {
+                    continue;
+                }
+                // Read header and check for __metadata__.
+                let Ok(mut f) = std::fs::File::open(file.path()) else {
+                    continue;
+                };
+                let mut len_buf = [0u8; 8];
+                if f.read_exact(&mut len_buf).is_err() {
+                    continue;
+                }
+                let Ok(header_size) = usize::try_from(u64::from_le_bytes(len_buf)) else {
+                    continue;
+                };
+                if header_size > 10_000_000 {
+                    continue; // Skip unreasonably large headers
+                }
+                let mut json_buf = vec![0u8; header_size];
+                if f.read_exact(&mut json_buf).is_err() {
+                    continue;
+                }
+                if let Ok(text) = std::str::from_utf8(&json_buf) {
+                    if text.contains("__metadata__") {
+                        return Some((repo_id, fname));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Finds a cached repo that has a `model.safetensors.index.json` (sharded model).
+fn find_cached_sharded_repo() -> Option<String> {
+    let cache_dir = dirs::home_dir()?.join(".cache/huggingface/hub");
+    if !cache_dir.exists() {
+        return None;
+    }
+    for entry in std::fs::read_dir(&cache_dir).ok()? {
+        let entry = entry.ok()?;
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let Some(repo_part) = dir_name.strip_prefix("models--") else {
+            continue;
+        };
+        let repo_id = match repo_part.find("--") {
+            Some(pos) => {
+                let (org, name_with_sep) = repo_part.split_at(pos);
+                let name = name_with_sep.get(2..).unwrap_or_default();
+                format!("{org}/{name}")
+            }
+            None => continue,
+        };
+        let snapshots_dir = entry.path().join("snapshots");
+        let Ok(snapshots) = std::fs::read_dir(&snapshots_dir) else {
+            continue;
+        };
+        for snap in snapshots.flatten() {
+            if !snap.path().is_dir() {
+                continue;
+            }
+            if snap.path().join("model.safetensors.index.json").exists() {
+                return Some(repo_id);
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn inspect_cached_single_file() {
+    let Some((repo_id, filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args(["inspect", &repo_id, &filename, "--cached"]));
+    assert!(
+        success,
+        "inspect --cached should succeed for {repo_id}/{filename}: {stderr}"
+    );
+    assert!(
+        stdout.contains("Source:   cached"),
+        "should report cached source, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Tensor") && stdout.contains("Dtype") && stdout.contains("Shape"),
+        "should show tensor table headers, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("tensors"),
+        "should show tensor count summary, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_json_output() {
+    let Some((repo_id, filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, &filename, "--cached", "--json"]));
+    assert!(success, "inspect --cached --json should succeed: {stderr}");
+    // Verify it's valid JSON with expected fields.
+    assert!(
+        stdout.contains("\"tensors\""),
+        "JSON should contain tensors field, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"header_size\""),
+        "JSON should contain header_size field, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_no_metadata() {
+    let Some((repo_id, filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, &filename, "--cached", "--no-metadata"]));
+    assert!(
+        success,
+        "inspect --cached --no-metadata should succeed: {stderr}"
+    );
+    assert!(
+        !stdout.contains("Metadata:"),
+        "--no-metadata should suppress Metadata line, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_repo_summary() {
+    let Some((repo_id, _filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args(["inspect", &repo_id, "--cached"]));
+    assert!(
+        success,
+        "inspect --cached repo summary should succeed: {stderr}"
+    );
+    // Should show either shard index or multi-file summary.
+    assert!(
+        stdout.contains("tensors") || stdout.contains("Tensors"),
+        "should mention tensors in output, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_metadata_present() {
+    // Find a cached safetensors file that has __metadata__ in its header.
+    let Some((repo_id, filename)) = find_cached_safetensors_with_metadata() else {
+        eprintln!("SKIP: no cached safetensors file with __metadata__ found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args(["inspect", &repo_id, &filename, "--cached"]));
+    assert!(
+        success,
+        "inspect --cached should succeed for {repo_id}/{filename}: {stderr}"
+    );
+    assert!(
+        stdout.contains("Metadata:"),
+        "output should contain Metadata: line by default, got:\n{stdout}"
+    );
+    // Metadata line should contain key=value pairs.
+    let meta_line = stdout.lines().find(|l| l.contains("Metadata:")).unwrap();
+    assert!(
+        meta_line.contains('='),
+        "Metadata line should contain key=value pairs, got: {meta_line}"
+    );
+}
+
+#[test]
+fn inspect_cached_sharded_model() {
+    let Some(repo_id) = find_cached_sharded_repo() else {
+        eprintln!("SKIP: no cached sharded safetensors model found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args(["inspect", &repo_id, "--cached"]));
+    assert!(
+        success,
+        "inspect --cached sharded model should succeed: {stderr}"
+    );
+    assert!(
+        stdout.contains("shard index"),
+        "sharded model should show shard index source, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("shards") || stdout.contains("shard,"),
+        "should show shard count, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Hint:"),
+        "should show per-tensor detail hint, got:\n{stdout}"
+    );
+}

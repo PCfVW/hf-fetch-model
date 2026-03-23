@@ -105,6 +105,15 @@ pub enum FetchError {
         /// The repository identifier.
         repo_id: String,
     },
+
+    /// A `.safetensors` header is malformed or cannot be parsed.
+    #[error("safetensors header error for {filename}: {reason}")]
+    SafetensorsHeader {
+        /// The filename whose header failed to parse.
+        filename: String,
+        /// Description of the parse failure.
+        reason: String,
+    },
 }
 
 /// A per-file download failure with structured context.
