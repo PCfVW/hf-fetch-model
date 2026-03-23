@@ -155,6 +155,38 @@ enum Commands {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Compare tensor layouts between two models.
+    ///
+    /// Inspects `.safetensors` headers in both repos and classifies tensors
+    /// into four buckets: only-in-A, only-in-B, dtype/shape differences,
+    /// and matching. Does not download weight data.
+    Diff {
+        /// First model repository (labeled A).
+        repo_a: String,
+        /// Second model repository (labeled B).
+        repo_b: String,
+        /// Git revision for model A.
+        #[arg(long)]
+        revision_a: Option<String>,
+        /// Git revision for model B.
+        #[arg(long)]
+        revision_b: Option<String>,
+        /// Authentication token (or set `HF_TOKEN` env var).
+        #[arg(long)]
+        token: Option<String>,
+        /// Cache-only mode: fail if files are not cached locally.
+        #[arg(long)]
+        cached: bool,
+        /// Show only tensors whose name contains this substring.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Show only the summary line (counts per category).
+        #[arg(long)]
+        summary: bool,
+        /// Output the full diff as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show disk usage for cached models.
     Du {
         /// The repository identifier (omit to show all cached repos).
@@ -237,6 +269,7 @@ fn main() -> ExitCode {
             | Commands::Discover { .. }
             | Commands::Search { .. }
             | Commands::Status { .. }
+            | Commands::Diff { .. }
             | Commands::Du { .. }
             | Commands::Inspect { .. }
             | Commands::ListFiles { .. },
@@ -334,6 +367,28 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         }) => run_status(repo_id.as_str(), revision.as_deref(), token.as_deref()),
         Some(Commands::Status { repo_id: None, .. }) => run_status_all(),
+        // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
+        Some(Commands::Diff {
+            repo_a,
+            repo_b,
+            revision_a,
+            revision_b,
+            token,
+            cached,
+            filter,
+            summary,
+            json,
+        }) => run_diff(
+            repo_a.as_str(),
+            repo_b.as_str(),
+            revision_a.as_deref(),
+            revision_b.as_deref(),
+            token.as_deref(),
+            cached,
+            filter.as_deref(),
+            summary,
+            json,
+        ),
         // BORROW: explicit .as_str() for String → &str conversion
         Some(Commands::Du {
             repo_id: Some(repo_id),
@@ -1014,6 +1069,323 @@ fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
         files.len(),
     );
 
+    Ok(())
+}
+
+/// Collects all tensors from a repo into a name-keyed map.
+///
+/// Inspects all `.safetensors` files (cached or remote) and flattens
+/// tensors across shards into a single `HashMap`.
+fn collect_repo_tensors(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+) -> Result<HashMap<String, inspect::TensorInfo>, FetchError> {
+    let results: Vec<(String, inspect::SafetensorsHeaderInfo)> = if cached {
+        inspect::inspect_repo_safetensors_cached(repo_id, revision)?
+    } else {
+        // BORROW: explicit String::from for Option<&str> → Option<String>
+        let token = token
+            .map(String::from)
+            .or_else(|| std::env::var("HF_TOKEN").ok());
+
+        let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+            path: PathBuf::from("<runtime>"),
+            source: e,
+        })?;
+        // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+        let remote_results = rt.block_on(inspect::inspect_repo_safetensors(
+            repo_id,
+            token.as_deref(),
+            revision,
+        ))?;
+        remote_results
+            .into_iter()
+            .map(|(name, info, _source)| (name, info))
+            .collect()
+    };
+
+    let mut tensors = HashMap::new();
+    for (_filename, info) in results {
+        for t in info.tensors {
+            // BORROW: explicit .clone() for owned String key
+            tensors.insert(t.name.clone(), t);
+        }
+    }
+
+    Ok(tensors)
+}
+
+/// Compares tensor layouts between two model repositories.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn run_diff(
+    repo_a: &str,
+    repo_b: &str,
+    revision_a: Option<&str>,
+    revision_b: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+    filter: Option<&str>,
+    summary: bool,
+    json: bool,
+) -> Result<(), FetchError> {
+    let tensors_a = collect_repo_tensors(repo_a, revision_a, token, cached)?;
+    let tensors_b = collect_repo_tensors(repo_b, revision_b, token, cached)?;
+
+    if tensors_a.is_empty() {
+        println!("No .safetensors files found in {repo_a}.");
+        println!("Hint: use `hf-fm list-files {repo_a}` to see available file types");
+        return Ok(());
+    }
+    if tensors_b.is_empty() {
+        println!("No .safetensors files found in {repo_b}.");
+        println!("Hint: use `hf-fm list-files {repo_b}` to see available file types");
+        return Ok(());
+    }
+
+    // Collect all tensor names from both repos.
+    let mut all_names: Vec<&str> = tensors_a
+        .keys()
+        .chain(tensors_b.keys())
+        // BORROW: explicit .as_str() instead of Deref coercion
+        .map(String::as_str)
+        .collect::<HashSet<&str>>()
+        .into_iter()
+        .collect();
+    all_names.sort_unstable();
+
+    // Apply filter.
+    if let Some(pattern) = filter {
+        all_names.retain(|name| name.contains(pattern));
+    }
+
+    // Classify into four buckets.
+    let mut only_a: Vec<&str> = Vec::new();
+    let mut only_b: Vec<&str> = Vec::new();
+    let mut differ: Vec<&str> = Vec::new();
+    let mut matching: Vec<&str> = Vec::new();
+
+    for name in &all_names {
+        match (tensors_a.get(*name), tensors_b.get(*name)) {
+            (Some(_), None) => only_a.push(name),
+            (None, Some(_)) => only_b.push(name),
+            (Some(a), Some(b)) => {
+                if a.dtype == b.dtype && a.shape == b.shape {
+                    matching.push(name);
+                } else {
+                    differ.push(name);
+                }
+            }
+            (None, None) => {} // EXPLICIT: impossible — name comes from one of the two maps
+        }
+    }
+
+    // Compute totals for the summary.
+    let total_a = if filter.is_some() {
+        only_a.len() + differ.len() + matching.len()
+    } else {
+        tensors_a.len()
+    };
+    let total_b = if filter.is_some() {
+        only_b.len() + differ.len() + matching.len()
+    } else {
+        tensors_b.len()
+    };
+
+    // JSON output mode.
+    if json {
+        return print_diff_json(
+            repo_a, repo_b, &tensors_a, &tensors_b, &only_a, &only_b, &differ, &matching, filter,
+        );
+    }
+
+    // Print header.
+    println!("  A: {repo_a}");
+    println!("  B: {repo_b}");
+
+    if !summary {
+        println!();
+
+        // Print only-in-A.
+        if !only_a.is_empty() {
+            let label = if only_a.len() == 1 {
+                "tensor"
+            } else {
+                "tensors"
+            };
+            println!("  Only in A ({} {label}):", only_a.len());
+            for name in &only_a {
+                if let Some(t) = tensors_a.get(*name) {
+                    let shape_str = format!("{:?}", t.shape);
+                    println!("    {name:<50} {:<8} {shape_str}", t.dtype);
+                }
+            }
+            println!();
+        }
+
+        // Print only-in-B.
+        if !only_b.is_empty() {
+            let label = if only_b.len() == 1 {
+                "tensor"
+            } else {
+                "tensors"
+            };
+            println!("  Only in B ({} {label}):", only_b.len());
+            for name in &only_b {
+                if let Some(t) = tensors_b.get(*name) {
+                    let shape_str = format!("{:?}", t.shape);
+                    println!("    {name:<50} {:<8} {shape_str}", t.dtype);
+                }
+            }
+            println!();
+        }
+
+        // Print dtype/shape differences.
+        if !differ.is_empty() {
+            let label = if differ.len() == 1 {
+                "tensor"
+            } else {
+                "tensors"
+            };
+            println!("  Dtype/shape differences ({} {label}):", differ.len());
+            for name in &differ {
+                if let Some((a, b)) = tensors_a.get(*name).zip(tensors_b.get(*name)) {
+                    let shape_a = format!("{:?}", a.shape);
+                    let shape_b = format!("{:?}", b.shape);
+                    println!("    {name}");
+                    println!("      A: {:<8} {shape_a}", a.dtype);
+                    println!("      B: {:<8} {shape_b}", b.dtype);
+                }
+            }
+            println!();
+        }
+
+        // Print matching count.
+        let match_label = if matching.len() == 1 {
+            "tensor"
+        } else {
+            "tensors"
+        };
+        println!("  Matching: {} {match_label} identical", matching.len());
+    }
+
+    // Summary line.
+    println!("  {}", "\u{2500}".repeat(70));
+    print!(
+        "  A: {} tensors | B: {} tensors | only-A: {} | only-B: {} | differ: {} | match: {}",
+        total_a,
+        total_b,
+        only_a.len(),
+        only_b.len(),
+        differ.len(),
+        matching.len(),
+    );
+    if let Some(pattern) = filter {
+        println!(" (filter: {pattern:?})");
+    } else {
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Serializable diff entry for `--json` output.
+#[derive(serde::Serialize)]
+struct DiffTensorEntry {
+    /// Tensor name.
+    name: String,
+    /// Tensor info from model A, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    a: Option<DiffTensorSide>,
+    /// Tensor info from model B, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    b: Option<DiffTensorSide>,
+}
+
+/// One side of a diff entry (dtype + shape).
+#[derive(serde::Serialize)]
+struct DiffTensorSide {
+    /// Element dtype string.
+    dtype: String,
+    /// Tensor shape.
+    shape: Vec<usize>,
+}
+
+/// Serializable diff result for `--json` output.
+#[derive(serde::Serialize)]
+struct DiffResult {
+    /// Model A repository identifier.
+    repo_a: String,
+    /// Model B repository identifier.
+    repo_b: String,
+    /// Tensors only in model A.
+    only_a: Vec<DiffTensorEntry>,
+    /// Tensors only in model B.
+    only_b: Vec<DiffTensorEntry>,
+    /// Tensors with different dtypes or shapes.
+    differ: Vec<DiffTensorEntry>,
+    /// Number of tensors that match exactly.
+    matching_count: usize,
+    /// Filter pattern applied, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filter: Option<String>,
+}
+
+/// Prints diff results as JSON.
+#[allow(clippy::too_many_arguments)]
+fn print_diff_json(
+    repo_a: &str,
+    repo_b: &str,
+    tensors_a: &HashMap<String, inspect::TensorInfo>,
+    tensors_b: &HashMap<String, inspect::TensorInfo>,
+    only_a: &[&str],
+    only_b: &[&str],
+    differ: &[&str],
+    matching: &[&str],
+    filter: Option<&str>,
+) -> Result<(), FetchError> {
+    let make_entry = |name: &str,
+                      a: Option<&inspect::TensorInfo>,
+                      b: Option<&inspect::TensorInfo>|
+     -> DiffTensorEntry {
+        DiffTensorEntry {
+            name: name.to_owned(),
+            a: a.map(|t| DiffTensorSide {
+                // BORROW: explicit .clone() for owned String
+                dtype: t.dtype.clone(),
+                shape: t.shape.clone(),
+            }),
+            b: b.map(|t| DiffTensorSide {
+                // BORROW: explicit .clone() for owned String
+                dtype: t.dtype.clone(),
+                shape: t.shape.clone(),
+            }),
+        }
+    };
+
+    let result = DiffResult {
+        repo_a: repo_a.to_owned(),
+        repo_b: repo_b.to_owned(),
+        only_a: only_a
+            .iter()
+            .map(|n| make_entry(n, tensors_a.get(*n), None))
+            .collect(),
+        only_b: only_b
+            .iter()
+            .map(|n| make_entry(n, None, tensors_b.get(*n)))
+            .collect(),
+        differ: differ
+            .iter()
+            .map(|n| make_entry(n, tensors_a.get(*n), tensors_b.get(*n)))
+            .collect(),
+        matching_count: matching.len(),
+        filter: filter.map(str::to_owned),
+    };
+
+    let output = serde_json::to_string_pretty(&result)
+        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+    println!("{output}");
     Ok(())
 }
 

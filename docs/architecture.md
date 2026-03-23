@@ -36,6 +36,7 @@ hf-hub (tokio, .high())
 - **Retry with backoff** — exponential backoff + jitter for transient failures
 - **Timeout control** — per-file and overall time limits
 - **Safetensors header inspection** — read tensor metadata (names, shapes, dtypes, offsets) from local cache or remote repos via HTTP Range requests, without downloading full files
+- **Tensor layout comparison** — compare tensor structures between two models (only-in-A, only-in-B, dtype/shape differences, matching) via the CLI `diff` subcommand
 - **Cache diagnostics** — inspect download state (complete / partial / missing) per file; disk usage per repo and globally
 - **Model search** — query the HuggingFace Hub API for models, with multi-term filtering and model card metadata
 

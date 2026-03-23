@@ -407,6 +407,54 @@ fn find_cached_safetensors_repo() -> Option<(String, String)> {
     None
 }
 
+/// Finds all cached repos that have at least one `.safetensors` file.
+fn find_all_cached_safetensors_repos() -> Vec<String> {
+    let mut repos = Vec::new();
+    let Some(cache_dir) = dirs::home_dir().map(|h| h.join(".cache/huggingface/hub")) else {
+        return repos;
+    };
+    if !cache_dir.exists() {
+        return repos;
+    }
+    let Ok(entries) = std::fs::read_dir(&cache_dir) else {
+        return repos;
+    };
+    for entry in entries.flatten() {
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let Some(repo_part) = dir_name.strip_prefix("models--") else {
+            continue;
+        };
+        let repo_id = match repo_part.find("--") {
+            Some(pos) => {
+                let (org, name_with_sep) = repo_part.split_at(pos);
+                let name = name_with_sep.get(2..).unwrap_or_default();
+                format!("{org}/{name}")
+            }
+            None => continue,
+        };
+        let snapshots_dir = entry.path().join("snapshots");
+        let Ok(snapshots) = std::fs::read_dir(&snapshots_dir) else {
+            continue;
+        };
+        'snap: for snap in snapshots.flatten() {
+            if !snap.path().is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(snap.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let fname = file.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".safetensors") {
+                    repos.push(repo_id.clone());
+                    break 'snap;
+                }
+            }
+        }
+    }
+    repos
+}
+
 /// Finds a cached .safetensors file that has `__metadata__` in its header.
 ///
 /// Reads the raw header JSON and checks for the `__metadata__` key.
@@ -694,5 +742,80 @@ fn inspect_cached_filter() {
     assert!(
         stdout.contains("filter:"),
         "filtered summary should mention filter, got:\n{stdout}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// diff subcommand (cache-only tests — no network)
+// -----------------------------------------------------------------------
+
+#[test]
+fn help_shows_diff_subcommand() {
+    let (stdout, _stderr, success) = run(hf_fm().arg("--help"));
+    assert!(success, "help should succeed");
+    assert!(
+        stdout.contains("diff"),
+        "help should mention diff subcommand, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn diff_cached_identical_model() {
+    let Some((repo_id, _filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    // Diff a model against itself — everything should match.
+    let (stdout, stderr, success) = run(hf_fm().args(["diff", &repo_id, &repo_id, "--cached"]));
+    assert!(success, "diff --cached self-diff should succeed: {stderr}");
+    // Should show zero only-A, only-B, and differ.
+    assert!(
+        stdout.contains("only-A: 0"),
+        "self-diff should have 0 only-A, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("only-B: 0"),
+        "self-diff should have 0 only-B, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("differ: 0"),
+        "self-diff should have 0 differ, got:\n{stdout}"
+    );
+    // Match count should be > 0.
+    assert!(
+        stdout.contains("Matching:") && !stdout.contains("Matching: 0"),
+        "self-diff should have matching tensors, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn diff_cached_different_models() {
+    // Find two different cached repos with safetensors.
+    let repos = find_all_cached_safetensors_repos();
+    // INDEX: length checked before access
+    let (Some(repo_a), Some(repo_b)) = (repos.first(), repos.get(1)) else {
+        eprintln!("SKIP: need at least 2 cached safetensors repos for diff test");
+        return;
+    };
+
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["diff", repo_a.as_str(), repo_b.as_str(), "--cached"]));
+    assert!(
+        success,
+        "diff --cached different models should succeed: {stderr}"
+    );
+    // Should have the A: and B: labels.
+    assert!(
+        stdout.contains(&format!("A: {repo_a}")),
+        "should show repo A label, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("B: {repo_b}")),
+        "should show repo B label, got:\n{stdout}"
+    );
+    // Summary line should be present.
+    assert!(
+        stdout.contains("A:") && stdout.contains("tensors"),
+        "should show summary line, got:\n{stdout}"
     );
 }

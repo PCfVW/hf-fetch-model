@@ -14,8 +14,10 @@ cargo install hf-fetch-model --features cli
 - [List-files examples](#list-files-examples)
 - [Search examples](#search-examples)
 - [Inspect examples](#inspect-examples)
+- [Diff examples](#diff-examples)
 - [Disk usage examples](#disk-usage-examples)
 - [Other commands](#other-commands)
+- [Diff flags](#diff-flags)
 - [Download flags](#download-flags)
 - [Inspect flags](#inspect-flags)
 - [List-files flags](#list-files-flags)
@@ -27,6 +29,7 @@ cargo install hf-fetch-model --features cli
 | Command | Description |
 |---------|-------------|
 | *(default)* | Download a model: `hf-fm <REPO_ID>` |
+| `diff <REPO_A> <REPO_B>` | Compare tensor layouts between two models |
 | `discover` | Find new model families on the Hub not yet cached locally |
 | `download-file <REPO_ID> <FILENAME>` | Download a single file and print its cache path |
 | `du [REPO_ID]` | Show cache disk usage — per-repo breakdown, or cache-wide summary |
@@ -145,6 +148,25 @@ hf-fm inspect google/gemma-2-2b-it
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --no-metadata
 ```
 
+## Diff examples
+
+```sh
+# Compare tensor layouts between two model variants (cache-first)
+hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq
+
+# Cache-only (no network)
+hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq --cached
+
+# Filter to specific layers
+hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq --filter "layers.0"
+
+# Quick summary (counts only, no tensor listing)
+hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq --cached --summary
+
+# JSON output for programmatic consumption
+hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq --cached --json
+```
+
 ## Disk usage examples
 
 ```sh
@@ -168,6 +190,18 @@ hf-fm list-families
 # Discover new families from HuggingFace Hub
 hf-fm discover
 ```
+
+## Diff flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--cached` | Cache-only mode: fail if files are not cached locally | off |
+| `--filter` | Show only tensors whose name contains this substring | — |
+| `--json` | Output the full diff as JSON | off |
+| `--revision-a` | Git revision for model A | main |
+| `--revision-b` | Git revision for model B | main |
+| `--summary` | Show only the summary line (counts per category) | off |
+| `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
 ## Download flags
 

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`diff` subcommand** — compare tensor layouts between two models. Shows tensors only-in-A, only-in-B, dtype/shape differences, and matching count. Supports `--cached`, `--filter`, `--summary`, `--json`, and per-repo `--revision-a`/`--revision-b` flags.
 - **`inspect` subcommand** — read safetensors tensor metadata (names, shapes, dtypes, offsets) from local cache or remote repos via HTTP Range requests, without downloading full files. Supports `--json`, `--no-metadata`, `--cached` flags. For sharded models, uses the shard index as a fast path (1 request instead of 2×N). Cross-validated against Python on 199 cached files (16,501 tensors, 0 discrepancies).
 - **`inspect_safetensors()` / `inspect_safetensors_local()` / `inspect_safetensors_cached()` API** — single-file header inspection (cache-first, local-only, or cache-only).
 - **`inspect_repo_safetensors()` / `inspect_repo_safetensors_cached()` API** — multi-file inspection with concurrent fetching.

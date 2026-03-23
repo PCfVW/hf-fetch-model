@@ -19,6 +19,7 @@ cargo install hf-fetch-model --features cli
 | Command | |
 |---------|---|
 | `hf-fm <REPO_ID>` | Download a model (multi-connection, auto-tuned) |
+| `hf-fm diff <REPO_A> <REPO_B>` | Compare tensor layouts between two models |
 | `hf-fm discover` | Find new model families on the Hub |
 | `hf-fm download-file <REPO_ID> <FILE>` | Download a single file |
 | `hf-fm du [REPO_ID]` | Show cache disk usage |
