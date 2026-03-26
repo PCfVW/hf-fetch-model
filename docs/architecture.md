@@ -17,6 +17,7 @@ hf-fetch-model
   • resume / retry
   • safetensors header inspection (HTTP Range)
   • cache diagnostics, disk usage & model search
+  • model card / README display & adapter config detection
          │ dep
 hf-hub (tokio, .high())
   • single-connection download (.high() mode)
@@ -38,7 +39,9 @@ hf-hub (tokio, .high())
 - **Safetensors header inspection** — read tensor metadata (names, shapes, dtypes, offsets) from local cache or remote repos via HTTP Range requests, without downloading full files
 - **Tensor layout comparison** — compare tensor structures between two models (only-in-A, only-in-B, dtype/shape differences, matching) via the CLI `diff` subcommand
 - **Cache diagnostics** — inspect download state (complete / partial / missing) per file; disk usage per repo and globally
-- **Model search** — query the HuggingFace Hub API for models, with multi-term filtering and model card metadata
+- **Model search** — query the HuggingFace Hub API for models, with multi-term filtering, model card metadata, and server-side library/pipeline filtering
+- **Model card and README display** — fetch and display model metadata and README text via the CLI `info` subcommand
+- **Adapter config detection** — auto-detect `adapter_config.json` in PEFT adapter repos during `inspect` and display base model, rank, alpha, and target modules
 
 ## Module layout
 
@@ -48,9 +51,9 @@ hf-hub (tokio, .high())
 | `config` | public | `FetchConfig` builder and `Filter` presets |
 | `plan` | public | `DownloadPlan`, `FilePlan`, plan-to-config optimization |
 | `download` | public | Download orchestration, `DownloadOutcome` |
-| `discover` | public | Search, model card, `GateStatus` |
+| `discover` | public | Search, model card, README fetch, `GateStatus` |
 | `cache` | public | Cache inspection, status, and disk usage |
-| `inspect` | public | Safetensors header parsing, `TensorInfo`, `SafetensorsHeaderInfo`, `ShardedIndex` |
+| `inspect` | public | Safetensors header parsing, `TensorInfo`, `SafetensorsHeaderInfo`, `ShardedIndex`, `AdapterConfig` |
 | `checksum` | public | SHA256 verification |
 | `error` | public | `FetchError` and `FileFailure` |
 | `progress` | public | `ProgressEvent` and `IndicatifProgress` |
