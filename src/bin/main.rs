@@ -926,7 +926,8 @@ fn run_search(
 
     // Oversample when filtering: request more from API to compensate for
     // client-side filtering that will discard non-matching results.
-    let api_limit = if filter_terms.len() > 1 {
+    let has_client_filter = filter_terms.len() > 1 || library.is_some() || pipeline.is_some();
+    let api_limit = if has_client_filter {
         limit.saturating_mul(5)
     } else {
         limit
