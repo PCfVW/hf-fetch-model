@@ -19,6 +19,10 @@ pub struct SearchResult {
     pub model_id: String,
     /// Total download count.
     pub downloads: u64,
+    /// Library framework (e.g., `"transformers"`, `"peft"`, `"diffusers"`), if reported.
+    pub library_name: Option<String>,
+    /// Pipeline task tag (e.g., `"text-generation"`), if reported.
+    pub pipeline_tag: Option<String>,
 }
 
 /// A model family discovered from the `HuggingFace` Hub.
@@ -41,6 +45,10 @@ struct ApiModelEntry {
     downloads: u64,
     #[serde(default)]
     config: Option<ApiConfig>,
+    #[serde(default)]
+    library_name: Option<String>,
+    #[serde(default)]
+    pipeline_tag: Option<String>,
 }
 
 /// The `config` object embedded in a model API response.
@@ -323,11 +331,33 @@ pub async fn search_models(
         .await
         .map_err(|e| FetchError::Http(e.to_string()))?;
 
+    // Client-side filtering: the HF search API may ignore library/pipeline_tag
+    // query parameters when combined with the `search` parameter, so we filter
+    // the results ourselves to guarantee correctness.
     let results = models
         .into_iter()
+        .filter(|m| {
+            if let Some(lib) = library {
+                match m.library_name {
+                    // BORROW: explicit .as_str() instead of Deref coercion
+                    Some(ref name) if name.as_str().eq_ignore_ascii_case(lib) => {}
+                    _ => return false,
+                }
+            }
+            if let Some(pipe) = pipeline {
+                match m.pipeline_tag {
+                    // BORROW: explicit .as_str() instead of Deref coercion
+                    Some(ref tag) if tag.as_str().eq_ignore_ascii_case(pipe) => {}
+                    _ => return false,
+                }
+            }
+            true
+        })
         .map(|m| SearchResult {
             model_id: m.model_id,
             downloads: m.downloads,
+            library_name: m.library_name,
+            pipeline_tag: m.pipeline_tag,
         })
         .collect();
 

@@ -997,8 +997,14 @@ fn run_search(
 }
 
 fn print_search_result(result: &discover::SearchResult) {
+    let suffix = match (&result.library_name, &result.pipeline_tag) {
+        (Some(lib), Some(pipe)) => format!("  [{lib}, {pipe}]"),
+        (Some(lib), None) => format!("  [{lib}]"),
+        (None, Some(pipe)) => format!("  [{pipe}]"),
+        (None, None) => String::new(),
+    };
     println!(
-        "  hf-fm {:<48} ({} downloads)",
+        "  hf-fm {:<48} ({} downloads){suffix}",
         result.model_id,
         format_downloads(result.downloads)
     );

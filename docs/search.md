@@ -76,7 +76,9 @@ Models matching "mistral" (by downloads):
   ...
 ```
 
-These filters are sent to the HuggingFace API and reduce results before they reach the client. They can be combined with comma-separated multi-term filtering and `--exact`.
+These filters are applied client-side (the HuggingFace search API does not reliably honor them server-side when combined with a search query). When library or pipeline metadata is available, it is shown in brackets after the download count.
+
+Filters can be combined with comma-separated multi-term filtering and `--exact`.
 
 ## Exact match (`--exact`)
 
