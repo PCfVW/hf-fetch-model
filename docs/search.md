@@ -80,9 +80,9 @@ When library or pipeline metadata is available, it is shown in brackets after th
 
 Filters can be combined with comma-separated multi-term filtering and `--exact`.
 
-Common `--library` values: `transformers`, `peft`, `diffusers`, `vllm`, `gguf`, `sentence-transformers`.
+Common `--library` values: `transformers`, `peft`, `diffusers`, `vllm`, `gguf`, `sentence-transformers`, `timm`, `open_clip`, `transformers.js`, `pyannote-audio`, `speechbrain`.
 
-Common `--pipeline` values: `text-generation`, `text-classification`, `text2text-generation`, `token-classification`, `question-answering`, `summarization`, `translation`, `fill-mask`, `sentence-similarity`, `image-classification`, `image-to-text`, `object-detection`, `automatic-speech-recognition`.
+Common `--pipeline` values: `text-generation`, `image-text-to-text`, `sentence-similarity`, `automatic-speech-recognition`, `feature-extraction`, `fill-mask`, `text-classification`, `image-classification`, `text-to-image`, `text-to-speech`, `translation`, `token-classification`, `question-answering`, `summarization`, `object-detection`, `image-segmentation`, `zero-shot-image-classification`.
 
 For the full list, see the [HuggingFace tasks page](https://huggingface.co/tasks).
 
