@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`search --library` / `--pipeline` flags** — server-side filtering by library framework (e.g., `peft`, `transformers`) and pipeline task (e.g., `text-generation`). Filters are passed as query parameters to the HuggingFace API.
+
 ## [0.9.0] — Safetensors inspection, tensor diff & cache disk usage
 
 ### Added

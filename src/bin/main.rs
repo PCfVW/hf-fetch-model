@@ -111,6 +111,12 @@ enum Commands {
         /// Return only the exact model ID match; show model card metadata if found.
         #[arg(long)]
         exact: bool,
+        /// Filter by library framework (e.g., `"transformers"`, `"peft"`, `"vllm"`).
+        #[arg(long)]
+        library: Option<String>,
+        /// Filter by pipeline task (e.g., `"text-generation"`, `"text-classification"`).
+        #[arg(long)]
+        pipeline: Option<String>,
     },
     /// Download a single file from a `HuggingFace` repository.
     DownloadFile {
@@ -335,12 +341,20 @@ fn run(cli: Cli) -> Result<(), FetchError> {
     match cli.command {
         Some(Commands::ListFamilies) => run_list_families(),
         Some(Commands::Discover { limit }) => run_discover(limit),
-        // BORROW: explicit .as_str() for String → &str conversion
+        // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::Search {
             query,
             limit,
             exact,
-        }) => run_search(query.as_str(), limit, exact),
+            library,
+            pipeline,
+        }) => run_search(
+            query.as_str(),
+            limit,
+            exact,
+            library.as_deref(),
+            pipeline.as_deref(),
+        ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::DownloadFile {
             verbose: _,
@@ -843,7 +857,13 @@ fn run_discover(limit: usize) -> Result<(), FetchError> {
     Ok(())
 }
 
-fn run_search(query: &str, limit: usize, exact: bool) -> Result<(), FetchError> {
+fn run_search(
+    query: &str,
+    limit: usize,
+    exact: bool,
+    library: Option<&str>,
+    pipeline: Option<&str>,
+) -> Result<(), FetchError> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
         path: PathBuf::from("<runtime>"),
         source: e,
@@ -880,7 +900,9 @@ fn run_search(query: &str, limit: usize, exact: bool) -> Result<(), FetchError> 
         limit
     };
 
-    let results = rt.block_on(discover::search_models(api_query, api_limit))?;
+    let results = rt.block_on(discover::search_models(
+        api_query, api_limit, library, pipeline,
+    ))?;
 
     // Client-side filtering: only applied when there are multiple comma-separated
     // terms. Single-term queries trust the API results as-is.

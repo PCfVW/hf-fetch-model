@@ -125,6 +125,12 @@ hf-fm search mistral,3B,instruct
 
 # Exact match with model card
 hf-fm search mistralai/Ministral-3-3B-Instruct-2512 --exact
+
+# Filter by library
+hf-fm search llama --library peft
+
+# Filter by pipeline task
+hf-fm search mistral --pipeline text-generation
 ```
 
 Common quantization synonyms are normalized automatically: `8bit`, `8-bit`, `int8`, and `INT8` all produce the same results. Same for `4bit`/`4-bit`/`int4` and `fp8`/`float8`.
@@ -238,7 +244,9 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--exact` | Return only the exact model ID match; show model card metadata | off |
+| `--library` | Filter by library framework (e.g., `transformers`, `peft`, `vllm`) | — |
 | `--limit` | Maximum number of results | 20 |
+| `--pipeline` | Filter by pipeline task (e.g., `text-generation`, `text-classification`) | — |
 
 ## Inspect flags
 

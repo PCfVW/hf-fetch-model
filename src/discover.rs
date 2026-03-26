@@ -261,6 +261,10 @@ fn normalize_quantization_terms(query: &str) -> String {
 
 /// Searches the `HuggingFace` Hub for models matching a query string.
 ///
+/// Optionally filters by `library` framework (e.g., `"transformers"`, `"peft"`)
+/// and/or `pipeline` task tag (e.g., `"text-generation"`). These filters are
+/// applied server-side by the `HuggingFace` API.
+///
 /// Common quantization synonyms (`"8bit"` / `"8-bit"` / `"int8"`,
 /// `"4bit"` / `"4-bit"` / `"int4"`, `"fp8"` / `"float8"`) are normalized
 /// before querying the API so that variant spellings return consistent results.
@@ -271,21 +275,37 @@ fn normalize_quantization_terms(query: &str) -> String {
 ///
 /// * `query` — Free-text search string (e.g., `"RWKV-7"`, `"llama 3"`).
 /// * `limit` — Maximum number of results to return.
+/// * `library` — Optional library filter (e.g., `"peft"`, `"transformers"`).
+/// * `pipeline` — Optional pipeline tag filter (e.g., `"text-generation"`).
 ///
 /// # Errors
 ///
 /// Returns [`FetchError::Http`] if the API request fails.
-pub async fn search_models(query: &str, limit: usize) -> Result<Vec<SearchResult>, FetchError> {
+pub async fn search_models(
+    query: &str,
+    limit: usize,
+    library: Option<&str>,
+    pipeline: Option<&str>,
+) -> Result<Vec<SearchResult>, FetchError> {
     let normalized = normalize_quantization_terms(query);
     let client = reqwest::Client::new();
 
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let mut query_params: Vec<(&str, &str)> = vec![
+        ("search", normalized.as_str()),
+        ("sort", "downloads"),
+        ("direction", "-1"),
+    ];
+    if let Some(lib) = library {
+        query_params.push(("library", lib));
+    }
+    if let Some(pipe) = pipeline {
+        query_params.push(("pipeline_tag", pipe));
+    }
+
     let response = client
         .get(HF_API_BASE)
-        .query(&[
-            ("search", normalized.as_str()), // BORROW: explicit .as_str()
-            ("sort", "downloads"),
-            ("direction", "-1"),
-        ])
+        .query(&query_params)
         .query(&[("limit", limit)])
         .send()
         .await

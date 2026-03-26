@@ -58,6 +58,26 @@ Models matching "mistral,3B,12" (by downloads):
 
 When commas are present, slashes are also treated as separators. So `mistralai/3B,12` splits into three terms: `mistralai`, `3B`, `12`.
 
+## Library and pipeline filtering
+
+Use `--library` and `--pipeline` to filter results server-side by framework or task:
+
+```
+$ hf-fm search llama --library peft
+Models matching "llama" (by downloads):
+
+  hf-fm lora-library/llama-2-7b-chat-lora              (1,234 downloads)
+  ...
+
+$ hf-fm search mistral --pipeline text-generation --limit 5
+Models matching "mistral" (by downloads):
+
+  hf-fm mistralai/Mistral-7B-Instruct-v0.3             (2,345,678 downloads)
+  ...
+```
+
+These filters are sent to the HuggingFace API and reduce results before they reach the client. They can be combined with comma-separated multi-term filtering and `--exact`.
+
 ## Exact match (`--exact`)
 
 Use `--exact` to match a single model by its full ID. When found, the model card metadata is fetched and displayed:
@@ -128,7 +148,11 @@ The search functionality is also available as a library:
 use hf_fetch_model::discover;
 
 // Search
-let results = discover::search_models("llama 3", 20).await?;
+let results = discover::search_models("llama 3", 20, None, None).await?;
+
+// Search with library/pipeline filters
+let peft_results = discover::search_models("llama", 20, Some("peft"), None).await?;
+let gen_results = discover::search_models("mistral", 10, None, Some("text-generation")).await?;
 
 // Fetch model card
 let card = discover::fetch_model_card("meta-llama/Llama-3.2-1B-Instruct").await?;
