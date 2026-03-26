@@ -1054,7 +1054,6 @@ fn run_info(
         source: e,
     })?;
 
-    // BORROW: explicit .as_str() for String → &str conversion
     let card = rt.block_on(discover::fetch_model_card(repo_id))?;
     // BORROW: explicit .as_deref() for Option<String> → Option<&str>
     let readme = rt.block_on(discover::fetch_readme(
@@ -1134,12 +1133,13 @@ fn print_info_json(
     let result = InfoResult {
         // BORROW: explicit .to_owned() for &str → owned String
         repo_id: repo_id.to_owned(),
-        // BORROW: explicit .clone() for Option<String>
+        // BORROW: explicit .clone() for Option<String> and Vec<String> fields
         license: card.license.clone(),
         pipeline_tag: card.pipeline_tag.clone(),
         library_name: card.library_name.clone(),
         tags: card.tags.clone(),
         languages: card.languages.clone(),
+        // BORROW: explicit .to_string() for GateStatus → String
         gated: card.gated.to_string(),
         // BORROW: explicit .to_owned() for Option<&str> → Option<String>
         readme: readme.map(str::to_owned),

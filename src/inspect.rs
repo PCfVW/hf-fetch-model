@@ -147,14 +147,14 @@ pub struct ShardedIndex {
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
-/// PEFT adapter configuration parsed from `adapter_config.json`.
+/// `PEFT` adapter configuration parsed from `adapter_config.json`.
 ///
-/// Contains the key fields that identify an adapter: the PEFT type,
+/// Contains the key fields that identify an adapter: the `PEFT` type,
 /// base model, `LoRA` rank and scaling parameters, and target modules.
-/// All fields are optional because adapter configs vary across PEFT methods.
+/// All fields are optional because adapter configs vary across `PEFT` methods.
 #[derive(Debug, Clone, Serialize)]
 pub struct AdapterConfig {
-    /// PEFT method type (e.g., `"LORA"`, `"ADALORA"`, `"IA3"`).
+    /// `PEFT` method type (e.g., `"LORA"`, `"ADALORA"`, `"IA3"`).
     pub peft_type: Option<String>,
     /// The base model this adapter was trained on.
     pub base_model_name_or_path: Option<String>,
@@ -812,10 +812,10 @@ enum AdapterTargetModules {
     Single(String),
 }
 
-/// Fetches and parses `adapter_config.json` for a PEFT adapter repository (cache-first).
+/// Fetches and parses `adapter_config.json` for a `PEFT` adapter repository (cache-first).
 ///
 /// Returns `Ok(None)` if the file does not exist (HTTP 404), meaning the
-/// repository is not a PEFT adapter.
+/// repository is not a `PEFT` adapter.
 ///
 /// # Errors
 ///
