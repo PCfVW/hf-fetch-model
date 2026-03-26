@@ -157,13 +157,34 @@ These can be implemented incrementally across releases, starting with `cache del
 
 ---
 
-## Implementation order
+## Release plan
 
-| Priority | Feature | Rationale |
-|----------|---------|-----------|
-| 1 | `cache delete` | Most requested operation. Simple, low risk, high value. |
-| 2 | `cache clean-partial` | Safe cleanup of interrupted downloads. Unblocks re-downloads. |
-| 3 | `cache verify` | Non-destructive integrity check. Detailed design in v0.10.0 roadmap. |
-| 4 | `cache gc` | Age-based eviction. Requires the "last accessed" heuristic. |
-| 5 | `cache path` | Small utility, useful for scripting. |
-| 6 | `cache list` | Combines existing `du` and `status` with timestamps. |
+Incremental delivery across patch and minor releases. Ship the highest-impact features first in small releases, reserve the minor bump for the more complex features that need the "last accessed" heuristic and network-based verification.
+
+### v0.9.2 — Immediate pain relief
+
+| Feature | Scope |
+|---------|-------|
+| `cache delete` | Single-repo deletion by repo ID, confirmation prompt, `--yes` flag |
+| `cache clean-partial` | Remove `.chunked.part` files from interrupted downloads |
+
+Small scope, high impact, ships fast. Introduces the `cache` subcommand grouping with nested clap subcommands.
+
+### v0.9.3 — Scripting and visibility
+
+| Feature | Scope |
+|---------|-------|
+| `cache path` | Print snapshot directory path for scripting |
+| `cache list` | Unified listing with last-access timestamps, `--sort` flag |
+
+Non-destructive, easy to implement. Gives users the visibility needed before running `gc` in v0.10.0.
+
+### v0.10.0 — Cache maturity
+
+| Feature | Scope |
+|---------|-------|
+| `cache verify` | SHA256 re-verification against HF LFS metadata (requires network). Detailed design in [v0.10.0 roadmap](v0.10.0-roadmap.md). |
+| `cache gc` | Age-based eviction with `--older-than`, `--except`, `--dry-run`. Requires the "last accessed" heuristic. |
+| `du --tree` | Tree-view of cache directory structure with box-drawing characters. |
+
+These are more complex: verify needs network + checksum comparison, gc needs the last-accessed heuristic and interactive prompt safety, `du --tree` is a display feature that benefits from the `cache list` timestamps added in v0.9.3. Bundle them as the "cache maturity" release.
