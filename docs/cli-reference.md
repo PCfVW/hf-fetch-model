@@ -36,7 +36,7 @@ cargo install hf-fetch-model --features cli
 | `info <REPO_ID>` | Show model card metadata and README text |
 | `download-file <REPO_ID> <FILENAME>` | Download a single file and print its cache path |
 | `du [REPO_ID]` | Show cache disk usage — per-repo breakdown, or cache-wide summary |
-| `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes) |
+| `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes); auto-detects PEFT adapter config |
 | `list-families` | List model families (`model_type`) in local cache |
 | `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
 | `search <QUERY>` | Search the HuggingFace Hub for models (by downloads) |
@@ -171,6 +171,9 @@ hf-fm inspect google/gemma-2-2b-it
 
 # Suppress metadata line
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --no-metadata
+
+# Inspect a PEFT adapter repo (auto-detects adapter_config.json)
+hf-fm inspect some-user/llama-2-7b-lora-adapter
 ```
 
 ## Diff examples

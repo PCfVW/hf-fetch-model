@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`search --library` / `--pipeline` flags** — server-side filtering by library framework (e.g., `peft`, `transformers`) and pipeline task (e.g., `text-generation`). Filters are passed as query parameters to the HuggingFace API.
 - **`info` subcommand** — `hf-fm info <REPO_ID>` displays model card metadata (license, pipeline, library, tags, languages, gating status) and README text. Supports `--json`, `--lines` (default 40, 0 = all), `--revision`, and `--token` flags.
 - **`fetch_readme()` API** — fetches raw README text from a `HuggingFace` repository. Returns `None` on 404.
+- **Adapter config detection in `inspect`** — when inspecting a repository, `adapter_config.json` is automatically detected and its PEFT configuration (type, base model, rank, alpha, target modules, task type) is displayed alongside tensor metadata.
+- **`AdapterConfig` type** — lightweight struct for parsed PEFT adapter configuration, re-exported at the crate root.
+- **`fetch_adapter_config()` / `fetch_adapter_config_cached()` API** — fetches and parses `adapter_config.json` from a repository (cache-first or cache-only).
 
 ## [0.9.0] — Safetensors inspection, tensor diff & cache disk usage
 

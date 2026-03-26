@@ -1724,6 +1724,7 @@ fn run_inspect_repo(
         // Cache-only: try shard index first, then walk snapshot.
         if let Some(index) = inspect::fetch_shard_index_cached(repo_id, revision)? {
             print_shard_index_summary(repo_id, &index, filter);
+            print_adapter_config_if_present(repo_id, revision, None, true, json);
             return Ok(());
         }
 
@@ -1735,10 +1736,13 @@ fn run_inspect_repo(
         }
 
         if json {
-            return print_multi_file_json(&results, filter);
+            print_multi_file_json(&results, filter)?;
+            print_adapter_config_if_present(repo_id, revision, None, true, true);
+            return Ok(());
         }
 
         print_multi_file_summary(repo_id, "cached", &results, filter);
+        print_adapter_config_if_present(repo_id, revision, None, true, false);
         return Ok(());
     }
 
@@ -1762,6 +1766,7 @@ fn run_inspect_repo(
 
     if let Some(index) = shard_index {
         print_shard_index_summary(repo_id, &index, filter);
+        print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, json);
         return Ok(());
     }
 
@@ -1783,7 +1788,9 @@ fn run_inspect_repo(
             .into_iter()
             .map(|(name, info, _source)| (name, info))
             .collect();
-        return print_multi_file_json(&mapped, filter);
+        print_multi_file_json(&mapped, filter)?;
+        print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, true);
+        return Ok(());
     }
 
     let mapped: Vec<(String, inspect::SafetensorsHeaderInfo)> = results
@@ -1791,7 +1798,58 @@ fn run_inspect_repo(
         .map(|(name, info, _source)| (name, info))
         .collect();
     print_multi_file_summary(repo_id, "mixed", &mapped, filter);
+    print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, false);
     Ok(())
+}
+
+/// Prints adapter configuration if `adapter_config.json` is found in the repository.
+///
+/// Silently returns if the file does not exist or cannot be fetched.
+fn print_adapter_config_if_present(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+    json: bool,
+) {
+    let result = if cached {
+        inspect::fetch_adapter_config_cached(repo_id, revision)
+    } else {
+        let Ok(rt) = tokio::runtime::Runtime::new() else {
+            return;
+        };
+        rt.block_on(inspect::fetch_adapter_config(repo_id, token, revision))
+    };
+
+    let Ok(Some(config)) = result else { return };
+
+    if json {
+        if let Ok(output) = serde_json::to_string_pretty(&config) {
+            println!("{output}");
+        }
+        return;
+    }
+
+    println!();
+    println!("  Adapter config:");
+    if let Some(ref peft_type) = config.peft_type {
+        println!("    PEFT type:       {peft_type}");
+    }
+    if let Some(ref base) = config.base_model_name_or_path {
+        println!("    Base model:      {base}");
+    }
+    if let Some(r) = config.r {
+        println!("    Rank (r):        {r}");
+    }
+    if let Some(alpha) = config.lora_alpha {
+        println!("    LoRA alpha:      {alpha}");
+    }
+    if let Some(ref task) = config.task_type {
+        println!("    Task type:       {task}");
+    }
+    if !config.target_modules.is_empty() {
+        println!("    Target modules:  {}", config.target_modules.join(", "));
+    }
 }
 
 /// Prints shard index summary (tensor counts per shard).

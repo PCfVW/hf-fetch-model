@@ -147,6 +147,27 @@ pub struct ShardedIndex {
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// PEFT adapter configuration parsed from `adapter_config.json`.
+///
+/// Contains the key fields that identify an adapter: the PEFT type,
+/// base model, `LoRA` rank and scaling parameters, and target modules.
+/// All fields are optional because adapter configs vary across PEFT methods.
+#[derive(Debug, Clone, Serialize)]
+pub struct AdapterConfig {
+    /// PEFT method type (e.g., `"LORA"`, `"ADALORA"`, `"IA3"`).
+    pub peft_type: Option<String>,
+    /// The base model this adapter was trained on.
+    pub base_model_name_or_path: Option<String>,
+    /// `LoRA` rank (the `r` parameter). Only meaningful for `LoRA`-family methods.
+    pub r: Option<u32>,
+    /// `LoRA` alpha scaling factor. Only meaningful for `LoRA`-family methods.
+    pub lora_alpha: Option<f64>,
+    /// List of model modules targeted by the adapter.
+    pub target_modules: Vec<String>,
+    /// Task type the adapter was trained for (e.g., `"CAUSAL_LM"`).
+    pub task_type: Option<String>,
+}
+
 // -----------------------------------------------------------------------
 // JSON parsing
 // -----------------------------------------------------------------------
@@ -758,4 +779,142 @@ pub fn format_params(count: u64) -> String {
     } else {
         count.to_string()
     }
+}
+
+// -----------------------------------------------------------------------
+// Adapter config
+// -----------------------------------------------------------------------
+
+/// Raw JSON structure of `adapter_config.json`.
+#[derive(serde::Deserialize)]
+struct RawAdapterConfig {
+    #[serde(default)]
+    peft_type: Option<String>,
+    #[serde(default)]
+    base_model_name_or_path: Option<String>,
+    #[serde(default)]
+    r: Option<u32>,
+    #[serde(default)]
+    lora_alpha: Option<f64>,
+    #[serde(default)]
+    target_modules: Option<AdapterTargetModules>,
+    #[serde(default)]
+    task_type: Option<String>,
+}
+
+/// `target_modules` in adapter configs can be a list of strings or a single string.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum AdapterTargetModules {
+    /// A list of module name strings.
+    List(Vec<String>),
+    /// A single module name string.
+    Single(String),
+}
+
+/// Fetches and parses `adapter_config.json` for a PEFT adapter repository (cache-first).
+///
+/// Returns `Ok(None)` if the file does not exist (HTTP 404), meaning the
+/// repository is not a PEFT adapter.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`] if the request fails (other than 404).
+/// Returns [`FetchError::SafetensorsHeader`] if the JSON is malformed.
+pub async fn fetch_adapter_config(
+    repo_id: &str,
+    token: Option<&str>,
+    revision: Option<&str>,
+) -> Result<Option<AdapterConfig>, FetchError> {
+    let rev = revision.unwrap_or("main");
+    let config_filename = "adapter_config.json";
+
+    // Try local cache first.
+    if let Some(cached_path) = resolve_cached_path(repo_id, rev, config_filename) {
+        let content = std::fs::read_to_string(&cached_path).map_err(|e| FetchError::Io {
+            path: cached_path,
+            source: e,
+        })?;
+        let config = parse_adapter_config_json(&content, repo_id)?;
+        return Ok(Some(config));
+    }
+
+    // Fall back to HTTP.
+    let client = chunked::build_client(token)?;
+    let url = chunked::build_download_url(repo_id, rev, config_filename);
+
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let response = client.get(url.as_str()).send().await.map_err(|e| {
+        FetchError::Http(format!("failed to fetch adapter config for {repo_id}: {e}"))
+    })?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    if !response.status().is_success() {
+        return Err(FetchError::Http(format!(
+            "adapter config request for {repo_id} returned status {}",
+            response.status()
+        )));
+    }
+
+    let content = response.text().await.map_err(|e| {
+        FetchError::Http(format!("failed to read adapter config for {repo_id}: {e}"))
+    })?;
+
+    let config = parse_adapter_config_json(&content, repo_id)?;
+    Ok(Some(config))
+}
+
+/// Fetches the adapter config from cache only (no network).
+///
+/// Returns `Ok(None)` if the file is not cached.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the cached file cannot be read.
+/// Returns [`FetchError::SafetensorsHeader`] if the JSON is malformed.
+pub fn fetch_adapter_config_cached(
+    repo_id: &str,
+    revision: Option<&str>,
+) -> Result<Option<AdapterConfig>, FetchError> {
+    let rev = revision.unwrap_or("main");
+    let config_filename = "adapter_config.json";
+
+    let Some(cached_path) = resolve_cached_path(repo_id, rev, config_filename) else {
+        return Ok(None);
+    };
+
+    let content = std::fs::read_to_string(&cached_path).map_err(|e| FetchError::Io {
+        path: cached_path,
+        source: e,
+    })?;
+
+    let config = parse_adapter_config_json(&content, repo_id)?;
+    Ok(Some(config))
+}
+
+/// Parses adapter config JSON into an [`AdapterConfig`].
+fn parse_adapter_config_json(content: &str, repo_id: &str) -> Result<AdapterConfig, FetchError> {
+    let raw: RawAdapterConfig =
+        serde_json::from_str(content).map_err(|e| FetchError::SafetensorsHeader {
+            filename: "adapter_config.json".to_owned(),
+            reason: format!("failed to parse adapter config for {repo_id}: {e}"),
+        })?;
+
+    let target_modules = match raw.target_modules {
+        Some(AdapterTargetModules::List(v)) => v,
+        Some(AdapterTargetModules::Single(s)) => vec![s],
+        None => Vec::new(),
+    };
+
+    Ok(AdapterConfig {
+        peft_type: raw.peft_type,
+        base_model_name_or_path: raw.base_model_name_or_path,
+        r: raw.r,
+        lora_alpha: raw.lora_alpha,
+        target_modules,
+        task_type: raw.task_type,
+    })
 }
