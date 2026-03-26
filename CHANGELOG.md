@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`search --library` / `--pipeline` flags** — filter by library framework (e.g., `peft`, `transformers`) and pipeline task (e.g., `text-generation`). Filters are applied client-side for reliability (the HF search API does not honor them when combined with a search query). Search results now display library and pipeline metadata in brackets when available.
 - **`SearchResult` now includes `library_name` and `pipeline_tag`** — populated from the HF API search response, enabling programmatic filtering.
-- **`info` subcommand** — `hf-fm info <REPO_ID>` displays model card metadata (license, pipeline, library, tags, languages, gating status) and README text. Supports `--json`, `--lines` (default 40, 0 = all), `--revision`, and `--token` flags.
+- **`info` subcommand** — `hf-fm info <REPO_ID>` displays model card metadata (license, pipeline, library, tags, languages, gating status) and README text with YAML front matter stripped. Supports `--json`, `--lines` (default 40, 0 = all), `--revision`, and `--token` flags.
 - **`fetch_readme()` API** — fetches raw README text from a `HuggingFace` repository. Returns `None` on 404.
 - **Adapter config detection in `inspect`** — when inspecting a repository, `adapter_config.json` is automatically detected and its PEFT configuration (type, base model, rank, alpha, target modules, task type) is displayed alongside tensor metadata.
 - **`AdapterConfig` type** — lightweight struct for parsed PEFT adapter configuration, re-exported at the crate root.
