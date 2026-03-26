@@ -80,6 +80,12 @@ When library or pipeline metadata is available, it is shown in brackets after th
 
 Filters can be combined with comma-separated multi-term filtering and `--exact`.
 
+Common `--library` values: `transformers`, `peft`, `diffusers`, `vllm`, `gguf`, `sentence-transformers`.
+
+Common `--pipeline` values: `text-generation`, `text-classification`, `text2text-generation`, `token-classification`, `question-answering`, `summarization`, `translation`, `fill-mask`, `sentence-similarity`, `image-classification`, `image-to-text`, `object-detection`, `automatic-speech-recognition`.
+
+For the full list, see the [HuggingFace tasks page](https://huggingface.co/tasks).
+
 ## Exact match (`--exact`)
 
 Use `--exact` to match a single model by its full ID. When found, the model card metadata is fetched and displayed:
