@@ -1077,10 +1077,14 @@ fn run_info(
     print_model_card(&card);
 
     if let Some(ref text) = readme {
+        // Strip YAML front matter (--- ... ---) since the structured metadata
+        // is already displayed above via print_model_card().
+        let body = strip_yaml_front_matter(text);
+
         println!();
         println!("  README:");
         println!("  {}", "\u{2500}".repeat(70));
-        let lines: Vec<&str> = text.lines().collect();
+        let lines: Vec<&str> = body.lines().collect();
         let display_count = if max_lines == 0 {
             lines.len()
         } else {
@@ -1155,6 +1159,35 @@ fn print_info_json(
         .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
     println!("{output}");
     Ok(())
+}
+
+/// Strips YAML front matter (`--- ... ---`) from a README string.
+///
+/// Returns the content after the closing `---` delimiter, trimmed of
+/// leading blank lines. If no front matter is found, returns the
+/// original string unchanged.
+#[must_use]
+fn strip_yaml_front_matter(text: &str) -> &str {
+    // BORROW: explicit .trim_start() for &str → &str
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("---") {
+        return text;
+    }
+    // Find the closing "---" after the opening one.
+    // INDEX: skip first 3 bytes ("---") which are guaranteed present by the check above
+    #[allow(clippy::indexing_slicing)]
+    let after_open = &trimmed[3..];
+    if let Some(close_pos) = after_open.find("\n---") {
+        // Skip past the closing "---" and the newline after it.
+        // CAST: not needed, all offsets are usize
+        let body_start = close_pos + 4; // "\n---".len()
+                                        // INDEX: body_start bounded by after_open.len() (find returned a valid position)
+        #[allow(clippy::indexing_slicing)]
+        let body = after_open[body_start..].trim_start_matches('\n');
+        // BORROW: explicit .trim_start_matches() for &str → &str
+        return body.trim_start_matches('\r');
+    }
+    text
 }
 
 fn run_status_all() -> Result<(), FetchError> {
