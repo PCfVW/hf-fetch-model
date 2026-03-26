@@ -60,23 +60,23 @@ When commas are present, slashes are also treated as separators. So `mistralai/3
 
 ## Library and pipeline filtering
 
-Use `--library` and `--pipeline` to filter results server-side by framework or task:
+Use `--library` and `--pipeline` to filter results by framework or task:
 
 ```
 $ hf-fm search llama --library peft
 Models matching "llama" (by downloads):
 
-  hf-fm lora-library/llama-2-7b-chat-lora              (1,234 downloads)
+  hf-fm lora-library/llama-2-7b-chat-lora              (1,234 downloads)  [peft, text-generation]
   ...
 
 $ hf-fm search mistral --pipeline text-generation --limit 5
 Models matching "mistral" (by downloads):
 
-  hf-fm mistralai/Mistral-7B-Instruct-v0.3             (2,345,678 downloads)
+  hf-fm mistralai/Mistral-7B-Instruct-v0.3             (2,345,678 downloads)  [transformers, text-generation]
   ...
 ```
 
-These filters are applied client-side (the HuggingFace search API does not reliably honor them server-side when combined with a search query). When library or pipeline metadata is available, it is shown in brackets after the download count.
+When library or pipeline metadata is available, it is shown in brackets after the download count.
 
 Filters can be combined with comma-separated multi-term filtering and `--exact`.
 
@@ -151,8 +151,11 @@ use hf_fetch_model::discover;
 
 // Search
 let results = discover::search_models("llama 3", 20, None, None).await?;
+for r in &results {
+    println!("{} ({:?}, {:?})", r.model_id, r.library_name, r.pipeline_tag);
+}
 
-// Search with library/pipeline filters
+// Search with library/pipeline filters (client-side)
 let peft_results = discover::search_models("llama", 20, Some("peft"), None).await?;
 let gen_results = discover::search_models("mistral", 10, None, Some("text-generation")).await?;
 
