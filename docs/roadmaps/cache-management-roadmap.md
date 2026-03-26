@@ -26,15 +26,13 @@ Python's `huggingface_hub` CLI offers cache management via `hf cache`:
 | `hf cache prune` | Remove unreferenced revisions (detached snapshots with no ref pointing to them) |
 | `hf cache verify` | Verify cached file checksums |
 
-**Gaps in the Python CLI** (from GitHub issues [#1065](https://github.com/huggingface/huggingface_hub/issues/1065) and [#2219](https://github.com/huggingface/huggingface_hub/issues/2219)):
+The Python CLI was revamped in v1.0/v1.1 (2025–2026, see [#1065](https://github.com/huggingface/huggingface_hub/issues/1065) and [PR #3439](https://github.com/huggingface/huggingface_hub/pull/3439)), adding sorting options and improved commands. Some long-standing gaps remain:
+- `rm` operates on revision hashes, not human-readable repo IDs
 - No `--older-than` age-based eviction
-- No per-file deletion within a revision (all-or-nothing per revision hash)
-- `rm` requires the opaque revision hash, not the human-readable repo ID
-- No `--dry-run` on `rm`
 - No `--except` to protect specific repos during bulk cleanup
-- No dataset cache scanning (`scan-cache` only covers models — [#2218](https://github.com/huggingface/huggingface_hub/issues/2218))
+- No dataset cache scanning ([#2218](https://github.com/huggingface/huggingface_hub/issues/2218) — open since April 2024)
 
-hf-fetch-model can do better on all of these.
+hf-fetch-model can offer a simpler, repo-ID-based UX with age-based eviction and partial-download cleanup.
 
 ---
 
