@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`search --library` / `--pipeline` flags** — server-side filtering by library framework (e.g., `peft`, `transformers`) and pipeline task (e.g., `text-generation`). Filters are passed as query parameters to the HuggingFace API.
+- **`info` subcommand** — `hf-fm info <REPO_ID>` displays model card metadata (license, pipeline, library, tags, languages, gating status) and README text. Supports `--json`, `--lines` (default 40, 0 = all), `--revision`, and `--token` flags.
+- **`fetch_readme()` API** — fetches raw README text from a `HuggingFace` repository. Returns `None` on 404.
 
 ## [0.9.0] — Safetensors inspection, tensor diff & cache disk usage
 

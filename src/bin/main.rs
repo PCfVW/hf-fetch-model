@@ -118,6 +118,23 @@ enum Commands {
         #[arg(long)]
         pipeline: Option<String>,
     },
+    /// Show model card metadata and README text for a repository.
+    Info {
+        /// The repository identifier (e.g., `"mistralai/Ministral-3-3B-Instruct-2512"`).
+        repo_id: String,
+        /// Git revision (branch, tag, or commit SHA).
+        #[arg(long)]
+        revision: Option<String>,
+        /// Authentication token (or set `HF_TOKEN` env var).
+        #[arg(long)]
+        token: Option<String>,
+        /// Output metadata and README as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Maximum lines of README to display (0 = all).
+        #[arg(long, default_value = "40")]
+        lines: usize,
+    },
     /// Download a single file from a `HuggingFace` repository.
     DownloadFile {
         /// Enable verbose output (download diagnostics).
@@ -274,6 +291,7 @@ fn main() -> ExitCode {
             Commands::ListFamilies
             | Commands::Discover { .. }
             | Commands::Search { .. }
+            | Commands::Info { .. }
             | Commands::Status { .. }
             | Commands::Diff { .. }
             | Commands::Du { .. }
@@ -354,6 +372,20 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             exact,
             library.as_deref(),
             pipeline.as_deref(),
+        ),
+        // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
+        Some(Commands::Info {
+            repo_id,
+            revision,
+            token,
+            json,
+            lines,
+        }) => run_info(
+            repo_id.as_str(),
+            revision.as_deref(),
+            token.as_deref(),
+            json,
+            lines,
         ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::DownloadFile {
@@ -995,6 +1027,128 @@ fn print_model_card(card: &discover::ModelCardMetadata) {
     if !card.languages.is_empty() {
         println!("  Languages:    {}", card.languages.join(", "));
     }
+}
+
+/// Displays model card metadata and README text for a repository.
+fn run_info(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    json: bool,
+    max_lines: usize,
+) -> Result<(), FetchError> {
+    if !repo_id.contains('/') {
+        return Err(FetchError::InvalidArgument(format!(
+            "invalid REPO_ID \"{repo_id}\": expected \"owner/model\" format \
+             (e.g., \"mistralai/Ministral-3-3B-Instruct-2512\")"
+        )));
+    }
+
+    // BORROW: explicit String::from for Option<&str> → Option<String>
+    let token_owned = token
+        .map(String::from)
+        .or_else(|| std::env::var("HF_TOKEN").ok());
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+
+    // BORROW: explicit .as_str() for String → &str conversion
+    let card = rt.block_on(discover::fetch_model_card(repo_id))?;
+    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+    let readme = rt.block_on(discover::fetch_readme(
+        repo_id,
+        revision,
+        token_owned.as_deref(),
+    ))?;
+
+    if json {
+        return print_info_json(repo_id, &card, readme.as_deref());
+    }
+
+    // Human-readable output.
+    println!("  Repo: {repo_id}");
+    print_model_card(&card);
+
+    if let Some(ref text) = readme {
+        println!();
+        println!("  README:");
+        println!("  {}", "\u{2500}".repeat(70));
+        let lines: Vec<&str> = text.lines().collect();
+        let display_count = if max_lines == 0 {
+            lines.len()
+        } else {
+            lines.len().min(max_lines)
+        };
+        // INDEX: display_count bounded by lines.len() computed above
+        #[allow(clippy::indexing_slicing)]
+        for line in &lines[..display_count] {
+            println!("  {line}");
+        }
+        if display_count < lines.len() {
+            println!(
+                "  ... ({} more lines, use --lines 0 for full output)",
+                lines.len().saturating_sub(display_count)
+            );
+        }
+    } else {
+        println!();
+        println!("  (no README.md found)");
+    }
+
+    Ok(())
+}
+
+/// Serializable model info for `--json` output.
+#[derive(serde::Serialize)]
+struct InfoResult {
+    /// Repository identifier.
+    repo_id: String,
+    /// SPDX license identifier, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license: Option<String>,
+    /// Pipeline task tag, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pipeline_tag: Option<String>,
+    /// Library framework name, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    library_name: Option<String>,
+    /// Tags from the model card.
+    tags: Vec<String>,
+    /// Supported languages.
+    languages: Vec<String>,
+    /// Access control status.
+    gated: String,
+    /// Full README text, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    readme: Option<String>,
+}
+
+/// Prints model info as JSON.
+fn print_info_json(
+    repo_id: &str,
+    card: &discover::ModelCardMetadata,
+    readme: Option<&str>,
+) -> Result<(), FetchError> {
+    let result = InfoResult {
+        // BORROW: explicit .to_owned() for &str → owned String
+        repo_id: repo_id.to_owned(),
+        // BORROW: explicit .clone() for Option<String>
+        license: card.license.clone(),
+        pipeline_tag: card.pipeline_tag.clone(),
+        library_name: card.library_name.clone(),
+        tags: card.tags.clone(),
+        languages: card.languages.clone(),
+        gated: card.gated.to_string(),
+        // BORROW: explicit .to_owned() for Option<&str> → Option<String>
+        readme: readme.map(str::to_owned),
+    };
+
+    let output = serde_json::to_string_pretty(&result)
+        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+    println!("{output}");
+    Ok(())
 }
 
 fn run_status_all() -> Result<(), FetchError> {

@@ -395,6 +395,54 @@ pub async fn fetch_model_card(model_id: &str) -> Result<ModelCardMetadata, Fetch
     })
 }
 
+/// Fetches the raw README text for a `HuggingFace` model repository.
+///
+/// Downloads `README.md` from the repository at the given revision.
+/// Returns `Ok(None)` if the file does not exist (HTTP 404).
+///
+/// # Arguments
+///
+/// * `model_id` — The full model identifier (e.g., `"mistralai/Ministral-3-3B-Instruct-2512"`).
+/// * `revision` — Git revision to fetch (defaults to `"main"` when `None`).
+/// * `token` — Optional authentication token.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`] if the request fails (other than 404).
+pub async fn fetch_readme(
+    model_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+) -> Result<Option<String>, FetchError> {
+    let rev = revision.unwrap_or("main");
+    let url = crate::chunked::build_download_url(model_id, rev, "README.md");
+    let client = crate::chunked::build_client(token)?;
+
+    let response = client
+        .get(url.as_str()) // BORROW: explicit .as_str() instead of Deref coercion
+        .send()
+        .await
+        .map_err(|e| FetchError::Http(format!("failed to fetch README for {model_id}: {e}")))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    if !response.status().is_success() {
+        return Err(FetchError::Http(format!(
+            "README request for {model_id} returned status {}",
+            response.status()
+        )));
+    }
+
+    let text = response
+        .text()
+        .await
+        .map_err(|e| FetchError::Http(format!("failed to read README for {model_id}: {e}")))?;
+
+    Ok(Some(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

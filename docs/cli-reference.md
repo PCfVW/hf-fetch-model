@@ -13,12 +13,14 @@ cargo install hf-fetch-model --features cli
 - [Dry-run example](#dry-run-example)
 - [List-files examples](#list-files-examples)
 - [Search examples](#search-examples)
+- [Info examples](#info-examples)
 - [Inspect examples](#inspect-examples)
 - [Diff examples](#diff-examples)
 - [Disk usage examples](#disk-usage-examples)
 - [Other commands](#other-commands)
 - [Diff flags](#diff-flags)
 - [Download flags](#download-flags)
+- [Info flags](#info-flags)
 - [Inspect flags](#inspect-flags)
 - [List-files flags](#list-files-flags)
 - [Search flags](#search-flags)
@@ -31,6 +33,7 @@ cargo install hf-fetch-model --features cli
 | *(default)* | Download a model: `hf-fm <REPO_ID>` |
 | `diff <REPO_A> <REPO_B>` | Compare tensor layouts between two models |
 | `discover` | Find new model families on the Hub not yet cached locally |
+| `info <REPO_ID>` | Show model card metadata and README text |
 | `download-file <REPO_ID> <FILENAME>` | Download a single file and print its cache path |
 | `du [REPO_ID]` | Show cache disk usage — per-repo breakdown, or cache-wide summary |
 | `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes) |
@@ -134,6 +137,22 @@ hf-fm search mistral --pipeline text-generation
 ```
 
 Common quantization synonyms are normalized automatically: `8bit`, `8-bit`, `int8`, and `INT8` all produce the same results. Same for `4bit`/`4-bit`/`int4` and `fp8`/`float8`.
+
+## Info examples
+
+```sh
+# Show metadata and first 40 lines of README
+hf-fm info mistralai/Ministral-3-3B-Instruct-2512
+
+# Show full README
+hf-fm info mistralai/Ministral-3-3B-Instruct-2512 --lines 0
+
+# JSON output
+hf-fm info mistralai/Ministral-3-3B-Instruct-2512 --json
+
+# Specific revision
+hf-fm info mistralai/Ministral-3-3B-Instruct-2512 --revision v1.0
+```
 
 ## Inspect examples
 
@@ -247,6 +266,15 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--library` | Filter by library framework (e.g., `transformers`, `peft`, `vllm`) | — |
 | `--limit` | Maximum number of results | 20 |
 | `--pipeline` | Filter by pipeline task (e.g., `text-generation`, `text-classification`) | — |
+
+## Info flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--json` | Output metadata and README as JSON | off |
+| `--lines` | Maximum lines of README to display (0 = all) | 40 |
+| `--revision` | Git revision (branch, tag, SHA) | main |
+| `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
 ## Inspect flags
 
