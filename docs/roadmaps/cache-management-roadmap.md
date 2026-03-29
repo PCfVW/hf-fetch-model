@@ -165,10 +165,11 @@ Incremental delivery across patch and minor releases. Ship the highest-impact fe
 
 | Feature | Scope |
 |---------|-------|
-| `cache delete` | Single-repo deletion by repo ID, confirmation prompt, `--yes` flag |
+| `cache delete` | Single-repo deletion by repo ID or numeric index, confirmation prompt, `--yes` flag |
 | `cache clean-partial` | Remove `.chunked.part` files from interrupted downloads |
+| `du` numbered indexing | Add `#` column, accept `du <N>` for drill-down (see [du extensions roadmap](hf-fetch-model-du-extensions-roadmap.md)) |
 
-Small scope, high impact, ships fast. Introduces the `cache` subcommand grouping with nested clap subcommands.
+Small scope, high impact, ships fast. Introduces the `cache` subcommand grouping with nested clap subcommands. The numbered `du` output feeds directly into `cache delete <N>` for a two-command "see it, delete it" workflow.
 
 ### v0.9.3 — Scripting and visibility
 
