@@ -38,12 +38,15 @@ Add a `#` column to the sorted list. Accept a numeric index anywhere a `REPO_ID`
 $ hf-fm du
    #   SIZE        REPO                                              FILES
    1   5.10 GiB    google/gemma-2-2b-it                              8
-   2   2.80 GiB    EleutherAI/pythia-1.4b                            8
+   2   2.80 GiB    EleutherAI/pythia-1.4b                            8     ●
    3   1.20 GiB    google/gemma-scope-2b-pt-res                      3
    4   0.21 GiB    RWKV/RWKV7-Goose-0.1B                            3
   ──────────────────────────────────────────────────────────────────
    9.31 GiB    total (4 repos, 22 files)
+   ● = partial downloads (1.30 GiB reclaimable — run hf-fm cache clean-partial)
 ```
+
+The `●` marker flags repos with incomplete downloads (`.chunked.part` files). The footer shows total reclaimable space — inspired by Docker's `docker system df` "RECLAIMABLE" column. This ties `du` directly to `cache clean-partial`: see the problem, know the fix.
 
 ### Drill-down by index
 
@@ -123,7 +126,28 @@ Tree display is most useful for repos with subdirectories (e.g., sharded models 
 
 ---
 
-## Feature 3: Cross-command index sharing
+## Feature 3: `du --age` (last-access timestamps)
+
+Add a last-access column. This replaces the previously proposed `cache list` command — `du` is the single entry point for all cache visibility.
+
+```
+$ hf-fm du --age
+   #   SIZE        REPO                                              FILES   LAST ACCESS
+   1   5.10 GiB    google/gemma-2-2b-it                              8        2 days ago
+   2   2.80 GiB    EleutherAI/pythia-1.4b                            8  ●    45 days ago
+   3   1.20 GiB    google/gemma-scope-2b-pt-res                      3       30 days ago
+   4   0.21 GiB    RWKV/RWKV7-Goose-0.1B                            3       62 days ago
+  ──────────────────────────────────────────────────────────────────
+   9.31 GiB    total (4 repos, 22 files)
+```
+
+**Why consolidate into `du`?** One command to learn, fewer to remember. `du` already shows size, repo name, file count, and partial status. Adding timestamps avoids a "should I use `du` or `cache list`?" decision. Inspired by Docker's approach: `docker system df` is the single visibility command, `docker system prune` is the single cleanup command.
+
+**Implementation:** Use the most recent modification time among files in the snapshot directory (same heuristic as `cache gc --older-than`). Compute timestamps via `std::fs::metadata().modified()`.
+
+---
+
+## Feature 4: Cross-command index sharing (numeric indexing)
 
 If `hf-fm du` shows numbered repos, other cache commands could accept the same index:
 
@@ -158,7 +182,7 @@ No persistent state file is needed — both commands independently compute the l
 
 ---
 
-## Feature 4: Shell completion for repo IDs
+## Feature 5: Shell completion for repo IDs
 
 Instead of numeric indexing, offer tab-completion for repo IDs from the cache. Type `hf-fm du goo<TAB>` and get `google/gemma-2-2b-it`.
 
@@ -209,11 +233,12 @@ fn complete_cached_repos() -> Vec<clap_complete::CompletionCandidate> {
 
 | Priority | Feature | Complexity | Release target |
 |----------|---------|-----------|----------------|
-| 1 | Numbered `#` column in `du` output | Low — format change only | v0.9.2 |
+| 1 | Numbered `#` column + `●` partial markers in `du` output | Low — format change only | v0.9.2 |
 | 2 | `du <N>` drill-down by index | Low — parse index, resolve from sorted list | v0.9.2 |
 | 3 | `cache delete <N>` index support | Low — same resolution logic | v0.9.2 |
-| 4 | `du <N> --tree` | Medium — tree rendering (v0.10.0 roadmap) | v0.10.0 |
-| 5 | `du --tree` global | Medium — same rendering, full cache walk | v0.10.0 |
-| 6 | Shell completion (`clap_complete`) | Medium — new dependency, per-shell scripts | v0.10.0 |
+| 4 | `du --age` (last-access timestamps) | Low — `fs::metadata().modified()` | v0.9.3 |
+| 5 | `du <N> --tree` | Medium — tree rendering (v0.10.0 roadmap) | v0.10.0 |
+| 6 | `du --tree` global | Medium — same rendering, full cache walk | v0.10.0 |
+| 7 | Shell completion (`clap_complete`) | Medium — new dependency, per-shell scripts | v0.10.0 |
 
-Features 1–3 ship together in v0.9.2 alongside `cache delete` and `cache clean-partial` from the [cache management roadmap](cache-management-roadmap.md). The numbered column is only useful if you can act on it, so indexing and `cache delete` should land in the same release. Features 4–6 are more complex and belong in v0.10.0.
+Features 1–3 ship together in v0.9.2 alongside `cache delete` and `cache clean-partial` from the [cache management roadmap](cache-management-roadmap.md). The numbered column is only useful if you can act on it, so indexing and `cache delete` should land in the same release. Feature 4 ships in v0.9.3 (provides the timestamp visibility needed by `cache gc --older-than` in v0.10.0). Features 5–7 are more complex and belong in v0.10.0.

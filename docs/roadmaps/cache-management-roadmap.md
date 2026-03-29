@@ -72,10 +72,11 @@ $ hf-fm cache clean-partial
 
 ### Tier 2 — Quality of life
 
-#### `hf-fm cache gc --older-than <DAYS>`
+#### `hf-fm cache gc --older-than <DAYS>` / `--max-size <SIZE>`
 
-Age-based eviction — remove models not accessed in N days. Addresses the silent accumulation problem. Python's CLI has no equivalent.
+Two eviction strategies — by age or by budget. Users think in either "what haven't I used recently?" or "how much space can I spare?". Inspired by Cargo's `cargo clean gc --max-download-size=1GiB` ([Rust Blog](https://blog.rust-lang.org/2023/12/11/cargo-cache-cleaning/)).
 
+**Age-based:** remove models not accessed in N days.
 ```
 $ hf-fm cache gc --older-than 30
   Will remove:
@@ -86,6 +87,20 @@ $ hf-fm cache gc --older-than 30
   Proceed? [y/N] y
   Removed 2 repos. Freed 3.01 GiB.
 ```
+
+**Budget-based:** delete oldest repos until total cache size is under the target.
+```
+$ hf-fm cache gc --max-size 5GiB
+  Cache is 9.31 GiB, target 5.00 GiB — need to free 4.31 GiB.
+  Will remove (oldest first):
+    RWKV/RWKV7-Goose-0.1B  (0.21 GiB, last accessed 62 days ago)
+    EleutherAI/pythia-1.4b  (2.80 GiB, last accessed 45 days ago)
+    google/gemma-scope-2b-pt-res  (1.20 GiB, last accessed 30 days ago)
+  Proceed? [y/N] y
+  Removed 3 repos. Freed 4.21 GiB. Cache now 5.10 GiB.
+```
+
+Both strategies can be combined: `--older-than 30 --max-size 20GiB` removes repos older than 30 days *and* trims further if still over budget.
 
 **Flags:** `--yes` (skip prompt), `--except <REPO_ID>` (protect specific repos), `--dry-run` (preview only).
 
@@ -110,34 +125,31 @@ $ cd $(hf-fm cache path google/gemma-2-2b-it)
 
 **Implementation:** `hf_cache_dir()` + `repo_folder_name()` + `read_ref()` to resolve the snapshot path. Returns non-zero exit code if the repo is not cached.
 
-#### `hf-fm cache list [--sort size|age|name]`
-
-List cached repos with last-access timestamps and sort options. Essentially `du` + `status` combined, with timestamp visibility. Could eventually replace the no-arg `status` and `du` commands.
-
-```
-$ hf-fm cache list --sort age
-  REPO                                              SIZE        LAST ACCESS   FILES
-  RWKV/RWKV7-Goose-0.1B                            0.21 GiB    62 days ago       3
-  EleutherAI/pythia-1.4b                            2.80 GiB    45 days ago       8
-  google/gemma-2-2b-it                              5.10 GiB     2 days ago       8
-```
+**Note:** `cache list` was considered as a separate command but dropped in favor of consolidating all cache visibility into `du` with progressive flags (`--age`, `--tree`). See the [du extensions roadmap](hf-fetch-model-du-extensions-roadmap.md) for details. One command to learn, fewer to remember.
 
 ---
 
 ## Subcommand grouping
 
-These features naturally group under a `cache` subcommand:
+Action commands group under a `cache` subcommand. Visibility stays in `du`:
 
 ```
-hf-fm cache delete <REPO_ID>
+# Seeing (du — one command, progressive flags)
+hf-fm du                          # numbered list with partial markers
+hf-fm du <N>                      # drill into Nth repo
+hf-fm du --age                    # add last-access column
+hf-fm du --tree                   # structural view
+
+# Acting (cache — destructive operations)
+hf-fm cache delete <REPO_ID|N>
 hf-fm cache clean-partial
 hf-fm cache gc --older-than 30
+hf-fm cache gc --max-size 20GiB
 hf-fm cache verify <REPO_ID>
 hf-fm cache path <REPO_ID>
-hf-fm cache list
 ```
 
-The existing `du` and `status` commands could become aliases for `cache du` and `cache status` in a future version, with the top-level names kept for backwards compatibility.
+`du` for **seeing**, `cache` for **acting**. No `cache list` — `du` covers all visibility needs. Inspired by Docker's `docker system df` + `docker system prune` separation.
 
 **Implementation note:** Clap supports nested subcommands via `#[command(subcommand)]` on an enum field. Add a `Cache` variant to `Commands` with its own `CacheCommands` enum.
 
@@ -149,9 +161,10 @@ The [v0.10.0 roadmap](v0.10.0-roadmap.md) covers `verify`, `clean` (with `--olde
 
 - **`cache delete`** — simpler single-repo deletion (v0.10.0's `clean --repo` covers this but `cache delete` is more discoverable)
 - **`cache clean-partial`** — targeted partial-download cleanup (v0.10.0's `clean` removes entire repos, not individual partial files)
+- **`cache gc --max-size`** — budget-based eviction (inspired by Cargo's `cargo clean gc --max-download-size`)
 - **`cache path`** — scripting helper (not in v0.10.0)
-- **`cache list`** — unified listing with timestamps (not in v0.10.0)
-- **Subcommand grouping** — architectural direction for organizing cache operations
+- **`du` consolidation** — all cache visibility in `du` with `--age` and `--tree` flags, no separate `cache list`
+- **Subcommand grouping** — `du` for seeing, `cache` for acting (inspired by Docker's `df` + `prune` separation)
 
 These can be implemented incrementally across releases, starting with `cache delete` and `cache clean-partial` which address the most immediate pain.
 
@@ -176,7 +189,7 @@ Small scope, high impact, ships fast. Introduces the `cache` subcommand grouping
 | Feature | Scope |
 |---------|-------|
 | `cache path` | Print snapshot directory path for scripting |
-| `cache list` | Unified listing with last-access timestamps, `--sort` flag |
+| `du --age` | Add last-access timestamp column to `du` output (replaces the dropped `cache list`) |
 
 Non-destructive, easy to implement. Gives users the visibility needed before running `gc` in v0.10.0.
 
@@ -185,7 +198,7 @@ Non-destructive, easy to implement. Gives users the visibility needed before run
 | Feature | Scope |
 |---------|-------|
 | `cache verify` | SHA256 re-verification against HF LFS metadata (requires network). Detailed design in [v0.10.0 roadmap](v0.10.0-roadmap.md). |
-| `cache gc` | Age-based eviction with `--older-than`, `--except`, `--dry-run`. Requires the "last accessed" heuristic. |
+| `cache gc` | Age-based (`--older-than`) and budget-based (`--max-size`) eviction, with `--except`, `--dry-run`. Requires the "last accessed" heuristic. |
 | `du --tree` | Tree-view of cache directory structure with box-drawing characters. |
 
-These are more complex: verify needs network + checksum comparison, gc needs the last-accessed heuristic and interactive prompt safety, `du --tree` is a display feature that benefits from the `cache list` timestamps added in v0.9.3. Bundle them as the "cache maturity" release.
+These are more complex: verify needs network + checksum comparison, gc needs the last-accessed heuristic and interactive prompt safety, `du --tree` is a display feature that benefits from the `du --age` timestamps added in v0.9.3. Bundle them as the "cache maturity" release.
