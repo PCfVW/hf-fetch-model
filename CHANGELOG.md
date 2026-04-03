@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gated model pre-flight check** — downloads now fail fast with a clear message when a repository is gated and no token is configured, instead of producing per-file 401 errors.
+
+## [0.9.2] — CLI ergonomics (dogfooding)
+
+### Added
+
 - **Version in `--help` output** — `hf-fm --help` now displays the version number in the header line (previously only available via `-V`/`--version`).
 - **`--preset pth`** — filter preset for PyTorch `.bin` weight files (`pytorch_model*.bin` plus `*.json` and `*.txt`). Available on the download command and `list-files`.
 - **Glob patterns in `download-file`** — `hf-fm download-file org/model "pytorch_model-*.bin"` now expands glob patterns against the remote file list and downloads all matches. Exact filenames are still supported (backward compatible).

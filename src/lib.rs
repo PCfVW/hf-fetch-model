@@ -79,6 +79,34 @@ use std::path::PathBuf;
 
 use hf_hub::{Repo, RepoType};
 
+/// Checks whether a repository is gated and rejects unauthenticated downloads
+/// with a clear error message.
+///
+/// Only runs when no token is configured. If the metadata request itself fails
+/// (network error, private repo), the check is silently skipped so that normal
+/// download error handling can take over.
+async fn preflight_gated_check(repo_id: &str, config: &FetchConfig) -> Result<(), FetchError> {
+    if config.token.is_some() {
+        return Ok(());
+    }
+
+    // Best-effort: if the metadata call fails, let the download proceed.
+    let Ok(metadata) = discover::fetch_model_card(repo_id).await else {
+        return Ok(());
+    };
+
+    if metadata.gated.is_gated() {
+        return Err(FetchError::Auth {
+            reason: format!(
+                "{repo_id} is a gated model — accept the license at \
+                 https://huggingface.co/{repo_id} and set HF_TOKEN or pass --token"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 /// Downloads all files from a `HuggingFace` model repository.
 ///
 /// Uses high-throughput mode for maximum download speed, including
@@ -101,6 +129,7 @@ use hf_hub::{Repo, RepoType};
 ///
 /// # Errors
 ///
+/// * [`FetchError::Auth`] — if the repository is gated and no token is configured.
 /// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
 /// * [`FetchError::InvalidPattern`] — if the default config fails to build (should not happen).
@@ -125,12 +154,16 @@ pub async fn download(repo_id: String) -> Result<DownloadOutcome<PathBuf>, Fetch
 ///
 /// # Errors
 ///
+/// * [`FetchError::Auth`] — if the repository is gated and no token is configured.
 /// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
 pub async fn download_with_config(
     repo_id: String,
     config: &FetchConfig,
 ) -> Result<DownloadOutcome<PathBuf>, FetchError> {
+    // BORROW: explicit .as_str() instead of Deref coercion
+    preflight_gated_check(repo_id.as_str(), config).await?;
+
     let mut builder = hf_hub::api::tokio::ApiBuilder::new().high();
 
     if let Some(ref token) = config.token {
@@ -235,12 +268,16 @@ pub async fn download_files(
 ///
 /// # Errors
 ///
+/// * [`FetchError::Auth`] — if the repository is gated and no token is configured.
 /// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
 pub async fn download_files_with_config(
     repo_id: String,
     config: &FetchConfig,
 ) -> Result<DownloadOutcome<HashMap<String, PathBuf>>, FetchError> {
+    // BORROW: explicit .as_str() instead of Deref coercion
+    preflight_gated_check(repo_id.as_str(), config).await?;
+
     let mut builder = hf_hub::api::tokio::ApiBuilder::new().high();
 
     if let Some(ref token) = config.token {
@@ -304,6 +341,7 @@ pub fn download_files_blocking(
 ///
 /// # Errors
 ///
+/// * [`FetchError::Auth`] — if the repository is gated and no token is configured.
 /// * [`FetchError::Http`] — if the file does not exist in the repository.
 /// * [`FetchError::Api`] — on download failure (after retries).
 /// * [`FetchError::Checksum`] — if verification is enabled and fails.
@@ -312,6 +350,9 @@ pub async fn download_file(
     filename: &str,
     config: &FetchConfig,
 ) -> Result<DownloadOutcome<PathBuf>, FetchError> {
+    // BORROW: explicit .as_str() instead of Deref coercion
+    preflight_gated_check(repo_id.as_str(), config).await?;
+
     let mut builder = hf_hub::api::tokio::ApiBuilder::new().high();
 
     if let Some(ref token) = config.token {
