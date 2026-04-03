@@ -79,29 +79,58 @@ use std::path::PathBuf;
 
 use hf_hub::{Repo, RepoType};
 
-/// Checks whether a repository is gated and rejects unauthenticated downloads
-/// with a clear error message.
+/// Pre-flight check for gated model access.
 ///
-/// Only runs when no token is configured. If the metadata request itself fails
-/// (network error, private repo), the check is silently skipped so that normal
-/// download error handling can take over.
+/// Two cases:
+/// - **No token**: checks the model metadata (unauthenticated) for gating
+///   status and rejects with a clear message if gated.
+/// - **Token present**: if the model is gated, makes one authenticated
+///   metadata request to verify the token actually grants access. Catches
+///   invalid tokens and unaccepted licenses before the download starts.
+///
+/// If the metadata request itself fails (network error, private repo),
+/// the check is silently skipped so that normal download error handling
+/// can take over.
 async fn preflight_gated_check(repo_id: &str, config: &FetchConfig) -> Result<(), FetchError> {
-    if config.token.is_some() {
-        return Ok(());
-    }
-
     // Best-effort: if the metadata call fails, let the download proceed.
     let Ok(metadata) = discover::fetch_model_card(repo_id).await else {
         return Ok(());
     };
 
-    if metadata.gated.is_gated() {
+    if !metadata.gated.is_gated() {
+        return Ok(());
+    }
+
+    // Model is gated — check auth.
+    if config.token.is_none() {
         return Err(FetchError::Auth {
             reason: format!(
                 "{repo_id} is a gated model — accept the license at \
                  https://huggingface.co/{repo_id} and set HF_TOKEN or pass --token"
             ),
         });
+    }
+
+    // Token is present — verify it grants access with a lightweight probe.
+    let probe = repo::list_repo_files_with_metadata(
+        repo_id,
+        config.token.as_deref(),
+        config.revision.as_deref(),
+    )
+    .await;
+
+    if let Err(ref e) = probe {
+        // BORROW: explicit .to_string() for error Display formatting
+        let msg = e.to_string();
+        if msg.contains("401") || msg.contains("403") {
+            return Err(FetchError::Auth {
+                reason: format!(
+                    "{repo_id} is a gated model and your token was rejected — \
+                     accept the license at https://huggingface.co/{repo_id} \
+                     and check that your token is valid"
+                ),
+            });
+        }
     }
 
     Ok(())
@@ -129,7 +158,7 @@ async fn preflight_gated_check(repo_id: &str, config: &FetchConfig) -> Result<()
 ///
 /// # Errors
 ///
-/// * [`FetchError::Auth`] — if the repository is gated and no token is configured.
+/// * [`FetchError::Auth`] — if the repository is gated and access is denied (no token, invalid token, or license not accepted).
 /// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
 /// * [`FetchError::InvalidPattern`] — if the default config fails to build (should not happen).
@@ -154,7 +183,7 @@ pub async fn download(repo_id: String) -> Result<DownloadOutcome<PathBuf>, Fetch
 ///
 /// # Errors
 ///
-/// * [`FetchError::Auth`] — if the repository is gated and no token is configured.
+/// * [`FetchError::Auth`] — if the repository is gated and access is denied (no token, invalid token, or license not accepted).
 /// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
 pub async fn download_with_config(
@@ -268,7 +297,7 @@ pub async fn download_files(
 ///
 /// # Errors
 ///
-/// * [`FetchError::Auth`] — if the repository is gated and no token is configured.
+/// * [`FetchError::Auth`] — if the repository is gated and access is denied (no token, invalid token, or license not accepted).
 /// * [`FetchError::Api`] — if the `HuggingFace` API or download fails (includes auth failures).
 /// * [`FetchError::RepoNotFound`] — if the repository does not exist.
 pub async fn download_files_with_config(
@@ -341,7 +370,7 @@ pub fn download_files_blocking(
 ///
 /// # Errors
 ///
-/// * [`FetchError::Auth`] — if the repository is gated and no token is configured.
+/// * [`FetchError::Auth`] — if the repository is gated and access is denied (no token, invalid token, or license not accepted).
 /// * [`FetchError::Http`] — if the file does not exist in the repository.
 /// * [`FetchError::Api`] — on download failure (after retries).
 /// * [`FetchError::Checksum`] — if verification is enabled and fails.

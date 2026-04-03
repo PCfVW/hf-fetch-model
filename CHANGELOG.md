@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Gated model pre-flight check** — downloads now fail fast with a clear message when a repository is gated and no token is configured, instead of producing per-file 401 errors.
+- **Gated model pre-flight check** — downloads now fail fast with a clear message when a repository is gated and either no token is configured or the token is rejected (invalid token or license not accepted), instead of producing per-file 401 errors.
 
 ## [0.9.2] — CLI ergonomics (dogfooding)
 
