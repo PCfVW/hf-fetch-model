@@ -52,12 +52,63 @@ fn help_shows_list_files_subcommand() {
 }
 
 #[test]
+fn help_shows_version_number() {
+    let (stdout, stderr, success) = run(hf_fm().arg("--help"));
+    assert!(success, "--help failed: {stderr}");
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        stdout.contains(version),
+        "help should contain version {version}, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn help_shows_pth_preset() {
+    let (stdout, stderr, success) = run(hf_fm().arg("--help"));
+    assert!(success, "--help failed: {stderr}");
+    assert!(
+        stdout.contains("pth"),
+        "help should mention pth preset, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn help_shows_dry_run_flag() {
     let (stdout, stderr, success) = run(hf_fm().arg("--help"));
     assert!(success, "--help failed: {stderr}");
     assert!(
         stdout.contains("--dry-run"),
         "help should list the --dry-run flag, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn help_shows_flat_flag() {
+    let (stdout, stderr, success) = run(hf_fm().arg("--help"));
+    assert!(success, "--help failed: {stderr}");
+    assert!(
+        stdout.contains("--flat"),
+        "help should show --flat flag, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn download_file_help_shows_flat_flag() {
+    let (stdout, stderr, success) = run(hf_fm().args(["download-file", "--help"]));
+    assert!(success, "download-file --help failed: {stderr}");
+    assert!(
+        stdout.contains("--flat"),
+        "download-file help should show --flat flag, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn download_file_help_mentions_glob() {
+    let (stdout, stderr, success) = run(hf_fm().args(["download-file", "--help"]));
+    assert!(success, "download-file --help failed: {stderr}");
+    assert!(
+        stdout.contains("glob"),
+        "download-file help should mention glob support, got:\n{stdout}"
     );
 }
 

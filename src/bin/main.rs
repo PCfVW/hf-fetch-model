@@ -19,14 +19,21 @@ use hf_fetch_model::discover;
 use hf_fetch_model::inspect;
 use hf_fetch_model::progress::IndicatifProgress;
 use hf_fetch_model::repo;
-use hf_fetch_model::{compile_glob_patterns, file_matches, FetchConfig, FetchError, Filter};
+use hf_fetch_model::{
+    compile_glob_patterns, file_matches, has_glob_chars, FetchConfig, FetchError, Filter,
+};
 
 /// Downloads all files from a `HuggingFace` model repository.
 ///
 /// Use `--preset safetensors` to download only safetensors weights,
 /// config, and tokenizer files.
 #[derive(Parser)]
-#[command(name = "hf-fetch-model", version, about)]
+#[command(
+    name = "hf-fetch-model",
+    version,
+    about,
+    before_help = concat!("hf-fetch-model v", env!("CARGO_PKG_VERSION"))
+)]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
@@ -86,6 +93,14 @@ struct DownloadArgs {
     /// Preview what would be downloaded without actually downloading.
     #[arg(long)]
     dry_run: bool,
+
+    /// Copy downloaded files to flat layout: `{output-dir}/{filename}`.
+    ///
+    /// Files are downloaded to the HF cache as normal, then copied to
+    /// the target directory. Defaults to the current directory when
+    /// `--output-dir` is not set.
+    #[arg(long)]
+    flat: bool,
 }
 
 #[derive(Subcommand)]
@@ -135,7 +150,7 @@ enum Commands {
         #[arg(long, default_value = "40")]
         lines: usize,
     },
-    /// Download a single file from a `HuggingFace` repository.
+    /// Download a single file (or glob pattern) from a `HuggingFace` repository.
     DownloadFile {
         /// Enable verbose output (download diagnostics).
         #[arg(short, long)]
@@ -144,7 +159,7 @@ enum Commands {
         /// The repository identifier (e.g., "mntss/clt-gemma-2-2b-426k").
         repo_id: String,
 
-        /// Exact filename within the repository (e.g., `"W_dec_0.safetensors"`).
+        /// Filename or glob pattern (e.g., `"model.safetensors"` or `"pytorch_model-*.bin"`).
         filename: String,
 
         /// Git revision (branch, tag, or commit SHA).
@@ -166,6 +181,14 @@ enum Commands {
         /// Number of parallel HTTP connections per large file (auto-tuned if omitted).
         #[arg(long)]
         connections_per_file: Option<usize>,
+
+        /// Copy the downloaded file to flat layout: `{output-dir}/{filename}`.
+        ///
+        /// The file is downloaded to the HF cache as normal, then copied to
+        /// the target directory. Defaults to the current directory when
+        /// `--output-dir` is not set.
+        #[arg(long)]
+        flat: bool,
     },
     /// Show download status (all models, or a specific one).
     Status {
@@ -259,7 +282,7 @@ enum Commands {
         /// Exclude glob pattern (repeatable).
         #[arg(long, action = clap::ArgAction::Append)]
         exclude: Vec<String>,
-        /// Filter preset (`safetensors`, `gguf`, `config-only`).
+        /// Filter preset (`safetensors`, `gguf`, `pth`, `config-only`).
         #[arg(long, value_enum)]
         preset: Option<Preset>,
         /// Suppress the SHA256 column.
@@ -276,6 +299,7 @@ enum Commands {
 enum Preset {
     Safetensors,
     Gguf,
+    Pth,
     ConfigOnly,
 }
 
@@ -397,15 +421,17 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             output_dir,
             chunk_threshold_mib,
             connections_per_file,
-        }) => run_download_file(
-            repo_id.as_str(),
-            filename.as_str(),
-            revision.as_deref(),
-            token.as_deref(),
+            flat,
+        }) => run_download_file(DownloadFileParams {
+            repo_id: repo_id.as_str(),
+            filename: filename.as_str(),
+            revision: revision.as_deref(),
+            token: token.as_deref(),
             output_dir,
             chunk_threshold_mib,
             connections_per_file,
-        ),
+            flat,
+        }),
         Some(Commands::Status {
             repo_id: Some(repo_id),
             revision,
@@ -578,11 +604,17 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
     // Consume repo_id for the download path.
     // BORROW: explicit .to_owned() for &str → owned String
     let repo_id = repo_id.to_owned();
+    let flat = args.flat;
+
+    // When --flat, output_dir is the flat copy target, not the HF cache root.
+    // BORROW: explicit .clone() for owned Option<PathBuf>
+    let flat_target = if flat { args.output_dir.clone() } else { None };
 
     // Build FetchConfig from CLI args.
     let mut builder = match args.preset {
         Some(Preset::Safetensors) => Filter::safetensors(),
         Some(Preset::Gguf) => Filter::gguf(),
+        Some(Preset::Pth) => Filter::pth(),
         Some(Preset::ConfigOnly) => Filter::config_only(),
         None => FetchConfig::builder(),
     };
@@ -616,8 +648,10 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
     if let Some(cpf) = args.connections_per_file {
         builder = builder.connections_per_file(cpf);
     }
-    if let Some(dir) = args.output_dir {
-        builder = builder.output_dir(dir);
+    if !flat {
+        if let Some(dir) = args.output_dir {
+            builder = builder.output_dir(dir);
+        }
     }
 
     // Set up progress reporting: indicatif bars for TTY, periodic stderr for non-TTY.
@@ -643,19 +677,44 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
     })?;
 
     let start = Instant::now();
-    let outcome = rt.block_on(hf_fetch_model::download_with_config(repo_id, &config))?;
-    let elapsed = start.elapsed();
 
-    // Finalize progress bar before printing to avoid interleaved output.
-    if let Some(ref p) = indicatif {
-        p.finish();
-    }
+    if flat {
+        // --flat: download to cache, then copy to flat layout.
+        let outcome = rt.block_on(hf_fetch_model::download_files_with_config(repo_id, &config))?;
+        let elapsed = start.elapsed();
 
-    if outcome.is_cached() {
-        println!("Cached at: {}", outcome.inner().display());
+        if let Some(ref p) = indicatif {
+            p.finish();
+        }
+
+        let file_map = outcome.inner();
+        let target_dir = resolve_flat_target(flat_target.as_deref())?;
+        let flat_paths = flatten_files(file_map, &target_dir)?;
+
+        println!(
+            "{} file(s) copied to {}:",
+            flat_paths.len(),
+            target_dir.display()
+        );
+        for p in &flat_paths {
+            println!("  {}", p.display());
+        }
+        print_download_summary(&target_dir, elapsed);
     } else {
-        println!("Downloaded to: {}", outcome.inner().display());
-        print_download_summary(outcome.inner(), elapsed);
+        let outcome = rt.block_on(hf_fetch_model::download_with_config(repo_id, &config))?;
+        let elapsed = start.elapsed();
+
+        // Finalize progress bar before printing to avoid interleaved output.
+        if let Some(ref p) = indicatif {
+            p.finish();
+        }
+
+        if outcome.is_cached() {
+            println!("Cached at: {}", outcome.inner().display());
+        } else {
+            println!("Downloaded to: {}", outcome.inner().display());
+            print_download_summary(outcome.inner(), elapsed);
+        }
     }
     Ok(())
 }
@@ -666,6 +725,7 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
     let mut builder = match args.preset {
         Some(Preset::Safetensors) => Filter::safetensors(),
         Some(Preset::Gguf) => Filter::gguf(),
+        Some(Preset::Pth) => Filter::pth(),
         Some(Preset::ConfigOnly) => Filter::config_only(),
         None => FetchConfig::builder(),
     };
@@ -709,6 +769,13 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
     println!("  Revision: {}", plan.revision);
     if args.preset.is_some() || !args.filter.is_empty() {
         println!("  Filter:   active (preset or --filter)");
+    }
+    if args.flat {
+        let target = resolve_flat_target(args.output_dir.as_deref())?;
+        println!(
+            "  Flat:     {} (files will be copied here)",
+            target.display()
+        );
     }
     println!();
 
@@ -764,20 +831,52 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
     Ok(())
 }
 
-fn run_download_file(
-    repo_id: &str,
-    filename: &str,
-    revision: Option<&str>,
-    token: Option<&str>,
+/// Bundles CLI arguments for `download-file` to avoid too-many-arguments lint.
+struct DownloadFileParams<'a> {
+    repo_id: &'a str,
+    filename: &'a str,
+    revision: Option<&'a str>,
+    token: Option<&'a str>,
     output_dir: Option<PathBuf>,
     chunk_threshold_mib: Option<u64>,
     connections_per_file: Option<usize>,
-) -> Result<(), FetchError> {
+    flat: bool,
+}
+
+fn run_download_file(params: DownloadFileParams<'_>) -> Result<(), FetchError> {
+    let DownloadFileParams {
+        repo_id,
+        filename,
+        revision,
+        token,
+        output_dir,
+        chunk_threshold_mib,
+        connections_per_file,
+        flat,
+    } = params;
     if !repo_id.contains('/') {
         return Err(FetchError::InvalidArgument(format!(
             "invalid REPO_ID \"{repo_id}\": expected \"org/model\" format (e.g., \"mntss/clt-gemma-2-2b-426k\")"
         )));
     }
+
+    // Glob pattern: list repo files, filter, and download each match.
+    if has_glob_chars(filename) {
+        return run_download_file_glob(DownloadFileParams {
+            repo_id,
+            filename,
+            revision,
+            token,
+            output_dir,
+            chunk_threshold_mib,
+            connections_per_file,
+            flat,
+        });
+    }
+
+    // When --flat, output_dir is the flat copy target, not the HF cache root.
+    // BORROW: explicit .clone() for owned Option<PathBuf>
+    let flat_target = if flat { output_dir.clone() } else { None };
 
     // Build FetchConfig from CLI args.
     let mut builder = FetchConfig::builder();
@@ -796,8 +895,10 @@ fn run_download_file(
     if let Some(cpf) = connections_per_file {
         builder = builder.connections_per_file(cpf);
     }
-    if let Some(dir) = output_dir {
-        builder = builder.output_dir(dir);
+    if !flat {
+        if let Some(dir) = output_dir {
+            builder = builder.output_dir(dir);
+        }
     }
 
     // Set up progress reporting: indicatif bars for TTY, periodic stderr for non-TTY.
@@ -836,11 +937,123 @@ fn run_download_file(
         p.finish();
     }
 
-    if outcome.is_cached() {
+    if flat {
+        let target_dir = resolve_flat_target(flat_target.as_deref())?;
+        let flat_path = flatten_single_file(outcome.inner(), &target_dir)?;
+        println!("Copied to: {}", flat_path.display());
+    } else if outcome.is_cached() {
         println!("Cached at: {}", outcome.inner().display());
     } else {
         println!("Downloaded to: {}", outcome.inner().display());
         print_download_summary(outcome.inner(), elapsed);
+    }
+    Ok(())
+}
+
+/// Downloads files matching a glob pattern from a repository.
+///
+/// Lists all remote files, filters by the glob, and downloads each match
+/// using the multi-file download pipeline.
+fn run_download_file_glob(params: DownloadFileParams<'_>) -> Result<(), FetchError> {
+    let DownloadFileParams {
+        repo_id,
+        filename: pattern,
+        revision,
+        token,
+        output_dir,
+        chunk_threshold_mib,
+        connections_per_file,
+        flat,
+    } = params;
+    // When --flat, output_dir is the flat copy target, not the HF cache root.
+    // BORROW: explicit .clone() for owned Option<PathBuf>
+    let flat_target = if flat { output_dir.clone() } else { None };
+
+    // Build FetchConfig with the glob pattern as an include filter.
+    let mut builder = FetchConfig::builder().filter(pattern);
+
+    if let Some(rev) = revision {
+        builder = builder.revision(rev);
+    }
+    if let Some(tok) = token {
+        builder = builder.token(tok);
+    } else {
+        builder = builder.token_from_env();
+    }
+    if let Some(ct) = chunk_threshold_mib {
+        builder = builder.chunk_threshold(ct.saturating_mul(1024 * 1024));
+    }
+    if let Some(cpf) = connections_per_file {
+        builder = builder.connections_per_file(cpf);
+    }
+    if !flat {
+        if let Some(dir) = output_dir {
+            builder = builder.output_dir(dir);
+        }
+    }
+
+    // Set up progress reporting: indicatif bars for TTY, periodic stderr for non-TTY.
+    let is_tty = std::io::stderr().is_terminal();
+    let indicatif = if is_tty {
+        let p = Arc::new(IndicatifProgress::new());
+        let handle = Arc::clone(&p);
+        builder = builder.on_progress(move |e| handle.handle(e));
+        Some(p)
+    } else {
+        let p = Arc::new(NonTtyProgress::new());
+        let handle = Arc::clone(&p);
+        builder = builder.on_progress(move |e| handle.handle(e));
+        None
+    };
+
+    let config = builder.build()?;
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+
+    // BORROW: explicit .to_owned() for &str → owned String
+    let start = Instant::now();
+    let outcome = rt.block_on(hf_fetch_model::download_files_with_config(
+        repo_id.to_owned(),
+        &config,
+    ))?;
+    let elapsed = start.elapsed();
+
+    // Finalize progress bar before printing to avoid interleaved output.
+    if let Some(ref p) = indicatif {
+        p.finish();
+    }
+
+    let file_map = outcome.inner();
+    if file_map.is_empty() {
+        println!("No files matched pattern \"{pattern}\" in {repo_id}");
+        return Ok(());
+    }
+
+    if flat {
+        let target_dir = resolve_flat_target(flat_target.as_deref())?;
+        let flat_paths = flatten_files(file_map, &target_dir)?;
+        println!(
+            "{} file(s) copied to {}:",
+            flat_paths.len(),
+            target_dir.display()
+        );
+        for p in &flat_paths {
+            println!("  {}", p.display());
+        }
+    } else {
+        println!("{} file(s) matched pattern \"{pattern}\":", file_map.len());
+        for (name, path) in file_map {
+            println!("  {name}: {}", path.display());
+        }
+    }
+
+    // Summarize total download time.
+    let elapsed_secs = elapsed.as_secs_f64();
+    if elapsed_secs > 0.0 {
+        println!("  completed in {elapsed_secs:.1}s");
     }
     Ok(())
 }
@@ -2168,6 +2381,11 @@ fn run_list_files(
             "*.txt".to_owned(),
         ],
         Some(&Preset::Gguf) => vec!["*.gguf".to_owned(), "*.json".to_owned(), "*.txt".to_owned()],
+        Some(&Preset::Pth) => vec![
+            "pytorch_model*.bin".to_owned(),
+            "*.json".to_owned(),
+            "*.txt".to_owned(),
+        ],
         Some(&Preset::ConfigOnly) => {
             vec!["*.json".to_owned(), "*.txt".to_owned(), "*.md".to_owned()]
         }
@@ -2339,11 +2557,91 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Resolves the flat-copy target directory from an optional `--output-dir`.
+///
+/// Falls back to the current working directory when no explicit directory is given.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the current directory cannot be determined.
+fn resolve_flat_target(output_dir: Option<&Path>) -> Result<PathBuf, FetchError> {
+    match output_dir {
+        // BORROW: explicit .to_path_buf() for &Path → owned PathBuf
+        Some(dir) => Ok(dir.to_path_buf()),
+        None => std::env::current_dir().map_err(|e| FetchError::Io {
+            path: PathBuf::from("."),
+            source: e,
+        }),
+    }
+}
+
+/// Copies downloaded files to a flat directory layout.
+///
+/// Each file is copied from the HF cache to `{target_dir}/{basename}`.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if directory creation or file copy fails.
+fn flatten_files(
+    file_map: &HashMap<String, PathBuf>,
+    target_dir: &Path,
+) -> Result<Vec<PathBuf>, FetchError> {
+    // BORROW: explicit .to_path_buf() for &Path → owned PathBuf
+    std::fs::create_dir_all(target_dir).map_err(|e| FetchError::Io {
+        path: target_dir.to_path_buf(),
+        source: e,
+    })?;
+
+    let mut flat_paths = Vec::with_capacity(file_map.len());
+    for (filename, cache_path) in file_map {
+        // BORROW: explicit .as_str() instead of Deref coercion
+        let basename = Path::new(filename)
+            .file_name()
+            .unwrap_or(std::ffi::OsStr::new(filename.as_str()));
+        let flat_path = target_dir.join(basename);
+        // BORROW: explicit .clone() for owned PathBuf
+        std::fs::copy(cache_path, &flat_path).map_err(|e| FetchError::Io {
+            path: flat_path.clone(),
+            source: e,
+        })?;
+        flat_paths.push(flat_path);
+    }
+    Ok(flat_paths)
+}
+
+/// Copies a single downloaded file to a flat directory layout.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if directory creation or file copy fails.
+fn flatten_single_file(cache_path: &Path, target_dir: &Path) -> Result<PathBuf, FetchError> {
+    // BORROW: explicit .to_path_buf() for &Path → owned PathBuf
+    std::fs::create_dir_all(target_dir).map_err(|e| FetchError::Io {
+        path: target_dir.to_path_buf(),
+        source: e,
+    })?;
+
+    let basename = cache_path
+        .file_name()
+        .unwrap_or(std::ffi::OsStr::new("file"));
+    let flat_path = target_dir.join(basename);
+    // BORROW: explicit .clone() for owned PathBuf
+    std::fs::copy(cache_path, &flat_path).map_err(|e| FetchError::Io {
+        path: flat_path.clone(),
+        source: e,
+    })?;
+    Ok(flat_path)
+}
+
 /// Warns when `--filter` globs are redundant with the active `--preset`.
 fn warn_redundant_filters(preset: &Preset, filters: &[String]) {
     let (preset_globs, preset_name): (&[&str], &str) = match preset {
         Preset::Safetensors => (&["*.safetensors", "*.json", "*.txt"], "safetensors"),
         Preset::Gguf => (&["*.gguf", "*.json", "*.txt"], "gguf"),
+        Preset::Pth => {
+            let globs: &[&str] = &["pytorch_model*.bin", "*.json", "*.txt"];
+            (globs, "pth")
+        }
         Preset::ConfigOnly => (&["*.json", "*.txt", "*.md"], "config-only"),
     };
     for filter in filters {

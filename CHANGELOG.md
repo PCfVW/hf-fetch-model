@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Version in `--help` output** — `hf-fm --help` now displays the version number in the header line (previously only available via `-V`/`--version`).
+- **`--preset pth`** — filter preset for PyTorch `.bin` weight files (`pytorch_model*.bin` plus `*.json` and `*.txt`). Available on the download command and `list-files`.
+- **Glob patterns in `download-file`** — `hf-fm download-file org/model "pytorch_model-*.bin"` now expands glob patterns against the remote file list and downloads all matches. Exact filenames are still supported (backward compatible).
+- **`--flat` download flag** — copies downloaded files to a flat directory layout (`{output-dir}/{filename}`) after download. Defaults to the current directory when `--output-dir` is not set. Available on both the default download command and `download-file`.
+- **`has_glob_chars()` public function** — detects glob metacharacters in a string, re-exported at the crate root.
+
 ## [0.9.1] — Search filtering, model card display & adapter config detection
 
 ### Added

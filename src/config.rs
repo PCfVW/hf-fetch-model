@@ -356,6 +356,16 @@ impl Filter {
             .filter("*.txt")
     }
 
+    /// Returns a builder pre-configured to download only `pytorch_model*.bin`
+    /// files plus common config files.
+    #[must_use]
+    pub fn pth() -> FetchConfigBuilder {
+        FetchConfigBuilder::default()
+            .filter("pytorch_model*.bin")
+            .filter("*.json")
+            .filter("*.txt")
+    }
+
     /// Returns a builder pre-configured to download only config files
     /// (no model weights).
     #[must_use]
@@ -417,6 +427,15 @@ pub fn compile_glob_patterns(patterns: &[String]) -> Result<Option<GlobSet>, Fet
     build_globset(patterns)
 }
 
+/// Returns `true` if `s` contains glob metacharacters (`*`, `?`, `[`, `{`).
+///
+/// Useful for detecting whether a user-supplied filename should be treated
+/// as a glob pattern or an exact match.
+#[must_use]
+pub fn has_glob_chars(s: &str) -> bool {
+    s.bytes().any(|b| matches!(b, b'*' | b'?' | b'[' | b'{'))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
@@ -456,5 +475,16 @@ mod tests {
             include.as_ref(),
             exclude.as_ref()
         ));
+    }
+
+    #[test]
+    fn test_has_glob_chars() {
+        assert!(has_glob_chars("*.safetensors"));
+        assert!(has_glob_chars("model-[0-9].bin"));
+        assert!(has_glob_chars("model?.bin"));
+        assert!(has_glob_chars("{a,b}.bin"));
+        assert!(!has_glob_chars("model.safetensors"));
+        assert!(!has_glob_chars("config.json"));
+        assert!(!has_glob_chars("pytorch_model.bin"));
     }
 }

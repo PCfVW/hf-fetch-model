@@ -64,7 +64,9 @@ pub mod progress;
 pub mod repo;
 mod retry;
 
-pub use config::{compile_glob_patterns, file_matches, FetchConfig, FetchConfigBuilder, Filter};
+pub use config::{
+    compile_glob_patterns, file_matches, has_glob_chars, FetchConfig, FetchConfigBuilder, Filter,
+};
 pub use discover::{GateStatus, ModelCardMetadata, SearchResult};
 pub use download::DownloadOutcome;
 pub use error::{FetchError, FileFailure};

@@ -40,6 +40,7 @@ async fn download_with_exclude_filter() {
 fn filter_presets_build_successfully() {
     Filter::safetensors().build().unwrap();
     Filter::gguf().build().unwrap();
+    Filter::pth().build().unwrap();
     Filter::config_only().build().unwrap();
 }
 
