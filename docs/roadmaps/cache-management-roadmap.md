@@ -174,7 +174,18 @@ These can be implemented incrementally across releases, starting with `cache del
 
 Incremental delivery across patch and minor releases. Ship the highest-impact features first in small releases, reserve the minor bump for the more complex features that need the "last accessed" heuristic and network-based verification.
 
-### v0.9.2 — Immediate pain relief
+### v0.9.2 — CLI ergonomics (dogfooding)
+
+| Feature | Scope |
+|---------|-------|
+| Version in `--help` | `hf-fm --help` now shows the version number in the header |
+| `--preset pth` | Filter preset for PyTorch `.bin` weight files (`pytorch_model*.bin`) |
+| Glob in `download-file` | `hf-fm download-file org/model "pytorch_model-*.bin"` expands globs |
+| `--flat` download flag | Copies files to flat `{output-dir}/{filename}` layout after download |
+
+Addresses immediate friction from dogfooding. Ships fast, no architectural changes.
+
+### v0.9.3 — Immediate pain relief
 
 | Feature | Scope |
 |---------|-------|
@@ -184,7 +195,7 @@ Incremental delivery across patch and minor releases. Ship the highest-impact fe
 
 Small scope, high impact, ships fast. Introduces the `cache` subcommand grouping with nested clap subcommands. The numbered `du` output feeds directly into `cache delete <N>` for a two-command "see it, delete it" workflow.
 
-### v0.9.3 — Scripting and visibility
+### v0.9.4 — Scripting and visibility
 
 | Feature | Scope |
 |---------|-------|
@@ -201,4 +212,4 @@ Non-destructive, easy to implement. Gives users the visibility needed before run
 | `cache gc` | Age-based (`--older-than`) and budget-based (`--max-size`) eviction, with `--except`, `--dry-run`. Requires the "last accessed" heuristic. |
 | `du --tree` | Tree-view of cache directory structure with box-drawing characters. |
 
-These are more complex: verify needs network + checksum comparison, gc needs the last-accessed heuristic and interactive prompt safety, `du --tree` is a display feature that benefits from the `du --age` timestamps added in v0.9.3. Bundle them as the "cache maturity" release.
+These are more complex: verify needs network + checksum comparison, gc needs the last-accessed heuristic and interactive prompt safety, `du --tree` is a display feature that benefits from the `du --age` timestamps added in v0.9.4. Bundle them as the "cache maturity" release.
