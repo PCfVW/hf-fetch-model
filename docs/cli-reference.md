@@ -34,7 +34,7 @@ cargo install hf-fetch-model --features cli
 | `diff <REPO_A> <REPO_B>` | Compare tensor layouts between two models |
 | `discover` | Find new model families on the Hub not yet cached locally |
 | `info <REPO_ID>` | Show model card metadata and README text |
-| `download-file <REPO_ID> <FILENAME>` | Download a single file and print its cache path |
+| `download-file <REPO_ID> <FILENAME>` | Download a single file (or glob pattern) and print its cache path |
 | `du [REPO_ID]` | Show cache disk usage — per-repo breakdown, or cache-wide summary |
 | `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes); auto-detects PEFT adapter config |
 | `list-families` | List model families (`model_type`) in local cache |
@@ -61,6 +61,15 @@ hf-fm google/gemma-2-2b-it --output-dir ./models
 
 # Download a single file
 hf-fm download-file mntss/clt-gemma-2-2b-426k W_dec_0.safetensors
+
+# Download sharded PyTorch files by glob pattern
+hf-fm download-file org/model "pytorch_model-*.bin"
+
+# Download to flat layout (files directly in target directory)
+hf-fm google/gemma-2-2b-it --preset safetensors --flat --output-dir ./models
+
+# Download a single file to flat layout
+hf-fm download-file org/model config.json --flat --output-dir ./configs
 
 # Download with diagnostics
 hf-fm google/gemma-2-2b-it -v
@@ -233,7 +242,7 @@ hf-fm discover
 
 ## Download flags
 
-These flags apply to the default download command (`hf-fm <REPO_ID>`). `download-file` shares the performance flags but not `--dry-run`, `--filter`, or `--preset`.
+These flags apply to the default download command (`hf-fm <REPO_ID>`). `download-file` shares the performance flags and `--flat` but not `--dry-run`, `--filter`, or `--preset`. `download-file` also accepts glob patterns (e.g., `"pytorch_model-*.bin"`) as the filename argument.
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -244,8 +253,9 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--connections-per-file` | Parallel HTTP connections per large file | auto-tuned |
 | `--exclude` | Exclude glob pattern (repeatable) | none |
 | `--filter` | Include glob pattern (repeatable) | all files |
-| `--output-dir` | Custom output directory | HF cache |
-| `--preset` | Filter preset: `safetensors`, `gguf`, `config-only` | — |
+| `--flat` | Copy files to flat layout: `{output-dir}/{filename}` | off |
+| `--output-dir` | Custom output directory (or flat copy target with `--flat`) | HF cache |
+| `--preset` | Filter preset: `safetensors`, `gguf`, `pth`, `config-only` | — |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
@@ -256,7 +266,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--exclude` | Exclude glob pattern (repeatable) | none |
 | `--filter` | Include glob pattern (repeatable) | all files |
 | `--no-checksum` | Suppress the SHA256 column | off |
-| `--preset` | Filter preset: `safetensors`, `gguf`, `config-only` | — |
+| `--preset` | Filter preset: `safetensors`, `gguf`, `pth`, `config-only` | — |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--show-cached` | Show cache status: complete (✓), partial, or missing (✗) | off |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |

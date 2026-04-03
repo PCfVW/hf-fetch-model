@@ -34,7 +34,7 @@ cargo install hf-fetch-model --features cli
 | `hf-fm <REPO_ID>` | Download a model (multi-connection, auto-tuned) |
 | `hf-fm diff <REPO_A> <REPO_B>` | Compare tensor layouts between two models |
 | `hf-fm discover` | Find new model families on the Hub |
-| `hf-fm download-file <REPO_ID> <FILE>` | Download a single file |
+| `hf-fm download-file <REPO_ID> <FILE>` | Download a single file (or glob pattern) |
 | `hf-fm du [REPO_ID]` | Show cache disk usage |
 | `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) |
 | `hf-fm list-families` | List model families in local cache |
@@ -91,6 +91,12 @@ $ hf-fm mistralai/Ministral-3-3B-Instruct-2512 --preset safetensors --dry-run
 $ hf-fm mistralai/Ministral-3-3B-Instruct-2512 --preset safetensors
 Downloaded to: ~/.cache/huggingface/hub/models--mistralai--Ministral-3-3B.../snapshots/...
   6.57 GiB in 18.2s (369.1 MiB/s)
+
+# Download to flat layout (files directly in ./models/)
+$ hf-fm mistralai/Ministral-3-3B-Instruct-2512 --preset safetensors --flat --output-dir ./models
+
+# Download sharded PyTorch files by glob
+$ hf-fm download-file org/model "pytorch_model-*.bin"
 ```
 
 ## Inspect & compare

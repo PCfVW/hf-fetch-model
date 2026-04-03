@@ -39,7 +39,7 @@ let outcome = hf_fetch_model::download_with_config(
 
 ## Filter presets
 
-Three presets cover common patterns:
+Four presets cover common patterns:
 
 ```rust
 // Safetensors weights + JSON configs
@@ -47,6 +47,9 @@ let config = Filter::safetensors().build()?;
 
 // GGUF quantized models
 let config = Filter::gguf().build()?;
+
+// PyTorch .bin weights (pytorch_model*.bin) + JSON configs
+let config = Filter::pth().build()?;
 
 // Config files only (no weights)
 let config = Filter::config_only().build()?;
