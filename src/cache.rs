@@ -214,6 +214,15 @@ impl RepoStatus {
 /// * `token` — Optional authentication token.
 /// * `revision` — Optional revision (defaults to `"main"`).
 ///
+/// # Notes
+///
+/// Partial download detection is a repo-level heuristic: if any
+/// `.chunked.part` file exists in the repo's `blobs/` directory, all
+/// missing files are reported as [`FileStatus::Partial`] with the partial
+/// file's size. This may overcount partials when multiple files are
+/// missing but only one has an incomplete blob. Exact blob-to-file
+/// mapping would require LFS metadata.
+///
 /// # Errors
 ///
 /// Returns [`FetchError::Http`] if the API request fails.
@@ -225,7 +234,7 @@ pub async fn repo_status(
 ) -> Result<RepoStatus, FetchError> {
     let revision = revision.unwrap_or("main");
     let cache_dir = hf_cache_dir()?;
-    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
+    let repo_folder = crate::chunked::repo_folder_name(repo_id);
     // BORROW: explicit .as_str() for path construction
     let repo_dir = cache_dir.join(repo_folder.as_str());
 
@@ -567,7 +576,7 @@ pub struct CacheFileUsage {
 /// Returns [`FetchError::Io`] if the cache directory cannot be determined.
 pub fn cache_repo_usage(repo_id: &str) -> Result<Vec<CacheFileUsage>, FetchError> {
     let cache_dir = hf_cache_dir()?;
-    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
+    let repo_folder = crate::chunked::repo_folder_name(repo_id);
     // BORROW: explicit .as_str() instead of Deref coercion
     let repo_dir = cache_dir.join(repo_folder.as_str());
 

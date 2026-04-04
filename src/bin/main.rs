@@ -2113,6 +2113,7 @@ fn run_inspect_single(
     let source_label = match source {
         inspect::InspectSource::Cached => "cached",
         inspect::InspectSource::Remote => "remote (2 HTTP requests)",
+        _ => "unknown",
     };
     println!("  Repo:     {repo_id}");
     println!("  File:     {filename}");

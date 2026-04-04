@@ -67,7 +67,7 @@ mod retry;
 pub use config::{
     compile_glob_patterns, file_matches, has_glob_chars, FetchConfig, FetchConfigBuilder, Filter,
 };
-pub use discover::{GateStatus, ModelCardMetadata, SearchResult};
+pub use discover::{DiscoveredFamily, GateStatus, ModelCardMetadata, SearchResult};
 pub use download::DownloadOutcome;
 pub use error::{FetchError, FileFailure};
 pub use inspect::AdapterConfig;
@@ -468,7 +468,7 @@ pub async fn download_with_plan(
             .output_dir
             .clone()
             .map_or_else(cache::hf_cache_dir, Ok)?;
-        let repo_folder = format!("models--{}", plan.repo_id.replace('/', "--"));
+        let repo_folder = chunked::repo_folder_name(plan.repo_id.as_str());
         let snapshot_dir = cache_dir
             .join(&repo_folder)
             .join("snapshots")

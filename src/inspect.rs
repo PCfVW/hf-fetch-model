@@ -129,6 +129,7 @@ impl SafetensorsHeaderInfo {
 
 /// The source from which a header was read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InspectSource {
     /// Read from local cache (no network).
     Cached,
