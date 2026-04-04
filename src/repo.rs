@@ -109,6 +109,7 @@ pub async fn list_repo_files_with_metadata(
         .map_err(|e| FetchError::Http(e.to_string()))?;
 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
+        // BORROW: explicit .to_owned() for &str → owned String field
         return Err(FetchError::RepoNotFound {
             repo_id: repo_id.to_owned(),
         });

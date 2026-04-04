@@ -305,6 +305,7 @@ pub async fn repo_status(
 
     files.sort_by(|(a, _), (b, _)| a.cmp(b));
 
+    // BORROW: explicit .to_owned() for &str → owned String field
     Ok(RepoStatus {
         repo_id: repo_id.to_owned(),
         commit_hash,
@@ -428,6 +429,7 @@ pub fn read_ref(repo_dir: &Path, revision: &str) -> Option<String> {
     let ref_path = repo_dir.join("refs").join(revision);
     std::fs::read_to_string(ref_path)
         .ok()
+        // BORROW: explicit .to_owned() to convert trimmed &str → owned String
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
 }

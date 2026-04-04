@@ -469,10 +469,11 @@ pub async fn download_with_plan(
             .clone()
             .map_or_else(cache::hf_cache_dir, Ok)?;
         let repo_folder = chunked::repo_folder_name(plan.repo_id.as_str());
+        // BORROW: explicit .as_str() instead of Deref coercion
         let snapshot_dir = cache_dir
-            .join(&repo_folder)
+            .join(repo_folder.as_str())
             .join("snapshots")
-            .join(&plan.revision);
+            .join(plan.revision.as_str());
         return Ok(DownloadOutcome::Cached(snapshot_dir));
     }
 

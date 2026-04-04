@@ -30,6 +30,7 @@ pub async fn verify_sha256(
     })?;
 
     if actual_hex != expected_hex {
+        // BORROW: explicit .to_owned() for &str → owned String fields
         return Err(FetchError::Checksum {
             filename: filename.to_owned(),
             expected: expected_hex.to_owned(),
