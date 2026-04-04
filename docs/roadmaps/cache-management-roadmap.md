@@ -174,7 +174,7 @@ These can be implemented incrementally across releases, starting with `cache del
 
 Incremental delivery across patch and minor releases. Ship the highest-impact features first in small releases, reserve the minor bump for the more complex features that need the "last accessed" heuristic and network-based verification.
 
-### v0.9.2 — CLI ergonomics (dogfooding)
+### v0.9.2 — CLI ergonomics (dogfooding) ✓
 
 | Feature | Scope |
 |---------|-------|
@@ -183,17 +183,17 @@ Incremental delivery across patch and minor releases. Ship the highest-impact fe
 | Glob in `download-file` | `hf-fm download-file org/model "pytorch_model-*.bin"` expands globs |
 | `--flat` download flag | Copies files to flat `{output-dir}/{filename}` layout after download |
 
-Addresses immediate friction from dogfooding. Ships fast, no architectural changes.
+Addresses immediate friction from dogfooding. Ships fast, no architectural changes. **Shipped.**
 
-### v0.9.3 — Immediate pain relief
+### v0.9.3 — Immediate pain relief ✓
 
 | Feature | Scope |
 |---------|-------|
 | `cache delete` | Single-repo deletion by repo ID or numeric index, confirmation prompt, `--yes` flag |
-| `cache clean-partial` | Remove `.chunked.part` files from interrupted downloads |
-| `du` numbered indexing | Add `#` column, accept `du <N>` for drill-down (see [du extensions roadmap](hf-fetch-model-du-extensions-roadmap.md)) |
+| `cache clean-partial` | Remove `.chunked.part` files from interrupted downloads, `--dry-run`, `--yes` |
+| `du` numbered indexing | Add `#` column, accept `du <N>` for drill-down, `●` partial marker, dynamic column width |
 
-Small scope, high impact, ships fast. Introduces the `cache` subcommand grouping with nested clap subcommands. The numbered `du` output feeds directly into `cache delete <N>` for a two-command "see it, delete it" workflow.
+Also shipped in v0.9.3 beyond the original plan: gated model pre-flight check, `du` cache path header, `candle_inspect` example, cache layout verification test. **Shipped.**
 
 ### v0.9.4 — Scripting and visibility
 
