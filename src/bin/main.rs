@@ -1438,6 +1438,9 @@ fn run_status_all() -> Result<(), FetchError> {
 
 /// Shows disk usage summary for all cached repos, sorted by size descending.
 fn run_du() -> Result<(), FetchError> {
+    let cache_dir = cache::hf_cache_dir()?;
+    println!("Cache: {}\n", cache_dir.display());
+
     let mut summaries = cache::cache_summary()?;
 
     if summaries.is_empty() {
@@ -1477,6 +1480,9 @@ fn run_du() -> Result<(), FetchError> {
 
 /// Shows per-file disk usage for a specific cached repo, sorted by size descending.
 fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
+    let cache_dir = cache::hf_cache_dir()?;
+    println!("Cache: {}\n", cache_dir.display());
+
     let files = cache::cache_repo_usage(repo_id)?;
 
     if files.is_empty() {
