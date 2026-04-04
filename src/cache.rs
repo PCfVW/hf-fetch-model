@@ -12,6 +12,25 @@ use std::path::{Path, PathBuf};
 
 use crate::error::FetchError;
 
+/// Reconstructs a repo ID from a `models--org--name` directory name.
+///
+/// Returns `None` if the directory name does not start with `models--`.
+fn repo_id_from_folder_name(dir_name: &str) -> Option<String> {
+    let repo_part = dir_name.strip_prefix("models--")?;
+
+    // Reconstruct repo_id: replace first "--" with "/".
+    let repo_id = match repo_part.find("--") {
+        Some(pos) => {
+            let (org, name_with_sep) = repo_part.split_at(pos);
+            let name = name_with_sep.get(2..).unwrap_or_default();
+            format!("{org}/{name}")
+        }
+        None => repo_part.to_string(),
+    };
+
+    Some(repo_id)
+}
+
 /// Returns the `HuggingFace` Hub cache directory.
 ///
 /// Resolution order:
@@ -74,19 +93,8 @@ pub fn list_cached_families() -> Result<BTreeMap<String, Vec<String>>, FetchErro
         // BORROW: explicit .to_string_lossy() for OsString → str conversion
         let dir_str = dir_name.to_string_lossy();
 
-        // Only process model directories (models--org--name)
-        let Some(repo_part) = dir_str.strip_prefix("models--") else {
+        let Some(repo_id) = repo_id_from_folder_name(&dir_str) else {
             continue;
-        };
-
-        // Reconstruct repo_id: replace first "--" with "/"
-        let repo_id = match repo_part.find("--") {
-            Some(pos) => {
-                let (org, name_with_sep) = repo_part.split_at(pos);
-                let name = name_with_sep.get(2..).unwrap_or_default();
-                format!("{org}/{name}")
-            }
-            None => repo_part.to_string(),
         };
 
         // Find the newest snapshot's config.json
@@ -346,18 +354,8 @@ pub fn cache_summary() -> Result<Vec<CachedModelSummary>, FetchError> {
         // BORROW: explicit .to_string_lossy() for OsString → str conversion
         let dir_str = dir_name.to_string_lossy();
 
-        let Some(repo_part) = dir_str.strip_prefix("models--") else {
+        let Some(repo_id) = repo_id_from_folder_name(&dir_str) else {
             continue;
-        };
-
-        // Reconstruct repo_id: replace first "--" with "/"
-        let repo_id = match repo_part.find("--") {
-            Some(pos) => {
-                let (org, name_with_sep) = repo_part.split_at(pos);
-                let name = name_with_sep.get(2..).unwrap_or_default();
-                format!("{org}/{name}")
-            }
-            None => repo_part.to_string(),
         };
 
         let repo_dir = entry.path();
@@ -505,18 +503,8 @@ pub fn find_partial_files(repo_filter: Option<&str>) -> Result<Vec<PartialFile>,
         // BORROW: explicit .to_string_lossy() for OsString → str conversion
         let dir_str = dir_name.to_string_lossy();
 
-        let Some(repo_part) = dir_str.strip_prefix("models--") else {
+        let Some(repo_id) = repo_id_from_folder_name(&dir_str) else {
             continue;
-        };
-
-        // Reconstruct repo_id: replace first "--" with "/".
-        let repo_id = match repo_part.find("--") {
-            Some(pos) => {
-                let (org, name_with_sep) = repo_part.split_at(pos);
-                let name = name_with_sep.get(2..).unwrap_or_default();
-                format!("{org}/{name}")
-            }
-            None => repo_part.to_string(),
         };
 
         // Skip repos that don't match the filter.

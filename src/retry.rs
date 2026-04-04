@@ -35,6 +35,11 @@ impl Default for RetryPolicy {
 /// Returns the first successful result, or the last error after all retries
 /// are exhausted. The `is_retryable` closure determines whether a given
 /// error should trigger a retry.
+///
+/// # Errors
+///
+/// Returns the last [`FetchError`] from `operation` after all retry attempts
+/// are exhausted, or immediately if `is_retryable` returns `false`.
 pub(crate) async fn retry_async<F, Fut, T>(
     policy: &RetryPolicy,
     is_retryable: fn(&FetchError) -> bool,

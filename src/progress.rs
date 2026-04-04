@@ -88,7 +88,7 @@ pub struct IndicatifProgress {
     multi: indicatif::MultiProgress,
     // Overall file-count bar (always the last bar in the display).
     overall: indicatif::ProgressBar,
-    /// Per-file progress bars, keyed by filename.
+    // Per-file progress bars, keyed by filename.
     file_bars: std::sync::Mutex<std::collections::HashMap<String, indicatif::ProgressBar>>,
     // Filenames already counted as complete (deduplicates chunked + orchestrator events).
     completed_files: std::sync::Mutex<std::collections::HashSet<String>>,
