@@ -318,6 +318,15 @@ enum CacheCommands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Delete a cached model by repo ID or numeric index.
+    Delete {
+        /// Repository identifier or numeric index from `du` output.
+        repo_id: String,
+
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 // EXHAUSTIVE: internal CLI dispatch enum; crate owns all variants
@@ -546,6 +555,12 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             } => {
                 let resolved = repo_id.map(|r| resolve_du_arg(r.as_str())).transpose()?;
                 run_cache_clean_partial(resolved.as_deref(), yes, dry_run)
+            }
+            // BORROW: explicit .as_str() for String → &str conversion
+            CacheCommands::Delete { repo_id, yes } => {
+                let resolved = resolve_du_arg(repo_id.as_str())?;
+                // BORROW: explicit .as_str() instead of Deref coercion
+                run_cache_delete(resolved.as_str(), yes)
             }
         },
         None => run_download(cli.download),
@@ -1704,6 +1719,53 @@ fn run_cache_clean_partial(
         partials.len(),
         format_size(total_size)
     );
+    Ok(())
+}
+
+/// Deletes a cached model by removing its `models--org--name/` directory.
+///
+/// Shows a size preview and prompts for confirmation unless `--yes` is passed.
+fn run_cache_delete(repo_id: &str, yes: bool) -> Result<(), FetchError> {
+    let cache_dir = cache::hf_cache_dir()?;
+
+    if !cache_dir.exists() {
+        println!("No HuggingFace cache found at {}", cache_dir.display());
+        return Ok(());
+    }
+
+    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
+    let repo_dir = cache_dir.join(repo_folder.as_str());
+
+    if !repo_dir.exists() {
+        return Err(FetchError::InvalidArgument(format!(
+            "{repo_id} is not cached"
+        )));
+    }
+
+    // Get size and file count for the preview.
+    let summaries = cache::cache_summary()?;
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let summary = summaries.iter().find(|s| s.repo_id.as_str() == repo_id);
+
+    let (size, file_count) = match summary {
+        Some(s) => (s.total_size, s.file_count),
+        None => (0, 0),
+    };
+
+    println!("  {repo_id}  ({}, {} files)", format_size(size), file_count);
+
+    if !yes && !confirm_prompt("  Delete? [y/N]") {
+        println!("  Aborted.");
+        return Ok(());
+    }
+
+    std::fs::remove_dir_all(&repo_dir).map_err(|e| FetchError::Io {
+        // BORROW: explicit .clone() for owned PathBuf
+        path: repo_dir.clone(),
+        source: e,
+    })?;
+
+    println!("  Deleted. Freed {}.", format_size(size));
     Ok(())
 }
 

@@ -37,6 +37,7 @@ cargo install hf-fetch-model --features cli
 | `hf-fm download-file <REPO_ID> <FILE>` | Download a single file (or glob pattern) |
 | `hf-fm du [REPO_ID\|N]` | Show cache disk usage (by name or `#` index) |
 | `hf-fm cache clean-partial` | Remove `.chunked.part` files from interrupted downloads |
+| `hf-fm cache delete <REPO_ID\|N>` | Delete a cached model |
 | `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) |
 | `hf-fm list-families` | List model families in local cache |
 | `hf-fm list-files <REPO_ID>` | List remote files (sizes, SHA256) without downloading |

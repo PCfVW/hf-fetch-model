@@ -343,6 +343,41 @@ fn dry_run_with_filter_shows_filter_info() {
 // -----------------------------------------------------------------------
 
 #[test]
+fn cache_delete_help_shows_flags() {
+    let (stdout, stderr, success) = run(hf_fm().args(["cache", "delete", "--help"]));
+    assert!(success, "cache delete --help failed: {stderr}");
+    assert!(
+        stdout.contains("--yes"),
+        "cache delete help should contain --yes, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn cache_delete_nonexistent_repo() {
+    let (_, stderr, success) = run(hf_fm().args([
+        "cache",
+        "delete",
+        "nonexistent-org/nonexistent-model-xyz",
+        "--yes",
+    ]));
+    assert!(!success, "cache delete of missing repo should fail");
+    assert!(
+        stderr.contains("not cached"),
+        "cache delete should report not cached, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn help_shows_cache_delete() {
+    let (stdout, stderr, success) = run(hf_fm().args(["cache", "--help"]));
+    assert!(success, "cache --help failed: {stderr}");
+    assert!(
+        stdout.contains("delete"),
+        "cache help should mention delete subcommand, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn help_shows_cache_subcommand() {
     let (stdout, _stderr, success) = run(hf_fm().arg("--help"));
     assert!(success, "help should succeed");

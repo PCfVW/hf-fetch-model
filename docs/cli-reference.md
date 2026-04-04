@@ -37,6 +37,7 @@ cargo install hf-fetch-model --features cli
 | `download-file <REPO_ID> <FILENAME>` | Download a single file (or glob pattern) and print its cache path |
 | `du [REPO_ID\|N]` | Show cache disk usage — per-repo breakdown (by name or `#` index), or cache-wide summary |
 | `cache clean-partial [REPO_ID\|N]` | Remove `.chunked.part` files from interrupted downloads |
+| `cache delete <REPO_ID\|N>` | Delete a cached model (entire `models--org--name/` directory) |
 | `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes); auto-detects PEFT adapter config |
 | `list-families` | List model families (`model_type`) in local cache |
 | `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
@@ -254,6 +255,23 @@ hf-fm cache clean-partial --yes
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--dry-run` | Preview what would be removed without deleting | off |
+| `--yes` | Skip confirmation prompt | off |
+
+```sh
+# Delete a cached model (interactive prompt)
+hf-fm cache delete EleutherAI/pythia-1.4b
+
+# Delete by numeric index from du output
+hf-fm cache delete 3
+
+# Skip confirmation prompt
+hf-fm cache delete 3 --yes
+```
+
+## Cache delete flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
 | `--yes` | Skip confirmation prompt | off |
 
 ## Diff flags

@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`du` numbered indexing** — `hf-fm du` now shows a `#` column with 1-based numbering. `hf-fm du 2` drills into the 2nd largest cached repo (same as `hf-fm du org/model`). Partial downloads are marked with `●`, and the drill-down view hints to run `hf-fm status` for details.
 - **`cache` subcommand group** — new `hf-fm cache` parent command for destructive cache operations. Future commands (`delete`, `path`, `verify`, `gc`) will be added here.
 - **`cache clean-partial`** — removes `.chunked.part` temp files from interrupted downloads. Supports whole-cache or single-repo scope (by repo ID or `#` index), `--yes` to skip confirmation, and `--dry-run` to preview.
+- **`cache delete`** — deletes a cached model by repo ID or `#` index. Shows a size preview and prompts for confirmation (`--yes` to skip).
 
 ### Fixed
 
