@@ -295,6 +295,29 @@ enum Commands {
         #[arg(long)]
         show_cached: bool,
     },
+    /// Manage the local `HuggingFace` cache.
+    Cache {
+        #[command(subcommand)]
+        subcommand: CacheCommands,
+    },
+}
+
+// EXHAUSTIVE: internal CLI dispatch enum; crate owns all variants
+#[derive(Subcommand)]
+enum CacheCommands {
+    /// Remove `.chunked.part` files from interrupted downloads.
+    CleanPartial {
+        /// Repository identifier or numeric index (omit to clean all repos).
+        repo_id: Option<String>,
+
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+
+        /// Preview what would be removed without deleting.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // EXHAUSTIVE: internal CLI dispatch enum; crate owns all variants
@@ -323,7 +346,8 @@ fn main() -> ExitCode {
             | Commands::Diff { .. }
             | Commands::Du { .. }
             | Commands::Inspect { .. }
-            | Commands::ListFiles { .. },
+            | Commands::ListFiles { .. }
+            | Commands::Cache { .. },
         ) => false,
     };
 
@@ -513,6 +537,17 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             no_checksum,
             show_cached,
         ),
+        // BORROW: explicit .as_str() for String → &str conversion
+        Some(Commands::Cache { subcommand }) => match subcommand {
+            CacheCommands::CleanPartial {
+                repo_id,
+                yes,
+                dry_run,
+            } => {
+                let resolved = repo_id.map(|r| resolve_du_arg(r.as_str())).transpose()?;
+                run_cache_clean_partial(resolved.as_deref(), yes, dry_run)
+            }
+        },
         None => run_download(cli.download),
     }
 }
@@ -1596,6 +1631,89 @@ fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
     }
 
     Ok(())
+}
+
+/// Removes `.chunked.part` temp files from the `HuggingFace` cache.
+///
+/// When `repo_filter` is `Some`, only that repo is scanned.
+/// With `--dry-run`, prints what would be removed without deleting.
+/// With `--yes`, skips the confirmation prompt.
+fn run_cache_clean_partial(
+    repo_filter: Option<&str>,
+    yes: bool,
+    dry_run: bool,
+) -> Result<(), FetchError> {
+    let cache_dir = cache::hf_cache_dir()?;
+
+    if !cache_dir.exists() {
+        println!("No HuggingFace cache found at {}", cache_dir.display());
+        return Ok(());
+    }
+
+    println!("Cache: {}\n", cache_dir.display());
+
+    let partials = cache::find_partial_files(repo_filter)?;
+
+    if partials.is_empty() {
+        println!("No partial downloads found.");
+        return Ok(());
+    }
+
+    let total_size: u64 = partials.iter().map(|p| p.size).sum();
+
+    if dry_run {
+        println!(
+            "Would remove {} file(s) ({}):",
+            partials.len(),
+            format_size(total_size)
+        );
+        for p in &partials {
+            println!("  {}: {}  ({})", p.repo_id, p.filename, format_size(p.size));
+        }
+        return Ok(());
+    }
+
+    println!("Found {} partial download(s):", partials.len());
+    for p in &partials {
+        println!("  {}: {}  ({})", p.repo_id, p.filename, format_size(p.size));
+    }
+
+    if !yes {
+        let prompt = format!(
+            "Clean {} file(s) ({})? [y/N]",
+            partials.len(),
+            format_size(total_size)
+        );
+        // BORROW: explicit .as_str() instead of Deref coercion
+        if !confirm_prompt(prompt.as_str()) {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    for p in &partials {
+        std::fs::remove_file(&p.path).map_err(|e| FetchError::Io {
+            // BORROW: explicit .clone() for owned PathBuf
+            path: p.path.clone(),
+            source: e,
+        })?;
+    }
+
+    println!(
+        "Removed {} file(s). Freed {}.",
+        partials.len(),
+        format_size(total_size)
+    );
+    Ok(())
+}
+
+/// Prompts the user for confirmation via stdin.
+///
+/// Returns `true` if the user enters `y` or `Y`, `false` otherwise.
+fn confirm_prompt(message: &str) -> bool {
+    eprint!("{message} ");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).is_ok() && input.trim().eq_ignore_ascii_case("y")
 }
 
 /// Collects all tensors from a repo into a name-keyed map.

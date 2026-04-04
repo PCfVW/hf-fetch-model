@@ -451,6 +451,99 @@ fn find_partial_blob_size(blobs_dir: &Path) -> u64 {
     0
 }
 
+/// A `.chunked.part` temp file left by an interrupted chunked download.
+#[derive(Debug, Clone)]
+pub struct PartialFile {
+    /// The repository identifier (e.g., `"meta-llama/Llama-3.2-1B"`).
+    pub repo_id: String,
+    /// The `.chunked.part` filename (e.g., `"abc123def456.chunked.part"`).
+    pub filename: String,
+    /// Absolute path to the `.chunked.part` file.
+    pub path: PathBuf,
+    /// Size of the partial file in bytes.
+    pub size: u64,
+}
+
+/// Finds all `.chunked.part` temp files in the `HuggingFace` cache.
+///
+/// Walks `models--*/blobs/` directories and collects partial files.
+/// When `repo_filter` is `Some`, only the matching repo is scanned.
+///
+/// Returns an empty `Vec` if the cache directory does not exist.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the cache directory cannot be read.
+pub fn find_partial_files(repo_filter: Option<&str>) -> Result<Vec<PartialFile>, FetchError> {
+    let cache_dir = hf_cache_dir()?;
+
+    if !cache_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let entries = std::fs::read_dir(&cache_dir).map_err(|e| FetchError::Io {
+        // BORROW: explicit .clone() for owned PathBuf
+        path: cache_dir.clone(),
+        source: e,
+    })?;
+
+    let mut partials: Vec<PartialFile> = Vec::new();
+
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let dir_name = entry.file_name();
+        // BORROW: explicit .to_string_lossy() for OsString → str conversion
+        let dir_str = dir_name.to_string_lossy();
+
+        let Some(repo_part) = dir_str.strip_prefix("models--") else {
+            continue;
+        };
+
+        // Reconstruct repo_id: replace first "--" with "/".
+        let repo_id = match repo_part.find("--") {
+            Some(pos) => {
+                let (org, name_with_sep) = repo_part.split_at(pos);
+                let name = name_with_sep.get(2..).unwrap_or_default();
+                format!("{org}/{name}")
+            }
+            None => repo_part.to_string(),
+        };
+
+        // Skip repos that don't match the filter.
+        // BORROW: explicit .as_str() instead of Deref coercion
+        if let Some(filter) = repo_filter {
+            if repo_id.as_str() != filter {
+                continue;
+            }
+        }
+
+        let blobs_dir = entry.path().join("blobs");
+        let Ok(blob_entries) = std::fs::read_dir(&blobs_dir) else {
+            continue;
+        };
+
+        for blob_entry in blob_entries {
+            let Ok(blob_entry) = blob_entry else { continue };
+            let name = blob_entry.file_name();
+            // BORROW: explicit .to_string_lossy() for OsString → str conversion
+            let name_str = name.to_string_lossy();
+            if name_str.ends_with(".chunked.part") {
+                let size = blob_entry.metadata().map(|m| m.len()).unwrap_or(0);
+                partials.push(PartialFile {
+                    // BORROW: explicit .clone() for owned String
+                    repo_id: repo_id.clone(),
+                    // BORROW: explicit .to_string() for Cow<str> → owned String
+                    filename: name_str.to_string(),
+                    path: blob_entry.path(),
+                    size,
+                });
+            }
+        }
+    }
+
+    Ok(partials)
+}
+
 /// Per-file disk usage entry within a cached repository.
 #[derive(Debug, Clone)]
 pub struct CacheFileUsage {

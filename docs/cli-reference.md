@@ -36,6 +36,7 @@ cargo install hf-fetch-model --features cli
 | `info <REPO_ID>` | Show model card metadata and README text |
 | `download-file <REPO_ID> <FILENAME>` | Download a single file (or glob pattern) and print its cache path |
 | `du [REPO_ID\|N]` | Show cache disk usage — per-repo breakdown (by name or `#` index), or cache-wide summary |
+| `cache clean-partial [REPO_ID\|N]` | Remove `.chunked.part` files from interrupted downloads |
 | `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes); auto-detects PEFT adapter config |
 | `list-families` | List model families (`model_type`) in local cache |
 | `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
@@ -230,6 +231,30 @@ hf-fm list-families
 # Discover new families from HuggingFace Hub
 hf-fm discover
 ```
+
+## Cache commands
+
+```sh
+# Remove all partial downloads (interactive prompt)
+hf-fm cache clean-partial
+
+# Remove partials for a specific repo (by name or index)
+hf-fm cache clean-partial meta-llama/Llama-3.2-1B
+hf-fm cache clean-partial 29
+
+# Preview what would be removed
+hf-fm cache clean-partial --dry-run
+
+# Skip confirmation prompt
+hf-fm cache clean-partial --yes
+```
+
+## Cache clean-partial flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--dry-run` | Preview what would be removed without deleting | off |
+| `--yes` | Skip confirmation prompt | off |
 
 ## Diff flags
 

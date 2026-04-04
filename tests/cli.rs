@@ -343,6 +343,39 @@ fn dry_run_with_filter_shows_filter_info() {
 // -----------------------------------------------------------------------
 
 #[test]
+fn help_shows_cache_subcommand() {
+    let (stdout, _stderr, success) = run(hf_fm().arg("--help"));
+    assert!(success, "help should succeed");
+    assert!(
+        stdout.contains("cache"),
+        "help should mention cache subcommand, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn cache_clean_partial_help_shows_flags() {
+    let (stdout, stderr, success) = run(hf_fm().args(["cache", "clean-partial", "--help"]));
+    assert!(success, "cache clean-partial --help failed: {stderr}");
+    for flag in ["--yes", "--dry-run"] {
+        assert!(
+            stdout.contains(flag),
+            "cache clean-partial help should contain {flag}, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn cache_clean_partial_no_partials() {
+    let (stdout, stderr, success) = run(hf_fm().args(["cache", "clean-partial", "--yes"]));
+    assert!(success, "cache clean-partial should succeed: {stderr}");
+    assert!(
+        stdout.contains("No partial downloads found")
+            || stdout.contains("No HuggingFace cache found"),
+        "cache clean-partial should report no partials, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn help_shows_du_subcommand() {
     let (stdout, _stderr, success) = run(hf_fm().arg("--help"));
     assert!(success, "help should succeed");
