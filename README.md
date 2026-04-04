@@ -127,11 +127,25 @@ Inspect reads tensor metadata via HTTP Range requests (2 requests per file) — 
 
 ```
 $ hf-fm du
-    5.10 GiB  google/gemma-2-2b-it          (8 files)
-    2.80 GiB  EleutherAI/pythia-1.4b        (12 files)
-    1.20 GiB  google/gemma-scope-2b-pt-res  (3 files)
-    ──────────────────────────────────────────────────
-    9.10 GiB  total (3 repos, 23 files)
+   #        SIZE  REPO                                             FILES
+   1    5.10 GiB  google/gemma-2-2b-it                                 8
+   2    2.80 GiB  EleutherAI/pythia-1.4b                              12  ●
+   3    1.20 GiB  google/gemma-scope-2b-pt-res                         3
+  ─────────────────────────────────────────────────────────────────────────────
+   9.10 GiB  total (3 repos, 23 files)
+  ● = partial downloads
+
+$ hf-fm du 2
+  EleutherAI/pythia-1.4b:
+
+   #        SIZE  FILE
+   1    2.50 GiB  model-00001-of-00002.safetensors
+   2    0.26 GiB  model-00002-of-00002.safetensors
+   ...
+  ──────────────────────────────────────────────────────────────────
+   2.80 GiB  total (12 files)
+
+  ● partial downloads — run `hf-fm status EleutherAI/pythia-1.4b` for details
 ```
 
 ## Library quick start
