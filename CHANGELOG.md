@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`cache` subcommand group** — new `hf-fm cache` parent command for destructive cache operations. Future commands (`delete`, `path`, `verify`, `gc`) will be added here.
 - **`cache clean-partial`** — removes `.chunked.part` temp files from interrupted downloads. Supports whole-cache or single-repo scope (by repo ID or `#` index), `--yes` to skip confirmation, and `--dry-run` to preview.
 - **`cache delete`** — deletes a cached model by repo ID or `#` index. Shows a size preview and prompts for confirmation (`--yes` to skip).
+- **`candle_inspect` example** — runnable example showing how to inspect a model's tensor layout (names, shapes, dtypes) via HTTP Range requests before downloading weights. Run: `cargo run --example candle_inspect`.
 
 ### Fixed
 
