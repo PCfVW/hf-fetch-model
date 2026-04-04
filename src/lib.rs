@@ -41,6 +41,25 @@
 //! # }
 //! ```
 //!
+//! ## Inspect Before Downloading
+//!
+//! Read tensor metadata from `.safetensors` headers via HTTP Range requests —
+//! no weight data downloaded. See [`examples/candle_inspect.rs`](https://github.com/PCfVW/hf-fetch-model/blob/main/examples/candle_inspect.rs)
+//! for a runnable example.
+//!
+//! ```rust,no_run
+//! # async fn example() -> Result<(), hf_fetch_model::FetchError> {
+//! let results = hf_fetch_model::inspect::inspect_repo_safetensors(
+//!     "EleutherAI/pythia-1.4b", None, None,
+//! ).await?;
+//!
+//! for (filename, header, _source) in &results {
+//!     println!("{filename}: {} tensors", header.tensors.len());
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ## `HuggingFace` Cache
 //!
 //! Downloaded files are stored in the standard `HuggingFace` cache directory

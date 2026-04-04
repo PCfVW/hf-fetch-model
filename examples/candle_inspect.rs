@@ -12,9 +12,9 @@ use hf_fetch_model::inspect;
 
 #[tokio::main]
 async fn main() -> Result<(), hf_fetch_model::FetchError> {
-    // BORROW: explicit .to_owned() for &str → owned String
     let repo_id = std::env::args()
         .nth(1)
+        // BORROW: explicit .to_owned() for &str → owned String
         .unwrap_or_else(|| "EleutherAI/pythia-1.4b".to_owned());
 
     println!("Inspecting {repo_id}...\n");

@@ -1734,6 +1734,7 @@ fn run_cache_delete(repo_id: &str, yes: bool) -> Result<(), FetchError> {
     }
 
     let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
+    // BORROW: explicit .as_str() instead of Deref coercion
     let repo_dir = cache_dir.join(repo_folder.as_str());
 
     if !repo_dir.exists() {
