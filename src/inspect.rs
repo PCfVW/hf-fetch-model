@@ -246,7 +246,8 @@ fn parse_header_json(json_bytes: &[u8], filename: &str) -> Result<ParsedHeader, 
 fn resolve_cached_path(repo_id: &str, revision: &str, filename: &str) -> Option<PathBuf> {
     let cache_dir = cache::hf_cache_dir().ok()?;
     let repo_folder = chunked::repo_folder_name(repo_id);
-    let repo_dir = cache_dir.join(&repo_folder);
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let repo_dir = cache_dir.join(repo_folder.as_str());
     let commit_hash = cache::read_ref(&repo_dir, revision)?;
     let cached_path = repo_dir.join("snapshots").join(commit_hash).join(filename);
     if cached_path.exists() {
@@ -540,6 +541,7 @@ pub async fn inspect_repo_safetensors(
     let mut handles = Vec::new();
 
     for filename in safetensors_files {
+        // BORROW: explicit .clone()/.to_owned() to move into async task
         let sem = semaphore.clone();
         let repo = repo_id.to_owned();
         let tok = token.map(str::to_owned);
@@ -586,7 +588,8 @@ pub fn inspect_repo_safetensors_cached(
     let rev = revision.unwrap_or("main");
     let cache_dir = cache::hf_cache_dir()?;
     let repo_folder = chunked::repo_folder_name(repo_id);
-    let repo_dir = cache_dir.join(&repo_folder);
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let repo_dir = cache_dir.join(repo_folder.as_str());
 
     let Some(commit_hash) = cache::read_ref(&repo_dir, rev) else {
         return Ok(Vec::new());

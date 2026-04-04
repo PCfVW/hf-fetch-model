@@ -1249,6 +1249,7 @@ async fn fetch_metadata_map(
 ) -> Result<HashMap<String, RepoFile>, FetchError> {
     let files = repo::list_repo_files_with_metadata(repo_id, token, revision).await?;
 
+    // BORROW: explicit .clone() for owned String HashMap key
     let map = files.into_iter().map(|f| (f.filename.clone(), f)).collect();
 
     Ok(map)

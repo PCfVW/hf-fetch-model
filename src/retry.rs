@@ -60,6 +60,7 @@ where
     // Structurally unreachable: the loop runs at least once (0..=0) and
     // every iteration returns on Ok or final attempt. Required by the
     // compiler because `for` ranges are not proven exhaustive.
+    // BORROW: explicit .to_owned() for &str → owned String
     Err(FetchError::Http("retry exhausted (unreachable)".to_owned()))
 }
 

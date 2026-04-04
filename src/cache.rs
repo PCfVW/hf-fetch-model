@@ -133,6 +133,7 @@ fn find_model_type_in_snapshots(snapshots_dir: &std::path::Path) -> Option<Strin
 /// Reads a `config.json` file and extracts the `model_type` field.
 fn extract_model_type(config_path: &std::path::Path) -> Option<String> {
     let contents = std::fs::read_to_string(config_path).ok()?;
+    // BORROW: explicit .as_str() instead of Deref coercion
     let value: serde_json::Value = serde_json::from_str(contents.as_str()).ok()?;
     // BORROW: explicit .as_str() on serde_json Value
     value.get("model_type")?.as_str().map(String::from)
@@ -567,7 +568,8 @@ pub struct CacheFileUsage {
 pub fn cache_repo_usage(repo_id: &str) -> Result<Vec<CacheFileUsage>, FetchError> {
     let cache_dir = hf_cache_dir()?;
     let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
-    let repo_dir = cache_dir.join(&repo_folder);
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let repo_dir = cache_dir.join(repo_folder.as_str());
 
     if !repo_dir.exists() {
         return Ok(Vec::new());
