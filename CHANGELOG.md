@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Gated model pre-flight check** — downloads now fail fast with a clear message when a repository is gated and either no token is configured or the token is rejected (invalid token or license not accepted), instead of producing per-file 401 errors.
 - **`du` prints cache path** — `hf-fm du` and `hf-fm du <REPO_ID>` now display the absolute cache directory path as a header line.
+- **`du` numbered indexing** — `hf-fm du` now shows a `#` column with 1-based numbering. `hf-fm du 2` drills into the 2nd largest cached repo (same as `hf-fm du org/model`). Partial downloads are marked with `●`, and the drill-down view hints to run `hf-fm status` for details.
+
+### Fixed
+
+- **`du` column alignment** — size values near 1 GiB (e.g., `1023.20 MiB`) no longer overflow the SIZE column; they are now displayed as GiB. The REPO column width adapts to the longest repo name.
 
 ## [0.9.2] — CLI ergonomics (dogfooding)
 

@@ -362,11 +362,18 @@ fn du_summary_lists_cached_repos() {
     let (stdout, stderr, success) = run(hf_fm().args(["du"]));
     // du should succeed even if no models are cached (prints "No models found").
     assert!(success, "du should succeed: {stderr}");
-    // If models are cached, output contains "total"; if not, "No models found".
+    // If models are cached, output contains numbered header and total.
     assert!(
         stdout.contains("total") || stdout.contains("No models found"),
         "du should show total or empty message, got:\n{stdout}"
     );
+    // Numbered output: header row should contain column labels.
+    if stdout.contains("total") {
+        assert!(
+            stdout.contains('#') && stdout.contains("SIZE") && stdout.contains("REPO"),
+            "du should show numbered column headers, got:\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -378,12 +385,49 @@ fn du_repo_shows_files() {
     let (stdout, stderr, success) = run(hf_fm().args(["du", "julien-c/dummy-unknown"]));
     assert!(success, "du repo should succeed: {stderr}");
     assert!(
+        stdout.contains("julien-c/dummy-unknown:"),
+        "du repo should show repo name header, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains('#') && stdout.contains("SIZE") && stdout.contains("FILE"),
+        "du repo should show numbered column headers, got:\n{stdout}"
+    );
+    assert!(
         stdout.contains("config.json"),
         "du repo should list config.json, got:\n{stdout}"
     );
     assert!(
         stdout.contains("total"),
         "du repo should show total line, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn du_numeric_index_drills_down() {
+    // Ensure the test repo is cached.
+    let (_, _, dl_success) = run(hf_fm().args(["julien-c/dummy-unknown"]));
+    assert!(dl_success, "download should succeed to populate cache");
+
+    // du 1 should drill into the first (largest) repo — same as du <repo_id>.
+    let (stdout, stderr, success) = run(hf_fm().args(["du", "1"]));
+    assert!(success, "du 1 should succeed: {stderr}");
+    assert!(
+        stdout.contains("total"),
+        "du 1 should show per-file total, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("FILE"),
+        "du 1 should show file column header, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn du_invalid_index_fails() {
+    let (_, stderr, success) = run(hf_fm().args(["du", "99999"]));
+    assert!(!success, "du 99999 should fail");
+    assert!(
+        stderr.contains("out of range"),
+        "du 99999 should report out of range, got:\n{stderr}"
     );
 }
 

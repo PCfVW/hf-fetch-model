@@ -235,7 +235,10 @@ enum Commands {
     },
     /// Show disk usage for cached models.
     Du {
-        /// The repository identifier (omit to show all cached repos).
+        /// Repository identifier or numeric index (omit to show all cached repos).
+        ///
+        /// Use a repo ID (e.g., `"google/gemma-2-2b-it"`) or a `#` index from the
+        /// `du` summary to drill into a specific repo's files.
         repo_id: Option<String>,
     },
     /// Inspect `.safetensors` file headers (tensor names, shapes, dtypes).
@@ -464,7 +467,11 @@ fn run(cli: Cli) -> Result<(), FetchError> {
         // BORROW: explicit .as_str() for String → &str conversion
         Some(Commands::Du {
             repo_id: Some(repo_id),
-        }) => run_du_repo(repo_id.as_str()),
+        }) => {
+            // BORROW: explicit .as_str() instead of Deref coercion
+            let resolved = resolve_du_arg(repo_id.as_str())?;
+            run_du_repo(resolved.as_str())
+        }
         Some(Commands::Du { repo_id: None }) => run_du(),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::Inspect {
@@ -1436,6 +1443,47 @@ fn run_status_all() -> Result<(), FetchError> {
     Ok(())
 }
 
+/// Resolves a `du` argument to a repo ID.
+///
+/// If the argument contains `/`, it is treated as a repo ID. If it parses
+/// as a number, it is treated as a 1-based index into the size-sorted cache
+/// summary. Otherwise, returns an error.
+///
+/// # Errors
+///
+/// Returns [`FetchError::InvalidArgument`] if the index is out of range
+/// or the argument is not a valid repo ID or numeric index.
+fn resolve_du_arg(arg: &str) -> Result<String, FetchError> {
+    // Repo ID: contains '/' (e.g., "google/gemma-2-2b-it").
+    if arg.contains('/') {
+        // BORROW: explicit .to_owned() for &str → owned String
+        return Ok(arg.to_owned());
+    }
+
+    // Numeric index: resolve against the size-sorted cache summary.
+    if let Ok(n) = arg.parse::<usize>() {
+        let mut summaries = cache::cache_summary()?;
+        summaries.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+
+        if n == 0 || n > summaries.len() {
+            return Err(FetchError::InvalidArgument(format!(
+                "index {n} is out of range (cache has {} repos — use 1..{})",
+                summaries.len(),
+                summaries.len()
+            )));
+        }
+
+        // INDEX: n is bounded by 1..=summaries.len() checked above
+        // BORROW: explicit .clone() for owned String
+        #[allow(clippy::indexing_slicing)]
+        return Ok(summaries[n - 1].repo_id.clone());
+    }
+
+    Err(FetchError::InvalidArgument(format!(
+        "\"{arg}\" is not a valid repo ID (expected \"org/model\") or numeric index"
+    )))
+}
+
 /// Shows disk usage summary for all cached repos, sorted by size descending.
 fn run_du() -> Result<(), FetchError> {
     let cache_dir = cache::hf_cache_dir()?;
@@ -1450,16 +1498,36 @@ fn run_du() -> Result<(), FetchError> {
 
     summaries.sort_by(|a, b| b.total_size.cmp(&a.total_size));
 
+    // Compute REPO column width from the longest repo ID (minimum 48).
+    let repo_width = summaries
+        .iter()
+        .map(|s| s.repo_id.len())
+        .max()
+        .unwrap_or(0)
+        .max(48);
+
+    println!(
+        "  {:>3}  {:>10}  {:<repo_width$} {:>5}",
+        "#", "SIZE", "REPO", "FILES"
+    );
+
     let mut total_size: u64 = 0;
     let mut total_files: usize = 0;
+    let mut any_partial = false;
 
-    for s in &summaries {
+    for (i, s) in summaries.iter().enumerate() {
         total_size = total_size.saturating_add(s.total_size);
         total_files = total_files.saturating_add(s.file_count);
 
-        let partial_marker = if s.has_partial { "  PARTIAL" } else { "" };
+        let partial_marker = if s.has_partial {
+            any_partial = true;
+            "  \u{25cf}"
+        } else {
+            ""
+        };
         println!(
-            "  {:>10}  {:<48} ({} files){}",
+            "  {:>3}  {:>10}  {:<repo_width$} {:>5}{}",
+            i + 1,
             format_size(s.total_size),
             s.repo_id,
             s.file_count,
@@ -1467,13 +1535,18 @@ fn run_du() -> Result<(), FetchError> {
         );
     }
 
-    println!("  {}", "\u{2500}".repeat(50),);
+    // 3 (pad) + 2 + 3 (#) + 2 + 10 (SIZE) + 2 + repo_width + 2 + 5 (FILES) = repo_width + 29
+    let rule_width = repo_width + 29;
+    println!("  {}", "\u{2500}".repeat(rule_width));
     println!(
         "  {:>10}  total ({} repos, {} files)",
         format_size(total_size),
         summaries.len(),
         total_files,
     );
+    if any_partial {
+        println!("  \u{25cf} = partial downloads");
+    }
 
     Ok(())
 }
@@ -1490,19 +1563,37 @@ fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
         return Ok(());
     }
 
+    println!("  {repo_id}:\n");
+    println!("  {:>3}  {:>10}  FILE", "#", "SIZE");
+
     let mut total_size: u64 = 0;
 
-    for f in &files {
+    for (i, f) in files.iter().enumerate() {
         total_size = total_size.saturating_add(f.size);
-        println!("  {:>10}  {}", format_size(f.size), f.filename);
+        println!(
+            "  {:>3}  {:>10}  {}",
+            i + 1,
+            format_size(f.size),
+            f.filename
+        );
     }
 
-    println!("  {}", "\u{2500}".repeat(50),);
+    println!("  {}", "\u{2500}".repeat(66));
     println!(
         "  {:>10}  total ({} files)",
         format_size(total_size),
         files.len(),
     );
+
+    // Check if this repo has partial downloads and hint the user.
+    let summaries = cache::cache_summary()?;
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let has_partial = summaries
+        .iter()
+        .any(|s| s.repo_id.as_str() == repo_id && s.has_partial);
+    if has_partial {
+        println!("\n  \u{25cf} partial downloads — run `hf-fm status {repo_id}` for details");
+    }
 
     Ok(())
 }
@@ -2543,7 +2634,8 @@ fn format_size(bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * 1024 * 1024;
 
-    if bytes >= GIB {
+    // Use GiB for values >= 1000 MiB to keep output within 10 characters.
+    if bytes >= 1000 * MIB {
         // CAST: u64 → f64, precision loss acceptable; value is a display-only size scalar
         #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
         let val = bytes as f64 / GIB as f64;

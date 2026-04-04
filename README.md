@@ -35,7 +35,7 @@ cargo install hf-fetch-model --features cli
 | `hf-fm diff <REPO_A> <REPO_B>` | Compare tensor layouts between two models |
 | `hf-fm discover` | Find new model families on the Hub |
 | `hf-fm download-file <REPO_ID> <FILE>` | Download a single file (or glob pattern) |
-| `hf-fm du [REPO_ID]` | Show cache disk usage |
+| `hf-fm du [REPO_ID\|N]` | Show cache disk usage (by name or `#` index) |
 | `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) |
 | `hf-fm list-families` | List model families in local cache |
 | `hf-fm list-files <REPO_ID>` | List remote files (sizes, SHA256) without downloading |
@@ -159,7 +159,7 @@ Filter, progress, auth, and more via the builder — see [Configuration](docs/co
 
 ## Used by
 
-- [candle-mi](https://github.com/PCfVW/candle-mi) — Mechanistic interpretability toolkit for transformer models
+- [candle-mi](https://github.com/PCfVW/candle-mi) — Mechanistic interpretability toolkit for language models
 
 ## License
 

@@ -35,7 +35,7 @@ cargo install hf-fetch-model --features cli
 | `discover` | Find new model families on the Hub not yet cached locally |
 | `info <REPO_ID>` | Show model card metadata and README text |
 | `download-file <REPO_ID> <FILENAME>` | Download a single file (or glob pattern) and print its cache path |
-| `du [REPO_ID]` | Show cache disk usage — per-repo breakdown, or cache-wide summary |
+| `du [REPO_ID\|N]` | Show cache disk usage — per-repo breakdown (by name or `#` index), or cache-wide summary |
 | `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes); auto-detects PEFT adapter config |
 | `list-families` | List model families (`model_type`) in local cache |
 | `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
@@ -207,8 +207,11 @@ hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct
 ## Disk usage examples
 
 ```sh
-# Show all cached repos sorted by size
+# Show all cached repos sorted by size (numbered)
 hf-fm du
+
+# Drill into the 2nd largest repo by index
+hf-fm du 2
 
 # Show per-file breakdown for a specific repo
 hf-fm du google/gemma-2-2b-it
