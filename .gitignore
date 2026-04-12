@@ -25,5 +25,8 @@ stderr.txt
 # Dogfooding reports
 docs/dogfooding-feedbacks/
 
+# Local convention snapshots
+docs/conventions/
+
 # Claude Code
 CLAUDE.md
