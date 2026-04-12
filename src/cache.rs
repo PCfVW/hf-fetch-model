@@ -259,8 +259,10 @@ pub async fn repo_status(
         .as_deref()
         .map(|hash| repo_dir.join("snapshots").join(hash));
 
-    // Also check for .chunked.part files in blobs directory.
+    // Pre-check for .chunked.part files in blobs directory (avoids re-scanning
+    // the blobs directory for every missing file in the loop below).
     let blobs_dir = repo_dir.join("blobs");
+    let has_any_partial = has_partial_blob(&blobs_dir);
 
     // Cross-reference remote files against local state.
     let mut files: Vec<(String, FileStatus)> = Vec::with_capacity(remote_files.len());
@@ -285,8 +287,8 @@ pub async fn repo_status(
                 } else {
                     FileStatus::Complete { local_size }
                 }
-            } else if has_partial_blob(&blobs_dir) {
-                // Check blobs for .chunked.part temp files
+            } else if has_any_partial {
+                // Blobs directory has .chunked.part temp files
                 let part_size = find_partial_blob_size(&blobs_dir);
                 FileStatus::Partial {
                     local_size: part_size,
@@ -325,6 +327,10 @@ pub struct CachedModelSummary {
     pub total_size: u64,
     /// Whether there are incomplete `.chunked.part` temp files.
     pub has_partial: bool,
+    /// Most recent modification time among files in the snapshot directory.
+    ///
+    /// `None` if no files were found or all metadata reads failed.
+    pub last_modified: Option<std::time::SystemTime>,
 }
 
 /// Scans the entire HF cache and returns a summary for each cached model.
@@ -362,7 +368,7 @@ pub fn cache_summary() -> Result<Vec<CachedModelSummary>, FetchError> {
         let repo_dir = entry.path();
 
         // Count files and total size in snapshots.
-        let (file_count, total_size) = count_snapshot_files(&repo_dir);
+        let (file_count, total_size, last_modified) = count_snapshot_files(&repo_dir);
 
         // Check for partial downloads.
         let has_partial = find_partial_blob_size(&repo_dir.join("blobs")) > 0;
@@ -372,6 +378,7 @@ pub fn cache_summary() -> Result<Vec<CachedModelSummary>, FetchError> {
             file_count,
             total_size,
             has_partial,
+            last_modified,
         });
     }
 
@@ -380,15 +387,50 @@ pub fn cache_summary() -> Result<Vec<CachedModelSummary>, FetchError> {
     Ok(summaries)
 }
 
-/// Counts files and total size across all snapshot directories for a repo.
-fn count_snapshot_files(repo_dir: &Path) -> (usize, u64) {
+/// Returns the file count and total size for a single cached repo.
+///
+/// Avoids scanning the entire cache when only one repo's metrics are needed
+/// (e.g., for the `cache delete` preview).
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the cache directory cannot be determined.
+pub fn repo_disk_usage(repo_id: &str) -> Result<(usize, u64), FetchError> {
+    let cache_dir = hf_cache_dir()?;
+    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
+    // BORROW: explicit .as_str() for path construction
+    let repo_dir = cache_dir.join(repo_folder.as_str());
+    let (file_count, total_size, _) = count_snapshot_files(&repo_dir);
+    Ok((file_count, total_size))
+}
+
+/// Checks whether a single cached repo has `.chunked.part` temp files.
+///
+/// Avoids scanning the entire cache when only one repo's partial status
+/// is needed (e.g., for the `du <REPO>` partial-download hint).
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the cache directory cannot be determined.
+pub fn repo_has_partial(repo_id: &str) -> Result<bool, FetchError> {
+    let cache_dir = hf_cache_dir()?;
+    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
+    // BORROW: explicit .as_str() for path construction
+    let blobs_dir = cache_dir.join(repo_folder.as_str()).join("blobs");
+    Ok(find_partial_blob_size(&blobs_dir) > 0)
+}
+
+/// Counts files, total size, and most recent modification time across all
+/// snapshot directories for a repo.
+fn count_snapshot_files(repo_dir: &Path) -> (usize, u64, Option<std::time::SystemTime>) {
     let snapshots_dir = repo_dir.join("snapshots");
     let Ok(snapshots) = std::fs::read_dir(snapshots_dir) else {
-        return (0, 0);
+        return (0, 0, None);
     };
 
     let mut file_count: usize = 0;
     let mut total_size: u64 = 0;
+    let mut latest: Option<std::time::SystemTime> = None;
 
     for snap_entry in snapshots {
         let Ok(snap_entry) = snap_entry else { continue };
@@ -396,14 +438,20 @@ fn count_snapshot_files(repo_dir: &Path) -> (usize, u64) {
         if !snap_path.is_dir() {
             continue;
         }
-        count_files_recursive(&snap_path, &mut file_count, &mut total_size);
+        count_files_recursive(&snap_path, &mut file_count, &mut total_size, &mut latest);
     }
 
-    (file_count, total_size)
+    (file_count, total_size, latest)
 }
 
-/// Recursively counts files and accumulates sizes in a directory.
-fn count_files_recursive(dir: &Path, count: &mut usize, total: &mut u64) {
+/// Recursively counts files, accumulates sizes, and tracks the most recent
+/// modification time in a directory.
+fn count_files_recursive(
+    dir: &Path,
+    count: &mut usize,
+    total: &mut u64,
+    latest: &mut Option<std::time::SystemTime>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -412,10 +460,18 @@ fn count_files_recursive(dir: &Path, count: &mut usize, total: &mut u64) {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         if path.is_dir() {
-            count_files_recursive(&path, count, total);
+            count_files_recursive(&path, count, total, latest);
+        } else if let Ok(meta) = entry.metadata() {
+            *count += 1;
+            *total += meta.len();
+            if let Ok(modified) = meta.modified() {
+                match *latest {
+                    Some(current) if modified <= current => {} // EXPLICIT: current mtime is more recent, keep it
+                    _ => *latest = Some(modified),
+                }
+            }
         } else {
             *count += 1;
-            *total += entry.metadata().map(|m| m.len()).unwrap_or(0);
         }
     }
 }

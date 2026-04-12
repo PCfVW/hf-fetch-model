@@ -125,6 +125,8 @@ $ cd $(hf-fm cache path google/gemma-2-2b-it)
 
 **Implementation:** `hf_cache_dir()` + `repo_folder_name()` + `read_ref()` to resolve the snapshot path. Returns non-zero exit code if the repo is not cached.
 
+**Limitation:** resolves the `main` ref only. Repos downloaded at a non-default revision (e.g., `--revision some-branch`) are not resolved. A future `--revision` flag will address this.
+
 **Note:** `cache list` was considered as a separate command but dropped in favor of consolidating all cache visibility into `du` with progressive flags (`--age`, `--tree`). See the [du extensions roadmap](hf-fetch-model-du-extensions-roadmap.md) for details. One command to learn, fewer to remember.
 
 ---
@@ -195,14 +197,23 @@ Addresses immediate friction from dogfooding. Ships fast, no architectural chang
 
 Also shipped in v0.9.3 beyond the original plan: gated model pre-flight check, `du` cache path header, `candle_inspect` example, cache layout verification test. **Shipped.**
 
-### v0.9.4 — Scripting and visibility
+### v0.9.4 — Scripting and visibility ✓
 
 | Feature | Scope |
 |---------|-------|
 | `cache path` | Print snapshot directory path for scripting |
-| `du --age` | Add last-access timestamp column to `du` output (replaces the dropped `cache list`) |
+| `du --age` | Add last-modified age column to `du` output (replaces the dropped `cache list`) |
 
-Non-destructive, easy to implement. Gives users the visibility needed before running `gc` in v0.10.0.
+Also shipped in v0.9.4 beyond the original plan: `--tag` search flag, binary name fix, em-dash legend, `--exact` help text, search cross-references, algorithmic fixes (targeted cache scans, BTreeSet dedup, filter-before-clone, TiB formatting). **Shipped.**
+
+### v0.9.5 — Library hardening
+
+| Feature | Scope |
+|---------|-------|
+| Cache layout centralization | Extract all hf-hub cache path construction (`models--org--name`, `snapshots/`, `refs/`, `blobs/`) into a single `cache_layout.rs` module that delegates to `hf_hub::Repo::folder_name()`, `CacheRepo::pointer_path()`, etc. Replaces ~15 scattered `format!("models--{}", ...)` call sites across `chunked.rs`, `cache.rs`, `download.rs`, and `main.rs`. One file to audit when hf-hub bumps. |
+| Watch-based progress channel | Add a `tokio::sync::watch::Receiver<ProgressEvent>` API alongside the existing `Arc<dyn Fn>` callback. Async GUI/TUI consumers can `.changed().await` on the receiver instead of bridging the callback into a channel themselves. The existing callback API stays unchanged (backward compatible). |
+
+Internal release — no CLI changes, no new subcommands. Eliminates the two architectural weaknesses identified during v0.9.3 review (hf-hub layout coupling, callback-only progress API) and sets up clean foundations for v0.10.0 feature work.
 
 ### v0.10.0 — Cache maturity
 

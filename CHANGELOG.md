@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] — Search tags, cache path & du age
+
+### Added
+
+- **`--tag` search flag** — `hf-fm search llama --tag gguf` filters models by tag (maps to the HF API `filter` parameter and applies client-side validation). Useful for GGUF models which typically lack a `library_name` but carry the `gguf` tag. `SearchResult` now includes a `tags` field.
+- **`cache path <REPO_ID|N>`** — prints the snapshot directory path for a cached model. Output is a bare path for shell substitution: `cd $(hf-fm cache path google/gemma-2-2b-it)`. Accepts numeric index from `du` output. Currently resolves the `main` ref only.
+- **`du --age`** — adds a last-modified age column (e.g., `"2 days ago"`, `"3 months ago"`) to the `du` summary. Uses the most recent file modification time in the snapshot directory. Sort order remains by size.
+- **Em-dash legend in `list-files`** — when the SHA256 column shows `—` for non-LFS files, a footnote now explains: `— = not an LFS file (no SHA256 tracked by the Hub)`.
+- **`search --help` cross-references** — search help text now mentions `list-families` and `discover` as related commands via a "See also" line.
+
+### Changed
+
+- **`--exact` help text** — reworded from "Return only the exact model ID match" to "Match a full repository ID exactly and show its metadata card" for clarity.
+- **Binary name in usage line** — `--help` now shows `Usage: hf-fm [OPTIONS]` on all platforms (previously showed `hf-fm.exe` on Windows).
+- **`format_size` TiB tier** — values >= 1000 GiB now display as TiB (e.g., `"2.00 TiB"`) instead of a four-digit GiB value.
+- **`cache delete` targeted scan** — the deletion preview now scans only the target repo's snapshot directory instead of the entire cache, eliminating a full O(R) filesystem walk per delete.
+- **`du <REPO>` targeted partial check** — the partial-download hint now checks only the target repo's blobs directory instead of rescanning the entire cache.
+- **`repo_status` hoisted partial check** — partial-blob detection is now performed once before the per-file loop instead of re-scanning the blobs directory for every missing file.
+- **`search` pre-normalized model IDs** — model IDs are now normalized once before client-side filtering instead of re-allocating per result per filter term.
+- **`inspect --json --filter` filter-before-clone** — tensor filtering is now applied before cloning header metadata, avoiding O(T) clone-then-discard on large models.
+- **`diff` uses `BTreeSet`** — tensor name deduplication now uses `BTreeSet` (sorted on insert) instead of `HashSet` → `Vec` → `sort`, eliminating the intermediate allocation and hashing overhead.
+
+### Fixed
+
+- **`format_age` future timestamps** — clock skew or future file timestamps now display `—` instead of the misleading `"< 1 hour"`.
+- **`publish.yml` missing `--all-features` tests** — the publish workflow now runs `cargo test --all-features` (matching `ci.yml`), ensuring CLI-gated code is tested before crates.io release.
+- **v0.8.2 CHANGELOG inaccuracy** — corrected the candle-mi auto-update entry which falsely claimed `publish.yml` automated the version bump (the step was implemented then removed; the process is manual per `CLAUDE.md`).
+
 ## [0.9.3] — Cache management, gated model detection & du numbered indexing
 
 ### Added
@@ -78,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **CI: auto-update candle-mi after publish** — the `publish.yml` workflow now automatically bumps the `hf-fetch-model` version in candle-mi's `Cargo.toml` and pushes to main after every crates.io release.
+- **CI: candle-mi post-publish step removed** — the `publish.yml` workflow originally included an automatic candle-mi version bump, but it was removed as the manual process (documented in `CLAUDE.md`) proved more reliable.
 - **Download count formatting** — search results now display download counts with thousand separators (e.g., `1,234,567`) instead of abbreviated suffixes (`1.2M`).
 - **Docs: auto-tuning** — updated rustdoc, CLI reference, and configuration docs to reflect that `concurrency`, `chunk_threshold`, and `connections_per_file` are now auto-tuned by the download plan optimizer when not explicitly set.
 

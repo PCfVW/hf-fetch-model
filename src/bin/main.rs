@@ -4,7 +4,7 @@
 //!
 //! Installed as both `hf-fetch-model` and `hf-fm`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -30,6 +30,7 @@ use hf_fetch_model::{
 #[derive(Parser)]
 #[command(
     name = "hf-fetch-model",
+    bin_name = "hf-fm",
     version,
     about,
     before_help = concat!("hf-fetch-model v", env!("CARGO_PKG_VERSION"))
@@ -117,13 +118,14 @@ enum Commands {
     ///
     /// Supports comma-separated multi-term filtering (e.g., `"mistral,3B,12"`).
     /// Slashes in queries are treated as spaces for broader matching.
+    #[command(after_help = "See also: hf-fm list-families, hf-fm discover")]
     Search {
         /// Search query (e.g., `"RWKV-7"`, `"llama 3"`, `"mistral,3B,12"`).
         query: String,
         /// Maximum number of results.
         #[arg(long, default_value = "20")]
         limit: usize,
-        /// Return only the exact model ID match; show model card metadata if found.
+        /// Match a full repository ID exactly (e.g., `"org/model"`) and show its metadata card.
         #[arg(long)]
         exact: bool,
         /// Filter by library framework (e.g., `"transformers"`, `"peft"`, `"vllm"`).
@@ -132,6 +134,9 @@ enum Commands {
         /// Filter by pipeline task (e.g., `"text-generation"`, `"text-classification"`).
         #[arg(long)]
         pipeline: Option<String>,
+        /// Filter by model tag (e.g., `"gguf"`, `"conversational"`, `"imatrix"`).
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Show model card metadata and README text for a repository.
     Info {
@@ -240,6 +245,9 @@ enum Commands {
         /// Use a repo ID (e.g., `"google/gemma-2-2b-it"`) or a `#` index from the
         /// `du` summary to drill into a specific repo's files.
         repo_id: Option<String>,
+        /// Show a last-modified age column (e.g., `"2 days ago"`, `"3 months ago"`).
+        #[arg(long)]
+        age: bool,
     },
     /// Inspect `.safetensors` file headers (tensor names, shapes, dtypes).
     ///
@@ -326,6 +334,17 @@ enum CacheCommands {
         /// Skip confirmation prompt.
         #[arg(long)]
         yes: bool,
+    },
+    /// Print the snapshot directory path for a cached model.
+    ///
+    /// Output is a bare path (no labels), suitable for shell substitution:
+    /// `cd $(hf-fm cache path google/gemma-2-2b-it)`.
+    ///
+    /// Resolves the `main` ref only; repos downloaded at a non-default revision
+    /// are not yet supported (planned for a future `--revision` flag).
+    Path {
+        /// Repository identifier or numeric index from `du` output.
+        repo_id: String,
     },
 }
 
@@ -426,12 +445,14 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             exact,
             library,
             pipeline,
+            tag,
         }) => run_search(
             query.as_str(),
             limit,
             exact,
             library.as_deref(),
             pipeline.as_deref(),
+            tag.as_deref(),
         ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::Info {
@@ -500,12 +521,13 @@ fn run(cli: Cli) -> Result<(), FetchError> {
         // BORROW: explicit .as_str() for String → &str conversion
         Some(Commands::Du {
             repo_id: Some(repo_id),
+            age: _,
         }) => {
             // BORROW: explicit .as_str() instead of Deref coercion
             let resolved = resolve_du_arg(repo_id.as_str())?;
             run_du_repo(resolved.as_str())
         }
-        Some(Commands::Du { repo_id: None }) => run_du(),
+        Some(Commands::Du { repo_id: None, age }) => run_du(age),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::Inspect {
             repo_id,
@@ -561,6 +583,12 @@ fn run(cli: Cli) -> Result<(), FetchError> {
                 let resolved = resolve_du_arg(repo_id.as_str())?;
                 // BORROW: explicit .as_str() instead of Deref coercion
                 run_cache_delete(resolved.as_str(), yes)
+            }
+            // BORROW: explicit .as_str() for String → &str conversion
+            CacheCommands::Path { repo_id } => {
+                let resolved = resolve_du_arg(repo_id.as_str())?;
+                // BORROW: explicit .as_str() instead of Deref coercion
+                run_cache_path(resolved.as_str())
             }
         },
         None => run_download(cli.download),
@@ -1165,6 +1193,7 @@ fn run_search(
     exact: bool,
     library: Option<&str>,
     pipeline: Option<&str>,
+    tag: Option<&str>,
 ) -> Result<(), FetchError> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
         path: PathBuf::from("<runtime>"),
@@ -1196,7 +1225,8 @@ fn run_search(
 
     // Oversample when filtering: request more from API to compensate for
     // client-side filtering that will discard non-matching results.
-    let has_client_filter = filter_terms.len() > 1 || library.is_some() || pipeline.is_some();
+    let has_client_filter =
+        filter_terms.len() > 1 || library.is_some() || pipeline.is_some() || tag.is_some();
     let api_limit = if has_client_filter {
         limit.saturating_mul(5)
     } else {
@@ -1204,7 +1234,7 @@ fn run_search(
     };
 
     let results = rt.block_on(discover::search_models(
-        api_query, api_limit, library, pipeline,
+        api_query, api_limit, library, pipeline, tag,
     ))?;
 
     // Client-side filtering: only applied when there are multiple comma-separated
@@ -1212,17 +1242,32 @@ fn run_search(
     // Model IDs are normalized the same way as the query (slash → space) so that
     // mixed queries like "mistralai/3B,12" match "mistralai/Ministral-3-3B...".
     let has_multi_term = filter_terms.len() > 1;
+
+    // Pre-normalize model IDs once (avoids re-allocating per result per term).
+    let normalized_ids: Vec<String> = if has_multi_term {
+        results
+            .iter()
+            .map(|r| r.model_id.replace('/', " ").to_lowercase())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let filtered: Vec<&discover::SearchResult> = results
         .iter()
-        .filter(|r| {
+        .enumerate()
+        .filter(|(i, _)| {
             if !has_multi_term {
                 return true;
             }
-            let id_normalized = r.model_id.replace('/', " ").to_lowercase();
+            // INDEX: i is bounded by results.len() via enumerate()
+            #[allow(clippy::indexing_slicing)]
+            let id_normalized = &normalized_ids[*i];
             filter_terms
                 .iter()
                 .all(|term| id_normalized.contains(term.as_str())) // BORROW: explicit .as_str()
         })
+        .map(|(_, r)| r)
         .take(limit)
         .collect();
 
@@ -1535,7 +1580,7 @@ fn resolve_du_arg(arg: &str) -> Result<String, FetchError> {
 }
 
 /// Shows disk usage summary for all cached repos, sorted by size descending.
-fn run_du() -> Result<(), FetchError> {
+fn run_du(age: bool) -> Result<(), FetchError> {
     let cache_dir = cache::hf_cache_dir()?;
     println!("Cache: {}\n", cache_dir.display());
 
@@ -1556,10 +1601,17 @@ fn run_du() -> Result<(), FetchError> {
         .unwrap_or(0)
         .max(48);
 
-    println!(
-        "  {:>3}  {:>10}  {:<repo_width$} {:>5}",
-        "#", "SIZE", "REPO", "FILES"
-    );
+    if age {
+        println!(
+            "  {:>3}  {:>10}  {:<repo_width$} {:>5}  {:<15}",
+            "#", "SIZE", "REPO", "FILES", "AGE"
+        );
+    } else {
+        println!(
+            "  {:>3}  {:>10}  {:<repo_width$} {:>5}",
+            "#", "SIZE", "REPO", "FILES"
+        );
+    }
 
     let mut total_size: u64 = 0;
     let mut total_files: usize = 0;
@@ -1575,18 +1627,39 @@ fn run_du() -> Result<(), FetchError> {
         } else {
             ""
         };
-        println!(
-            "  {:>3}  {:>10}  {:<repo_width$} {:>5}{}",
-            i + 1,
-            format_size(s.total_size),
-            s.repo_id,
-            s.file_count,
-            partial_marker,
-        );
+
+        if age {
+            let age_str = s
+                .last_modified
+                .map_or_else(|| "\u{2014}".to_owned(), format_age);
+            println!(
+                "  {:>3}  {:>10}  {:<repo_width$} {:>5}  {:<15}{}",
+                i + 1,
+                format_size(s.total_size),
+                s.repo_id,
+                s.file_count,
+                age_str,
+                partial_marker,
+            );
+        } else {
+            println!(
+                "  {:>3}  {:>10}  {:<repo_width$} {:>5}{}",
+                i + 1,
+                format_size(s.total_size),
+                s.repo_id,
+                s.file_count,
+                partial_marker,
+            );
+        }
     }
 
     // 3 (pad) + 2 + 3 (#) + 2 + 10 (SIZE) + 2 + repo_width + 2 + 5 (FILES) = repo_width + 29
-    let rule_width = repo_width + 29;
+    // When --age is active, add 2 (gap) + 15 (AGE column) = 17 extra.
+    let rule_width = if age {
+        repo_width + 46
+    } else {
+        repo_width + 29
+    };
     println!("  {}", "\u{2500}".repeat(rule_width));
     println!(
         "  {:>10}  total ({} repos, {} files)",
@@ -1635,13 +1708,9 @@ fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
         files.len(),
     );
 
-    // Check if this repo has partial downloads and hint the user.
-    let summaries = cache::cache_summary()?;
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let has_partial = summaries
-        .iter()
-        .any(|s| s.repo_id.as_str() == repo_id && s.has_partial);
-    if has_partial {
+    // Check if this repo has partial downloads and hint the user
+    // (targeted scan, not full cache).
+    if cache::repo_has_partial(repo_id)? {
         println!("\n  \u{25cf} partial downloads — run `hf-fm status {repo_id}` for details");
     }
 
@@ -1743,15 +1812,8 @@ fn run_cache_delete(repo_id: &str, yes: bool) -> Result<(), FetchError> {
         )));
     }
 
-    // Get size and file count for the preview.
-    let summaries = cache::cache_summary()?;
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let summary = summaries.iter().find(|s| s.repo_id.as_str() == repo_id);
-
-    let (size, file_count) = match summary {
-        Some(s) => (s.total_size, s.file_count),
-        None => (0, 0),
-    };
+    // Get size and file count for the preview (targeted scan, not full cache).
+    let (file_count, size) = cache::repo_disk_usage(repo_id)?;
 
     println!("  {repo_id}  ({}, {} files)", format_size(size), file_count);
 
@@ -1767,6 +1829,41 @@ fn run_cache_delete(repo_id: &str, yes: bool) -> Result<(), FetchError> {
     })?;
 
     println!("  Deleted. Freed {}.", format_size(size));
+    Ok(())
+}
+
+/// Prints the snapshot directory path for a cached model.
+///
+/// Resolves the `main` ref to a commit hash and constructs the snapshot
+/// path. Output is a bare path with no decoration, intended for shell
+/// substitution: `cd $(hf-fm cache path org/model)`.
+fn run_cache_path(repo_id: &str) -> Result<(), FetchError> {
+    let cache_dir = cache::hf_cache_dir()?;
+    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let repo_dir = cache_dir.join(repo_folder.as_str());
+
+    if !repo_dir.exists() {
+        return Err(FetchError::InvalidArgument(format!(
+            "{repo_id} is not cached"
+        )));
+    }
+
+    let commit_hash = cache::read_ref(&repo_dir, "main").ok_or_else(|| {
+        FetchError::InvalidArgument(format!("{repo_id} is cached but has no ref for \"main\""))
+    })?;
+
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let snapshot_dir = repo_dir.join("snapshots").join(commit_hash.as_str());
+
+    if !snapshot_dir.exists() {
+        return Err(FetchError::InvalidArgument(format!(
+            "snapshot directory for {repo_id} does not exist"
+        )));
+    }
+
+    // Print bare path (no labels) for shell substitution.
+    println!("{}", snapshot_dir.display());
     Ok(())
 }
 
@@ -1851,16 +1948,15 @@ fn run_diff(
         return Ok(());
     }
 
-    // Collect all tensor names from both repos.
+    // Collect all tensor names from both repos (BTreeSet deduplicates and sorts).
     let mut all_names: Vec<&str> = tensors_a
         .keys()
         .chain(tensors_b.keys())
         // BORROW: explicit .as_str() instead of Deref coercion
         .map(String::as_str)
-        .collect::<HashSet<&str>>()
+        .collect::<BTreeSet<&str>>()
         .into_iter()
         .collect();
-    all_names.sort_unstable();
 
     // Apply filter.
     if let Some(pattern) = filter {
@@ -2450,19 +2546,29 @@ fn print_multi_file_json(
     filter: Option<&str>,
 ) -> Result<(), FetchError> {
     if let Some(pattern) = filter {
-        // Filter tensors in each file before serializing.
+        // Filter tensors before cloning to avoid O(T) clone-then-discard.
         let filtered: Vec<(String, inspect::SafetensorsHeaderInfo)> = results
             .iter()
-            .map(|(name, info)| {
-                let mut filtered_info = info.clone();
-                // BORROW: explicit .as_str() instead of Deref coercion
-                filtered_info
+            .filter_map(|(name, info)| {
+                let matching: Vec<inspect::TensorInfo> = info
                     .tensors
-                    .retain(|t| t.name.as_str().contains(pattern));
-                // BORROW: explicit .clone() for owned String
-                (name.clone(), filtered_info)
+                    .iter()
+                    .filter(|t| t.name.as_str().contains(pattern)) // BORROW: explicit .as_str()
+                    .cloned()
+                    .collect();
+                if matching.is_empty() {
+                    return None;
+                }
+                Some((
+                    name.clone(), // BORROW: explicit .clone() for owned String
+                    inspect::SafetensorsHeaderInfo {
+                        tensors: matching,
+                        metadata: info.metadata.clone(),
+                        header_size: info.header_size,
+                        file_size: info.file_size,
+                    },
+                ))
             })
-            .filter(|(_, info)| !info.tensors.is_empty())
             .collect();
         let output = serde_json::to_string_pretty(&filtered)
             .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
@@ -2759,6 +2865,7 @@ fn run_list_files(
     // Print each file row.
     let mut total_bytes: u64 = 0;
     let mut cached_count: usize = 0;
+    let mut any_no_sha = false;
 
     for (i, f) in filtered.iter().enumerate() {
         let size = f.size.unwrap_or(0);
@@ -2767,12 +2874,11 @@ fn run_list_files(
         let size_str = format_size(size);
         let sha_str = if no_checksum {
             String::new()
+        } else if let Some(hash) = f.sha256.as_deref().and_then(|s| s.get(..12)) {
+            hash.to_owned() // BORROW: &str → String for column display
         } else {
-            f.sha256
-                .as_deref()
-                .and_then(|s| s.get(..12))
-                .unwrap_or("\u{2014}")
-                .to_owned()
+            any_no_sha = true;
+            "\u{2014}".to_owned()
         };
 
         if show_cached {
@@ -2806,6 +2912,9 @@ fn run_list_files(
     } else {
         println!("  {count} files, {} total", format_size(total_bytes));
     }
+    if any_no_sha && !no_checksum {
+        println!("  \u{2014} = not an LFS file (no SHA256 tracked by the Hub)");
+    }
 
     Ok(())
 }
@@ -2815,9 +2924,15 @@ fn format_size(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * 1024 * 1024;
+    const TIB: u64 = 1024 * GIB;
 
-    // Use GiB for values >= 1000 MiB to keep output within 10 characters.
-    if bytes >= 1000 * MIB {
+    // Use TiB for values >= 1000 GiB, GiB for >= 1000 MiB.
+    if bytes >= 1000 * GIB {
+        // CAST: u64 → f64, precision loss acceptable; value is a display-only size scalar
+        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+        let val = bytes as f64 / TIB as f64;
+        format!("{val:.2} TiB")
+    } else if bytes >= 1000 * MIB {
         // CAST: u64 → f64, precision loss acceptable; value is a display-only size scalar
         #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
         let val = bytes as f64 / GIB as f64;
@@ -2834,6 +2949,56 @@ fn format_size(bytes: u64) -> String {
         format!("{val:.1} KiB")
     } else {
         format!("{bytes} B")
+    }
+}
+
+/// Formats a [`SystemTime`] as a human-readable relative age string.
+///
+/// Buckets: `"< 1 hour"`, `"N hours ago"`, `"N days ago"`,
+/// `"N months ago"`, `"N years ago"`.
+///
+/// [`SystemTime`]: std::time::SystemTime
+fn format_age(time: std::time::SystemTime) -> String {
+    const HOUR: u64 = 3600;
+    const DAY: u64 = 86_400;
+    const MONTH: u64 = 30 * DAY;
+    const YEAR: u64 = 365 * DAY;
+
+    let Ok(elapsed) = time.elapsed() else {
+        return "\u{2014}".to_owned(); // clock skew or future timestamp
+    };
+    let secs = elapsed.as_secs();
+
+    if secs < HOUR {
+        "< 1 hour".to_owned()
+    } else if secs < DAY {
+        let hours = secs / HOUR;
+        if hours == 1 {
+            "1 hour ago".to_owned()
+        } else {
+            format!("{hours} hours ago")
+        }
+    } else if secs < MONTH {
+        let days = secs / DAY;
+        if days == 1 {
+            "1 day ago".to_owned()
+        } else {
+            format!("{days} days ago")
+        }
+    } else if secs < YEAR {
+        let months = secs / MONTH;
+        if months == 1 {
+            "1 month ago".to_owned()
+        } else {
+            format!("{months} months ago")
+        }
+    } else {
+        let years = secs / YEAR;
+        if years == 1 {
+            "1 year ago".to_owned()
+        } else {
+            format!("{years} years ago")
+        }
     }
 }
 

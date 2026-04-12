@@ -23,6 +23,8 @@ pub struct SearchResult {
     pub library_name: Option<String>,
     /// Pipeline task tag (e.g., `"text-generation"`), if reported.
     pub pipeline_tag: Option<String>,
+    /// Tags from the model's metadata (e.g., `["gguf", "conversational"]`).
+    pub tags: Vec<String>,
 }
 
 /// A model family discovered from the `HuggingFace` Hub.
@@ -49,6 +51,8 @@ struct ApiModelEntry {
     library_name: Option<String>,
     #[serde(default)]
     pipeline_tag: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 /// The `config` object embedded in a model API response.
@@ -269,9 +273,10 @@ fn normalize_quantization_terms(query: &str) -> String {
 
 /// Searches the `HuggingFace` Hub for models matching a query string.
 ///
-/// Optionally filters by `library` framework (e.g., `"transformers"`, `"peft"`)
-/// and/or `pipeline` task tag (e.g., `"text-generation"`). These filters are
-/// applied server-side by the `HuggingFace` API.
+/// Optionally filters by `library` framework (e.g., `"transformers"`, `"peft"`),
+/// `pipeline` task tag (e.g., `"text-generation"`), and/or `tag` (e.g., `"gguf"`).
+/// Library and pipeline filters are sent as query parameters; tag is sent via the
+/// `filter` parameter. All three are also applied client-side for correctness.
 ///
 /// Common quantization synonyms (`"8bit"` / `"8-bit"` / `"int8"`,
 /// `"4bit"` / `"4-bit"` / `"int4"`, `"fp8"` / `"float8"`) are normalized
@@ -285,6 +290,7 @@ fn normalize_quantization_terms(query: &str) -> String {
 /// * `limit` — Maximum number of results to return.
 /// * `library` — Optional library filter (e.g., `"peft"`, `"transformers"`).
 /// * `pipeline` — Optional pipeline tag filter (e.g., `"text-generation"`).
+/// * `tag` — Optional tag filter (e.g., `"gguf"`, `"conversational"`).
 ///
 /// # Errors
 ///
@@ -294,6 +300,7 @@ pub async fn search_models(
     limit: usize,
     library: Option<&str>,
     pipeline: Option<&str>,
+    tag: Option<&str>,
 ) -> Result<Vec<SearchResult>, FetchError> {
     let normalized = normalize_quantization_terms(query);
     let client = reqwest::Client::new();
@@ -309,6 +316,9 @@ pub async fn search_models(
     }
     if let Some(pipe) = pipeline {
         query_params.push(("pipeline_tag", pipe));
+    }
+    if let Some(t) = tag {
+        query_params.push(("filter", t));
     }
 
     let response = client
@@ -331,7 +341,7 @@ pub async fn search_models(
         .await
         .map_err(|e| FetchError::Http(e.to_string()))?;
 
-    // Client-side filtering: the HF search API may ignore library/pipeline_tag
+    // Client-side filtering: the HF search API may ignore library/pipeline_tag/filter
     // query parameters when combined with the `search` parameter, so we filter
     // the results ourselves to guarantee correctness.
     let results = models
@@ -347,8 +357,16 @@ pub async fn search_models(
             if let Some(pipe) = pipeline {
                 match m.pipeline_tag {
                     // BORROW: explicit .as_str() instead of Deref coercion
-                    Some(ref tag) if tag.as_str().eq_ignore_ascii_case(pipe) => {}
+                    Some(ref t) if t.as_str().eq_ignore_ascii_case(pipe) => {}
                     _ => return false,
+                }
+            }
+            if let Some(t) = tag {
+                if !m.tags.iter().any(|model_tag| {
+                    // BORROW: explicit .as_str() instead of Deref coercion
+                    model_tag.as_str().eq_ignore_ascii_case(t)
+                }) {
+                    return false;
                 }
             }
             true
@@ -358,6 +376,7 @@ pub async fn search_models(
             downloads: m.downloads,
             library_name: m.library_name,
             pipeline_tag: m.pipeline_tag,
+            tags: m.tags,
         })
         .collect();
 

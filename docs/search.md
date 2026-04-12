@@ -86,6 +86,23 @@ Common `--pipeline` values: `text-generation`, `image-text-to-text`, `sentence-s
 
 For the full list, see the [HuggingFace tasks page](https://huggingface.co/tasks).
 
+## Tag filtering
+
+Use `--tag` to filter by model tags. This is especially useful for GGUF models, which often lack a `library_name` field but carry the `gguf` tag:
+
+```
+$ hf-fm search llama --tag gguf --limit 3
+Models matching "llama" (by downloads):
+
+  hf-fm bartowski/Llama-3.2-3B-Instruct-GGUF             (489,856 downloads)  [text-generation]
+  hf-fm bartowski/Meta-Llama-3.1-8B-Instruct-GGUF        (237,791 downloads)  [text-generation]
+  hf-fm MaziyarPanahi/Meta-Llama-3.1-8B-Instruct-GGUF    (184,847 downloads)  [text-generation]
+```
+
+The `--tag` flag maps to the HF API `filter` parameter and is also validated client-side (case-insensitive).
+
+Common tags: `gguf`, `safetensors`, `conversational`, `imatrix`, `text-generation-inference`.
+
 ## Exact match (`--exact`)
 
 Use `--exact` to match a single model by its full ID. When found, the model card metadata is fetched and displayed:
@@ -156,14 +173,15 @@ The search functionality is also available as a library:
 use hf_fetch_model::discover;
 
 // Search
-let results = discover::search_models("llama 3", 20, None, None).await?;
+let results = discover::search_models("llama 3", 20, None, None, None).await?;
 for r in &results {
     println!("{} ({:?}, {:?})", r.model_id, r.library_name, r.pipeline_tag);
 }
 
 // Search with library/pipeline filters (client-side)
-let peft_results = discover::search_models("llama", 20, Some("peft"), None).await?;
-let gen_results = discover::search_models("mistral", 10, None, Some("text-generation")).await?;
+let peft_results = discover::search_models("llama", 20, Some("peft"), None, None).await?;
+let gen_results = discover::search_models("mistral", 10, None, Some("text-generation"), None).await?;
+let gguf_results = discover::search_models("llama", 20, None, None, Some("gguf")).await?;
 
 // Fetch model card
 let card = discover::fetch_model_card("meta-llama/Llama-3.2-1B-Instruct").await?;

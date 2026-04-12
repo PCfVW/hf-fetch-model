@@ -38,6 +38,7 @@ cargo install hf-fetch-model --features cli
 | `hf-fm du [REPO_ID\|N]` | Show cache disk usage (by name or `#` index) |
 | `hf-fm cache clean-partial` | Remove `.chunked.part` files from interrupted downloads |
 | `hf-fm cache delete <REPO_ID\|N>` | Delete a cached model |
+| `hf-fm cache path <REPO_ID\|N>` | Print snapshot directory path (for scripting) |
 | `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) |
 | `hf-fm list-families` | List model families in local cache |
 | `hf-fm list-files <REPO_ID>` | List remote files (sizes, SHA256) without downloading |
@@ -56,6 +57,13 @@ Models matching "mistral,3B,instruct" (by downloads):
   hf-fm mistralai/Ministral-3-3B-Instruct-2512-BF16      (62,600 downloads)
   hf-fm mistralai/Ministral-3-3B-Instruct-2512-GGUF      (32,700 downloads)
   ...
+
+$ hf-fm search llama --tag gguf --limit 3
+Models matching "llama" (by downloads):
+
+  hf-fm bartowski/Llama-3.2-3B-Instruct-GGUF             (489,856 downloads)  [text-generation]
+  hf-fm bartowski/Meta-Llama-3.1-8B-Instruct-GGUF        (237,791 downloads)  [text-generation]
+  hf-fm MaziyarPanahi/Meta-Llama-3.1-8B-Instruct-GGUF    (184,847 downloads)  [text-generation]
 
 $ hf-fm search mistralai/Ministral-3-3B-Instruct-2512 --exact
 Exact match:
@@ -148,6 +156,18 @@ $ hf-fm du 2
    2.80 GiB  total (12 files)
 
   ● partial downloads — run `hf-fm status EleutherAI/pythia-1.4b` for details
+
+$ hf-fm du --age
+   #        SIZE  REPO                                             FILES  AGE
+   1    5.10 GiB  google/gemma-2-2b-it                                 8  2 days ago
+   2    2.80 GiB  EleutherAI/pythia-1.4b                              12  45 days ago     ●
+   3    1.20 GiB  google/gemma-scope-2b-pt-res                         3  3 months ago
+  ─────────────────────────────────────────────────────────────────────────────────────────
+   9.10 GiB  total (3 repos, 23 files)
+  ● = partial downloads
+
+$ hf-fm cache path google/gemma-2-2b-it
+/home/user/.cache/huggingface/hub/models--google--gemma-2-2b-it/snapshots/abc1234
 ```
 
 ## Library quick start

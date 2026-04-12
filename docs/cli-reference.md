@@ -17,7 +17,11 @@ cargo install hf-fetch-model --features cli
 - [Inspect examples](#inspect-examples)
 - [Diff examples](#diff-examples)
 - [Disk usage examples](#disk-usage-examples)
+- [Du flags](#du-flags)
 - [Other commands](#other-commands)
+- [Cache commands](#cache-commands)
+- [Cache clean-partial flags](#cache-clean-partial-flags)
+- [Cache delete flags](#cache-delete-flags)
 - [Diff flags](#diff-flags)
 - [Download flags](#download-flags)
 - [Info flags](#info-flags)
@@ -38,6 +42,7 @@ cargo install hf-fetch-model --features cli
 | `du [REPO_ID\|N]` | Show cache disk usage — per-repo breakdown (by name or `#` index), or cache-wide summary |
 | `cache clean-partial [REPO_ID\|N]` | Remove `.chunked.part` files from interrupted downloads |
 | `cache delete <REPO_ID\|N>` | Delete a cached model (entire `models--org--name/` directory) |
+| `cache path <REPO_ID\|N>` | Print the snapshot directory path for scripting |
 | `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes); auto-detects PEFT adapter config |
 | `list-families` | List model families (`model_type`) in local cache |
 | `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
@@ -145,6 +150,9 @@ hf-fm search llama --library peft
 
 # Filter by pipeline task
 hf-fm search mistral --pipeline text-generation
+
+# Filter by tag (useful for GGUF models without a library_name)
+hf-fm search llama --tag gguf
 ```
 
 Common quantization synonyms are normalized automatically: `8bit`, `8-bit`, `int8`, and `INT8` all produce the same results. Same for `4bit`/`4-bit`/`int4` and `fp8`/`float8`.
@@ -217,7 +225,16 @@ hf-fm du 2
 
 # Show per-file breakdown for a specific repo
 hf-fm du google/gemma-2-2b-it
+
+# Show last-modified age column
+hf-fm du --age
 ```
+
+## Du flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--age` | Show a last-modified age column (e.g., `2 days ago`, `3 months ago`) | off |
 
 ## Other commands
 
@@ -274,6 +291,17 @@ hf-fm cache delete 3 --yes
 |------|-------------|---------|
 | `--yes` | Skip confirmation prompt | off |
 
+```sh
+# Print snapshot path for shell substitution
+hf-fm cache path google/gemma-2-2b-it
+
+# By numeric index from du output
+hf-fm cache path 2
+
+# Use in shell scripts
+cd $(hf-fm cache path google/gemma-2-2b-it)
+```
+
 ## Diff flags
 
 | Flag | Description | Default |
@@ -321,10 +349,11 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--exact` | Return only the exact model ID match; show model card metadata | off |
+| `--exact` | Match a full repository ID exactly and show its metadata card | off |
 | `--library` | Filter by library framework (e.g., `transformers`, `peft`, `vllm`) | — |
 | `--limit` | Maximum number of results | 20 |
 | `--pipeline` | Filter by pipeline task (e.g., `text-generation`, `text-classification`) | — |
+| `--tag` | Filter by model tag (e.g., `gguf`, `conversational`, `imatrix`) | — |
 
 ## Info flags
 
