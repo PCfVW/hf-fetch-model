@@ -35,6 +35,9 @@ jobs:
       - name: Tests
         run: cargo test
 
+      - name: Tests (all features)
+        run: cargo test --all-features
+
       - name: Doc check
         run: cargo doc --all-features --no-deps
         env:
