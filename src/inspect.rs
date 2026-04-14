@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use tokio::task::JoinSet;
 
 use crate::cache;
 use crate::chunked;
@@ -536,7 +537,7 @@ pub async fn inspect_repo_safetensors(
     }
 
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
-    let mut handles = Vec::new();
+    let mut join_set = JoinSet::new();
 
     for filename in safetensors_files {
         // BORROW: explicit .clone()/.to_owned() to move into async task
@@ -545,7 +546,7 @@ pub async fn inspect_repo_safetensors(
         let tok = token.map(str::to_owned);
         let rev = revision.map(str::to_owned);
 
-        handles.push(tokio::spawn(async move {
+        join_set.spawn(async move {
             let _permit = sem
                 .acquire()
                 .await
@@ -554,15 +555,22 @@ pub async fn inspect_repo_safetensors(
             let (info, source) =
                 inspect_safetensors(&repo, &filename, tok.as_deref(), rev.as_deref()).await?;
             Ok::<_, FetchError>((filename, info, source))
-        }));
+        });
     }
 
     let mut results = Vec::new();
-    for handle in handles {
-        let result = handle
-            .await
-            .map_err(|e| FetchError::Http(format!("task join error: {e}")))?;
-        results.push(result?);
+    while let Some(join_result) = join_set.join_next().await {
+        match join_result {
+            Ok(Ok(item)) => results.push(item),
+            Ok(Err(e)) => {
+                join_set.abort_all();
+                return Err(e);
+            }
+            Err(e) => {
+                join_set.abort_all();
+                return Err(FetchError::Http(format!("task join error: {e}")));
+            }
+        }
     }
 
     results.sort_by(|a, b| a.0.cmp(&b.0));

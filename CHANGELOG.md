@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **`parse_header_json` zero-clone iteration** — the safetensors header parser now consumes the intermediate `HashMap` via `into_iter()` instead of borrowing it, eliminating per-tensor `value.clone()` and `key.clone()` allocations.
+- **`inspect_repo_safetensors` cancellation on failure** — replaced `Vec<JoinHandle>` with `JoinSet` and `abort_all()` on first error, preventing detached tasks from continuing HTTP requests after the function has already returned an error.
 
 ## [0.9.4] — Search tags, cache path & du age
 
