@@ -313,6 +313,7 @@ pub(crate) async fn download_chunked(
     let mut temp_guard = TempFileGuard::new(temp_path.clone());
 
     // Compute chunk boundaries.
+    // EXPLICIT: try_from for usize → u64 (infallible on 64-bit, safe fallback otherwise)
     let chunk_size = total_size / u64::try_from(connections).unwrap_or(1);
     let chunks: Vec<(usize, u64, u64)> = (0..connections)
         .map(|i| {

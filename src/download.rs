@@ -852,7 +852,7 @@ fn validate_download_results(
         return Err(FetchError::PartialDownload { path, failures });
     }
     if file_map.is_empty() {
-        // BORROW: explicit .clone() for owned String
+        // BORROW: explicit .to_owned() for &str → owned String
         return Err(FetchError::NoFilesMatched {
             repo_id: repo_id.to_owned(),
         });
