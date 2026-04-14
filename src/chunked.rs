@@ -527,7 +527,7 @@ async fn download_chunk(
     total_size: u64,
     files_remaining: usize,
 ) -> Result<(), FetchError> {
-    // BORROW: explicit .clone() for owned values in retry closure
+    // BORROW: explicit .clone()/.to_owned() for owned values in retry closure
     let url_owned = url.clone();
     let temp_owned = temp_path.clone();
     let filename_owned = filename.to_owned();

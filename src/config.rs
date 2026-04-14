@@ -160,6 +160,7 @@ impl FetchConfigBuilder {
     /// Defaults to `"main"` if not set.
     #[must_use]
     pub fn revision(mut self, revision: &str) -> Self {
+        // BORROW: explicit .to_owned() for &str → owned String
         self.revision = Some(revision.to_owned());
         self
     }
@@ -167,6 +168,7 @@ impl FetchConfigBuilder {
     /// Sets the authentication token.
     #[must_use]
     pub fn token(mut self, token: &str) -> Self {
+        // BORROW: explicit .to_owned() for &str → owned String
         self.token = Some(token.to_owned());
         self
     }
@@ -184,6 +186,7 @@ impl FetchConfigBuilder {
     /// Can be called multiple times to add multiple patterns.
     #[must_use]
     pub fn filter(mut self, pattern: &str) -> Self {
+        // BORROW: explicit .to_owned() for &str → owned String
         self.include_patterns.push(pattern.to_owned());
         self
     }
@@ -194,6 +197,7 @@ impl FetchConfigBuilder {
     /// Can be called multiple times to add multiple patterns.
     #[must_use]
     pub fn exclude(mut self, pattern: &str) -> Self {
+        // BORROW: explicit .to_owned() for &str → owned String
         self.exclude_patterns.push(pattern.to_owned());
         self
     }

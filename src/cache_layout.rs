@@ -65,6 +65,7 @@ pub fn blob_path(repo_dir: &Path, etag: &str) -> PathBuf {
 /// not `"abc.chunked.part"`).
 #[must_use]
 pub fn temp_blob_path(repo_dir: &Path, etag: &str) -> PathBuf {
+    // BORROW: explicit .to_owned() for &str → owned String for path concatenation
     let mut name = etag.to_owned();
     name.push_str(".chunked.part");
     blobs_dir(repo_dir).join(name)
