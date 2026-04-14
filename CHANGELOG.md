@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`parse_header_json` zero-clone iteration** — the safetensors header parser now consumes the intermediate `HashMap` via `into_iter()` instead of borrowing it, eliminating per-tensor `value.clone()` and `key.clone()` allocations.
 - **`inspect_repo_safetensors` cancellation on failure** — replaced `Vec<JoinHandle>` with `JoinSet` and `abort_all()` on first error, preventing detached tasks from continuing HTTP requests after the function has already returned an error.
+- **`check_disk_space` no longer walks the entire cache** — removed the `cache_summary()` call that scanned every cached model directory on the Tokio thread before every download. The disk space display now shows download size, available space, and projected remaining space — matching the Python `huggingface_hub` approach. Eliminates a multi-second blocking stall on large caches.
 
 ## [0.9.4] — Search tags, cache path & du age
 

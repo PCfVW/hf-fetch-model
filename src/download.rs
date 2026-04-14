@@ -912,11 +912,10 @@ fn log_download_result(
 // Utility helpers
 // ---------------------------------------------------------------------------
 
-/// Checks available disk space and prints a cache size summary before download.
+/// Checks available disk space before download.
 ///
-/// Shows current cache size, projected size after download, and available
-/// disk space. Warns if space is tight (less than 10% margin) or
-/// insufficient.
+/// Shows download size, available space, and projected remaining space.
+/// Warns if space is tight (less than 10% margin) or insufficient.
 fn check_disk_space(
     cache_dir: &std::path::Path,
     files: &[RepoFile],
@@ -954,15 +953,6 @@ fn check_disk_space(
         }
     };
 
-    // Compute current cache size (lightweight, local-only scan).
-    let current_cache = crate::cache::cache_summary().ok().map_or(0, |summaries| {
-        summaries
-            .iter()
-            .map(|s| s.total_size)
-            .fold(0u64, u64::saturating_add)
-    });
-
-    let projected_cache = current_cache.saturating_add(download_bytes);
     let after_available = available.saturating_sub(download_bytes);
 
     // CAST: u64 → f64, precision loss acceptable; display-only size scalars
@@ -974,24 +964,16 @@ fn check_disk_space(
 
     if available < download_bytes {
         eprintln!(
-            "warning: insufficient disk space \u{2014} download needs {}, only {} available \
-             (cache: {})",
+            "warning: insufficient disk space \u{2014} download needs {}, only {} available",
             fmt_gib(download_bytes),
             fmt_gib(available),
-            fmt_gib(current_cache),
         );
-        tracing::warn!(
-            download_bytes,
-            available,
-            current_cache,
-            "insufficient disk space"
-        );
+        tracing::warn!(download_bytes, available, "insufficient disk space");
     } else {
         eprintln!(
-            "  Disk: cache {} \u{2192} {} after download ({} to fetch, {} available)",
-            fmt_gib(current_cache),
-            fmt_gib(projected_cache),
+            "  Disk: {} to fetch, {} available ({} after download)",
             fmt_gib(download_bytes),
+            fmt_gib(available),
             fmt_gib(after_available),
         );
 
