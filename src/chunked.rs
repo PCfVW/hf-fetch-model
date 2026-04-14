@@ -818,7 +818,15 @@ fn symlink_or_copy(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     }
 
     #[cfg(target_family = "unix")]
-    std::os::unix::fs::symlink(rel_src, dst)?;
+    {
+        // Tolerate EEXIST: a concurrent downloader may have created the symlink
+        // between the dst.exists() check above and this call (TOCTOU race).
+        if let Err(e) = std::os::unix::fs::symlink(rel_src, dst) {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(e);
+            }
+        }
+    }
 
     Ok(())
 }
