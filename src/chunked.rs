@@ -77,6 +77,7 @@ pub(crate) fn build_no_redirect_client(token: Option<&str>) -> Result<Client, Fe
     );
     if let Some(tok) = token {
         let auth_value = format!("Bearer {tok}");
+        // BORROW: explicit .as_str() for String → &str conversion
         let header_val = reqwest::header::HeaderValue::from_str(auth_value.as_str())
             .map_err(|e| FetchError::Http(e.to_string()))?;
         headers.insert(reqwest::header::AUTHORIZATION, header_val);
