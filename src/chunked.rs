@@ -426,8 +426,8 @@ async fn finalize_chunked_download(
             source: e,
         })?;
 
-    // Create pointer symlink (or rename on Windows).
-    symlink_or_rename(blob_path, pointer_path).map_err(|e| FetchError::Io {
+    // Create pointer symlink (or copy on Windows).
+    symlink_or_copy(blob_path, pointer_path).map_err(|e| FetchError::Io {
         path: pointer_path.to_path_buf(),
         source: e,
     })?;
@@ -742,10 +742,15 @@ fn make_relative(src: &Path, dst: &Path) -> PathBuf {
     rel
 }
 
-/// Creates a symlink from `dst` pointing to `src`, or falls back to rename on Windows.
+/// Creates a symlink from `dst` pointing to `src`, or falls back to copy on Windows.
 ///
-/// Mirrors `hf-hub`'s `symlink_or_rename()`.
-fn symlink_or_rename(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
+/// On Windows, if symlink creation fails (e.g., `SeCreateSymbolicLinkPrivilege` is
+/// missing), the blob is **copied** rather than moved. This preserves the blob in
+/// `blobs/<etag>` for cross-revision deduplication.
+///
+/// Diverges from `hf-hub`'s `symlink_or_rename()` which uses `rename` and destroys
+/// the blob — see Finding 2 of the v0.9.5 security audit.
+fn symlink_or_copy(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     if dst.exists() {
         return Ok(());
     }
@@ -755,7 +760,8 @@ fn symlink_or_rename(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     #[cfg(target_os = "windows")]
     {
         if std::os::windows::fs::symlink_file(&rel_src, dst).is_err() {
-            std::fs::rename(src, dst)?;
+            // Copy rather than rename to preserve the blob for cross-revision deduplication.
+            std::fs::copy(src, dst)?;
         }
     }
 
