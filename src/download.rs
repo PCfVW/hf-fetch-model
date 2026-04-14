@@ -441,6 +441,11 @@ async fn download_single_file_chunked(
                 chunked::probe_range_support(client.clone(), fresh_url, token_for_reprobe).await?
             {
                 range_info = fresh_info;
+            } else {
+                tracing::warn!(
+                    filename = %file.filename,
+                    "re-probe returned no Range support, proceeding with original URL"
+                );
             }
         }
     }
