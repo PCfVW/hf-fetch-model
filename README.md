@@ -29,17 +29,17 @@ cargo install hf-fetch-model --features cli
 
 ## Commands
 
-| Command | |
-|---------|---|
-| `hf-fm <REPO_ID>` | Download a model (multi-connection, auto-tuned) |
+| Command | Description |
+|---------|-------------|
+| `hf-fm <REPO_ID>` *(default)* | Download a model (multi-connection, auto-tuned) |
+| `hf-fm cache clean-partial` | Remove `.chunked.part` files from interrupted downloads |
+| `hf-fm cache delete <REPO_ID\|N>` | Delete a cached model |
+| `hf-fm cache path <REPO_ID\|N>` | Print snapshot directory path (for scripting) |
 | `hf-fm diff <REPO_A> <REPO_B>` | Compare tensor layouts between two models |
 | `hf-fm discover` | Find new model families on the Hub |
 | `hf-fm download-file <REPO_ID> <FILE>` | Download a single file (or glob pattern) |
 | `hf-fm du [REPO_ID\|N]` | Show cache disk usage (by name or `#` index) |
-| `hf-fm cache clean-partial` | Remove `.chunked.part` files from interrupted downloads |
-| `hf-fm cache delete <REPO_ID\|N>` | Delete a cached model |
-| `hf-fm cache path <REPO_ID\|N>` | Print snapshot directory path (for scripting) |
-| `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) |
+| `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) without downloading weights |
 | `hf-fm list-families` | List model families in local cache |
 | `hf-fm list-files <REPO_ID>` | List remote files (sizes, SHA256) without downloading |
 | `hf-fm search <QUERY>` | Search the HuggingFace Hub for models |
