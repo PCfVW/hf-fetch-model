@@ -189,7 +189,7 @@ pub async fn download_all_files_map(
     let overall_start = tokio::time::Instant::now();
 
     // Check local cache first — return immediately if all files are present (no network).
-    if let Some(file_map) = try_resolve_repo_from_cache(config, repo_id.as_str())? {
+    if let Some(file_map) = try_resolve_repo_from_cache(config, repo_id.as_str()).await? {
         return Ok(DownloadOutcome::Cached(file_map));
     }
 
@@ -1061,26 +1061,33 @@ fn resolve_cached_file(
 /// # Errors
 ///
 /// Returns [`FetchError::Io`] if the cache directory cannot be resolved.
-fn try_resolve_repo_from_cache(
+async fn try_resolve_repo_from_cache(
     config: Option<&FetchConfig>,
     repo_id: &str,
 ) -> Result<Option<HashMap<String, PathBuf>>, FetchError> {
     let cache_dir = config
         .and_then(|c| c.output_dir.clone())
         .map_or_else(crate::cache::hf_cache_dir, Ok)?;
-    // BORROW: explicit .as_str() instead of Deref coercion
     let repo_folder = crate::cache_layout::repo_folder_name(repo_id);
-    let revision = config.and_then(|c| c.revision.as_deref()).unwrap_or("main");
-    let include = config.and_then(|c| c.include.as_ref());
-    let exclude = config.and_then(|c| c.exclude.as_ref());
+    // BORROW: explicit .to_owned()/.clone() for owned values sent to spawn_blocking
+    let revision = config
+        .and_then(|c| c.revision.as_deref())
+        .unwrap_or("main")
+        .to_owned();
+    let include = config.and_then(|c| c.include.clone());
+    let exclude = config.and_then(|c| c.exclude.clone());
 
-    Ok(try_resolve_all_from_cache(
-        &cache_dir,
-        repo_folder.as_str(),
-        revision,
-        include,
-        exclude,
-    ))
+    tokio::task::spawn_blocking(move || {
+        try_resolve_all_from_cache(
+            &cache_dir,
+            repo_folder.as_str(),
+            revision.as_str(),
+            include.as_ref(),
+            exclude.as_ref(),
+        )
+    })
+    .await
+    .map_err(|e| FetchError::Http(format!("cache resolution task failed: {e}")))
 }
 
 /// Attempts to resolve all repository files from the local cache (no network).
