@@ -12,7 +12,7 @@ use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -44,6 +44,10 @@ pub(crate) struct RangeInfo {
     pub etag: String,
     /// The CDN URL to use for Range requests (after redirect).
     pub cdn_url: String,
+    /// When the CDN signed URL expires, parsed from `X-Amz-Expires`.
+    ///
+    /// `None` if the URL has no recognizable expiry parameter.
+    pub cdn_expires_at: Option<Instant>,
 }
 
 /// Constructs the HF download URL for a model file.
@@ -210,11 +214,14 @@ pub(crate) async fn probe_range_support(
         (url, size)
     };
 
+    let cdn_expires_at = parse_cdn_expiry(&cdn_url);
+
     Ok(Some(RangeInfo {
         content_length,
         commit_hash,
         etag,
         cdn_url,
+        cdn_expires_at,
     }))
 }
 
@@ -232,6 +239,19 @@ fn parse_content_length_from_range(response: &reqwest::Response) -> Result<u64, 
         .next_back()
         .and_then(|s| s.parse::<u64>().ok())
         .ok_or_else(|| FetchError::Http(format!("invalid Content-Range header: {content_range}")))
+}
+
+/// Parses the expiry deadline from an AWS presigned URL's `X-Amz-Expires` parameter.
+///
+/// Returns the approximate expiry instant, assuming the URL was just issued by
+/// the CDN. Returns `None` if the parameter is absent or unparseable.
+fn parse_cdn_expiry(url: &str) -> Option<Instant> {
+    let query = url.split('?').nth(1)?;
+    let expires_str = query
+        .split('&')
+        .find_map(|param| param.strip_prefix("X-Amz-Expires="))?;
+    let seconds: u64 = expires_str.parse().ok()?;
+    Some(Instant::now() + Duration::from_secs(seconds))
 }
 
 /// Downloads a file using parallel Range requests and writes it to the `hf-hub` cache.
