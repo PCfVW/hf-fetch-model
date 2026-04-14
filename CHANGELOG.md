@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Chunked download timeout** — chunked (multi-connection) downloads now respect `timeout_per_file` (default 300 s), matching the single-file download path. Previously, a silent network partition during a chunked download could stall indefinitely, holding the concurrency semaphore and blocking the entire batch.
+- **TCP connect timeout** — both HTTP clients (`build_client`, `build_no_redirect_client`) now set a 30-second TCP connect timeout, bounding the connection handshake phase for all download, probe, inspect, and info operations that use these clients.
+
 ## [0.9.4] — Search tags, cache path & du age
 
 ### Added
