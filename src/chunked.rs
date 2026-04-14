@@ -239,7 +239,9 @@ fn parse_content_length_from_range(response: &reqwest::Response) -> Result<u64, 
 /// Parses the expiry deadline from an AWS presigned URL's `X-Amz-Expires` parameter.
 ///
 /// Returns the approximate expiry instant, assuming the URL was just issued by
-/// the CDN. Returns `None` if the parameter is absent or unparseable.
+/// the CDN. Returns `None` if the parameter is absent or unparseable — this
+/// includes non-AWS CDNs (e.g., GCS uses `X-Goog-Expires`, Cloudflare uses
+/// proprietary tokens) where the re-probe path is silently skipped.
 fn parse_cdn_expiry(url: &str) -> Option<Instant> {
     let query = url.split('?').nth(1)?;
     let expires_str = query
