@@ -98,7 +98,7 @@ pub fn list_cached_families() -> Result<BTreeMap<String, Vec<String>>, FetchErro
         };
 
         // Find the newest snapshot's config.json
-        let snapshots_dir = entry.path().join("snapshots");
+        let snapshots_dir = crate::cache_layout::snapshots_dir(&entry.path());
         if !snapshots_dir.exists() {
             continue;
         }
@@ -242,9 +242,7 @@ pub async fn repo_status(
 ) -> Result<RepoStatus, FetchError> {
     let revision = revision.unwrap_or("main");
     let cache_dir = hf_cache_dir()?;
-    let repo_folder = crate::chunked::repo_folder_name(repo_id);
-    // BORROW: explicit .as_str() for path construction
-    let repo_dir = cache_dir.join(repo_folder.as_str());
+    let repo_dir = crate::cache_layout::repo_dir(&cache_dir, repo_id);
 
     // Read commit hash from refs file if available.
     let commit_hash = read_ref(&repo_dir, revision);
@@ -258,11 +256,11 @@ pub async fn repo_status(
     // BORROW: explicit .as_deref() for Option<String> → Option<&str>
     let snapshot_dir = commit_hash
         .as_deref()
-        .map(|hash| repo_dir.join("snapshots").join(hash));
+        .map(|hash| crate::cache_layout::snapshot_dir(&repo_dir, hash));
 
     // Pre-check for .chunked.part files in blobs directory (avoids re-scanning
     // the blobs directory for every missing file in the loop below).
-    let blobs_dir = repo_dir.join("blobs");
+    let blobs_dir = crate::cache_layout::blobs_dir(&repo_dir);
     let has_any_partial = has_partial_blob(&blobs_dir);
 
     // Cross-reference remote files against local state.
@@ -372,7 +370,7 @@ pub fn cache_summary() -> Result<Vec<CachedModelSummary>, FetchError> {
         let (file_count, total_size, last_modified) = count_snapshot_files(&repo_dir);
 
         // Check for partial downloads.
-        let has_partial = find_partial_blob_size(&repo_dir.join("blobs")) > 0;
+        let has_partial = find_partial_blob_size(&crate::cache_layout::blobs_dir(&repo_dir)) > 0;
 
         summaries.push(CachedModelSummary {
             repo_id,
@@ -398,9 +396,7 @@ pub fn cache_summary() -> Result<Vec<CachedModelSummary>, FetchError> {
 /// Returns [`FetchError::Io`] if the cache directory cannot be determined.
 pub fn repo_disk_usage(repo_id: &str) -> Result<(usize, u64), FetchError> {
     let cache_dir = hf_cache_dir()?;
-    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
-    // BORROW: explicit .as_str() for path construction
-    let repo_dir = cache_dir.join(repo_folder.as_str());
+    let repo_dir = crate::cache_layout::repo_dir(&cache_dir, repo_id);
     let (file_count, total_size, _) = count_snapshot_files(&repo_dir);
     Ok((file_count, total_size))
 }
@@ -415,16 +411,15 @@ pub fn repo_disk_usage(repo_id: &str) -> Result<(usize, u64), FetchError> {
 /// Returns [`FetchError::Io`] if the cache directory cannot be determined.
 pub fn repo_has_partial(repo_id: &str) -> Result<bool, FetchError> {
     let cache_dir = hf_cache_dir()?;
-    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
-    // BORROW: explicit .as_str() for path construction
-    let blobs_dir = cache_dir.join(repo_folder.as_str()).join("blobs");
+    let repo_dir = crate::cache_layout::repo_dir(&cache_dir, repo_id);
+    let blobs_dir = crate::cache_layout::blobs_dir(&repo_dir);
     Ok(find_partial_blob_size(&blobs_dir) > 0)
 }
 
 /// Counts files, total size, and most recent modification time across all
 /// snapshot directories for a repo.
 fn count_snapshot_files(repo_dir: &Path) -> (usize, u64, Option<std::time::SystemTime>) {
-    let snapshots_dir = repo_dir.join("snapshots");
+    let snapshots_dir = crate::cache_layout::snapshots_dir(repo_dir);
     let Ok(snapshots) = std::fs::read_dir(snapshots_dir) else {
         return (0, 0, None);
     };
@@ -483,7 +478,7 @@ fn count_files_recursive(
 /// (a commit hash) or `None` if the file does not exist or is empty.
 #[must_use]
 pub fn read_ref(repo_dir: &Path, revision: &str) -> Option<String> {
-    let ref_path = repo_dir.join("refs").join(revision);
+    let ref_path = crate::cache_layout::ref_path(repo_dir, revision);
     std::fs::read_to_string(ref_path)
         .ok()
         // BORROW: explicit .to_owned() to convert trimmed &str → owned String
@@ -574,7 +569,7 @@ pub fn find_partial_files(repo_filter: Option<&str>) -> Result<Vec<PartialFile>,
             }
         }
 
-        let blobs_dir = entry.path().join("blobs");
+        let blobs_dir = crate::cache_layout::blobs_dir(&entry.path());
         let Ok(blob_entries) = std::fs::read_dir(&blobs_dir) else {
             continue;
         };
@@ -623,15 +618,13 @@ pub struct CacheFileUsage {
 /// Returns [`FetchError::Io`] if the cache directory cannot be determined.
 pub fn cache_repo_usage(repo_id: &str) -> Result<Vec<CacheFileUsage>, FetchError> {
     let cache_dir = hf_cache_dir()?;
-    let repo_folder = crate::chunked::repo_folder_name(repo_id);
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let repo_dir = cache_dir.join(repo_folder.as_str());
+    let repo_dir = crate::cache_layout::repo_dir(&cache_dir, repo_id);
 
     if !repo_dir.exists() {
         return Ok(Vec::new());
     }
 
-    let snapshots_dir = repo_dir.join("snapshots");
+    let snapshots_dir = crate::cache_layout::snapshots_dir(&repo_dir);
     let Ok(snapshots) = std::fs::read_dir(&snapshots_dir) else {
         return Ok(Vec::new());
     };

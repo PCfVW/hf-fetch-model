@@ -500,7 +500,7 @@ pub(crate) async fn download_file_by_name(
         .clone()
         .map_or_else(crate::cache::hf_cache_dir, Ok)?;
     // BORROW: explicit .as_str() instead of Deref coercion
-    let repo_folder = chunked::repo_folder_name(repo_id.as_str());
+    let repo_folder = crate::cache_layout::repo_folder_name(repo_id.as_str());
     let revision_str = config.revision.as_deref().unwrap_or("main");
     if let Some(cached) =
         resolve_cached_file(&cache_dir, repo_folder.as_str(), revision_str, filename)
@@ -636,7 +636,7 @@ fn build_shared_state(
             .map_or_else(crate::cache::hf_cache_dir, Ok)?,
     );
     // BORROW: explicit .as_str() instead of Deref coercion
-    let repo_folder = Arc::new(chunked::repo_folder_name(repo_id));
+    let repo_folder = Arc::new(crate::cache_layout::repo_folder_name(repo_id));
     let revision = Arc::new(
         config
             .and_then(|c| c.revision.clone())
@@ -1040,7 +1040,7 @@ fn resolve_cached_file(
 ) -> Option<PathBuf> {
     let repo_dir = cache_dir.join(repo_folder);
     let commit_hash = crate::cache::read_ref(&repo_dir, revision)?;
-    let cached_path = repo_dir.join("snapshots").join(commit_hash).join(filename);
+    let cached_path = crate::cache_layout::pointer_path(&repo_dir, &commit_hash, filename);
     if cached_path.exists() {
         tracing::debug!(
             filename = %filename,
@@ -1069,7 +1069,7 @@ fn try_resolve_repo_from_cache(
         .and_then(|c| c.output_dir.clone())
         .map_or_else(crate::cache::hf_cache_dir, Ok)?;
     // BORROW: explicit .as_str() instead of Deref coercion
-    let repo_folder = chunked::repo_folder_name(repo_id);
+    let repo_folder = crate::cache_layout::repo_folder_name(repo_id);
     let revision = config.and_then(|c| c.revision.as_deref()).unwrap_or("main");
     let include = config.and_then(|c| c.include.as_ref());
     let exclude = config.and_then(|c| c.exclude.as_ref());
@@ -1098,7 +1098,7 @@ fn try_resolve_all_from_cache(
 ) -> Option<HashMap<String, PathBuf>> {
     let repo_dir = cache_dir.join(repo_folder);
     let commit_hash = crate::cache::read_ref(&repo_dir, revision)?;
-    let snapshot_dir = repo_dir.join("snapshots").join(commit_hash);
+    let snapshot_dir = crate::cache_layout::snapshot_dir(&repo_dir, &commit_hash);
 
     if !snapshot_dir.is_dir() {
         return None;

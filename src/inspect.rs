@@ -17,6 +17,7 @@ use serde::Serialize;
 use tokio::task::JoinSet;
 
 use crate::cache;
+use crate::cache_layout;
 use crate::chunked;
 use crate::error::FetchError;
 
@@ -245,11 +246,9 @@ fn parse_header_json(json_bytes: &[u8], filename: &str) -> Result<ParsedHeader, 
 /// Returns `None` if the file is not in the local cache.
 fn resolve_cached_path(repo_id: &str, revision: &str, filename: &str) -> Option<PathBuf> {
     let cache_dir = cache::hf_cache_dir().ok()?;
-    let repo_folder = chunked::repo_folder_name(repo_id);
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let repo_dir = cache_dir.join(repo_folder.as_str());
+    let repo_dir = cache_layout::repo_dir(&cache_dir, repo_id);
     let commit_hash = cache::read_ref(&repo_dir, revision)?;
-    let cached_path = repo_dir.join("snapshots").join(commit_hash).join(filename);
+    let cached_path = cache_layout::pointer_path(&repo_dir, &commit_hash, filename);
     if cached_path.exists() {
         Some(cached_path)
     } else {
@@ -596,15 +595,13 @@ pub fn inspect_repo_safetensors_cached(
 ) -> Result<Vec<(String, SafetensorsHeaderInfo)>, FetchError> {
     let rev = revision.unwrap_or("main");
     let cache_dir = cache::hf_cache_dir()?;
-    let repo_folder = chunked::repo_folder_name(repo_id);
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let repo_dir = cache_dir.join(repo_folder.as_str());
+    let repo_dir = cache_layout::repo_dir(&cache_dir, repo_id);
 
     let Some(commit_hash) = cache::read_ref(&repo_dir, rev) else {
         return Ok(Vec::new());
     };
 
-    let snapshot_dir = repo_dir.join("snapshots").join(commit_hash);
+    let snapshot_dir = cache_layout::snapshot_dir(&repo_dir, &commit_hash);
     if !snapshot_dir.exists() {
         return Ok(Vec::new());
     }

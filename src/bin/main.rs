@@ -1802,9 +1802,7 @@ fn run_cache_delete(repo_id: &str, yes: bool) -> Result<(), FetchError> {
         return Ok(());
     }
 
-    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let repo_dir = cache_dir.join(repo_folder.as_str());
+    let repo_dir = hf_fetch_model::cache_layout::repo_dir(&cache_dir, repo_id);
 
     if !repo_dir.exists() {
         return Err(FetchError::InvalidArgument(format!(
@@ -1839,9 +1837,7 @@ fn run_cache_delete(repo_id: &str, yes: bool) -> Result<(), FetchError> {
 /// substitution: `cd $(hf-fm cache path org/model)`.
 fn run_cache_path(repo_id: &str) -> Result<(), FetchError> {
     let cache_dir = cache::hf_cache_dir()?;
-    let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let repo_dir = cache_dir.join(repo_folder.as_str());
+    let repo_dir = hf_fetch_model::cache_layout::repo_dir(&cache_dir, repo_id);
 
     if !repo_dir.exists() {
         return Err(FetchError::InvalidArgument(format!(
@@ -1854,7 +1850,7 @@ fn run_cache_path(repo_id: &str) -> Result<(), FetchError> {
     })?;
 
     // BORROW: explicit .as_str() instead of Deref coercion
-    let snapshot_dir = repo_dir.join("snapshots").join(commit_hash.as_str());
+    let snapshot_dir = hf_fetch_model::cache_layout::snapshot_dir(&repo_dir, commit_hash.as_str());
 
     if !snapshot_dir.exists() {
         return Err(FetchError::InvalidArgument(format!(
@@ -2816,11 +2812,11 @@ fn run_list_files(
     // Uses the same size-comparison logic as `status` (cache.rs).
     let cache_marks: Vec<String> = if show_cached {
         let cache_dir = cache::hf_cache_dir()?;
-        let repo_folder = format!("models--{}", repo_id.replace('/', "--"));
-        let repo_dir = cache_dir.join(&repo_folder);
+        let repo_dir = hf_fetch_model::cache_layout::repo_dir(&cache_dir, repo_id);
         let revision_str = revision.unwrap_or("main");
         let commit_hash = cache::read_ref(&repo_dir, revision_str);
-        let snapshot_dir = commit_hash.map(|h| repo_dir.join("snapshots").join(h));
+        let snapshot_dir =
+            commit_hash.map(|h| hf_fetch_model::cache_layout::snapshot_dir(&repo_dir, &h));
 
         filtered
             .iter()

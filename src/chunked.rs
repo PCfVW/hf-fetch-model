@@ -58,14 +58,6 @@ pub(crate) fn build_download_url(repo_id: &str, revision: &str, filename: &str) 
     format!("{HF_ENDPOINT}/{repo_id}/resolve/{url_revision}/{filename}")
 }
 
-/// Constructs the repo folder name matching `hf-hub`'s convention.
-///
-/// `"google/gemma-2-2b"` → `"models--google--gemma-2-2b"`.
-#[must_use]
-pub(crate) fn repo_folder_name(repo_id: &str) -> String {
-    format!("models--{}", repo_id.replace('/', "--"))
-}
-
 /// Builds a `reqwest::Client` with no-redirect policy for probing.
 ///
 /// The client enforces a 30-second TCP connect timeout ([`CONNECT_TIMEOUT`]).
@@ -297,11 +289,12 @@ pub(crate) async fn download_chunked(
 
     // Build cache paths following hf-hub layout.
     let repo_dir = cache_dir.join(repo_folder.as_str());
-    let blob_path = repo_dir.join("blobs").join(range_info.etag.as_str());
-    let snapshot_dir = repo_dir
-        .join("snapshots")
-        .join(range_info.commit_hash.as_str());
-    let pointer_path = snapshot_dir.join(filename.as_str());
+    let blob_path = crate::cache_layout::blob_path(&repo_dir, range_info.etag.as_str());
+    let pointer_path = crate::cache_layout::pointer_path(
+        &repo_dir,
+        range_info.commit_hash.as_str(),
+        filename.as_str(),
+    );
 
     // If the pointer path already exists, the file is cached — skip download.
     if pointer_path.exists() {
@@ -498,7 +491,7 @@ async fn finalize_chunked_download(
     })?;
 
     // Write refs file.
-    let refs_dir = repo_dir.join("refs");
+    let refs_dir = crate::cache_layout::refs_dir(repo_dir);
     tokio::fs::create_dir_all(&refs_dir)
         .await
         .map_err(|e| FetchError::Io {
@@ -506,7 +499,7 @@ async fn finalize_chunked_download(
             path: refs_dir.clone(),
             source: e,
         })?;
-    let ref_path = refs_dir.join(revision);
+    let ref_path = crate::cache_layout::ref_path(repo_dir, revision);
     tokio::fs::write(&ref_path, commit_hash.as_bytes())
         .await
         .map_err(|e| FetchError::Io {
@@ -644,7 +637,7 @@ async fn resolve_commit_hash(
     revision: &str,
     repo_dir: &Path,
 ) -> Result<String, FetchError> {
-    let ref_path = repo_dir.join("refs").join(revision);
+    let ref_path = crate::cache_layout::ref_path(repo_dir, revision);
 
     // Try reading from the refs file first (written by hf-hub for other files).
     if let Ok(hash) = tokio::fs::read_to_string(&ref_path).await {
@@ -680,7 +673,7 @@ async fn resolve_commit_hash(
         .map_err(|e| FetchError::Http(format!("resolve commit hash: {e}")))?;
 
     // Write refs file for future use.
-    let refs_dir = repo_dir.join("refs");
+    let refs_dir = crate::cache_layout::refs_dir(repo_dir);
     tokio::fs::create_dir_all(&refs_dir)
         .await
         .map_err(|e| FetchError::Io {
@@ -718,19 +711,13 @@ pub(crate) async fn download_direct(
     filename: &str,
     cache_dir: &Path,
 ) -> Result<PathBuf, FetchError> {
-    let repo_folder = repo_folder_name(repo_id);
-    // BORROW: explicit .as_str() for path construction
-    let repo_dir = cache_dir.join(repo_folder.as_str());
+    let repo_dir = crate::cache_layout::repo_dir(cache_dir, repo_id);
 
     // Resolve the commit hash (from refs file or HF API).
     let commit_hash = resolve_commit_hash(client, repo_id, revision, &repo_dir).await?;
 
     // Build the pointer path in the snapshot directory.
-    // BORROW: explicit .as_str() for path construction
-    let pointer_path = repo_dir
-        .join("snapshots")
-        .join(commit_hash.as_str())
-        .join(filename);
+    let pointer_path = crate::cache_layout::pointer_path(&repo_dir, commit_hash.as_str(), filename);
 
     // If already cached, skip.
     if pointer_path.exists() {
@@ -850,11 +837,11 @@ mod tests {
     #[test]
     fn test_repo_folder_name() {
         assert_eq!(
-            repo_folder_name("google/gemma-2-2b"),
+            crate::cache_layout::repo_folder_name("google/gemma-2-2b"),
             "models--google--gemma-2-2b"
         );
         assert_eq!(
-            repo_folder_name("RWKV/RWKV7-Goose-World3-1.5B-HF"),
+            crate::cache_layout::repo_folder_name("RWKV/RWKV7-Goose-World3-1.5B-HF"),
             "models--RWKV--RWKV7-Goose-World3-1.5B-HF"
         );
     }

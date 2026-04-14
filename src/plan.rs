@@ -9,6 +9,7 @@
 //! optimized download settings.
 
 use crate::cache;
+use crate::cache_layout;
 use crate::chunked;
 use crate::config::{self, FetchConfig, FetchConfigBuilder};
 use crate::error::FetchError;
@@ -184,13 +185,11 @@ pub async fn download_plan(
         .output_dir
         .clone()
         .map_or_else(cache::hf_cache_dir, Ok)?;
-    let repo_folder = chunked::repo_folder_name(repo_id);
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let repo_dir = cache_dir.join(repo_folder.as_str());
+    let repo_dir = cache_layout::repo_dir(&cache_dir, repo_id);
     let commit_hash = cache::read_ref(&repo_dir, revision_str);
     let snapshot_dir = commit_hash
         .as_deref()
-        .map(|hash| repo_dir.join("snapshots").join(hash));
+        .map(|hash| cache_layout::snapshot_dir(&repo_dir, hash));
 
     let mut total_bytes: u64 = 0;
     let mut cached_bytes: u64 = 0;
