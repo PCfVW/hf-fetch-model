@@ -659,7 +659,7 @@ async fn dispatch_download(
                 connections = settings.connections_per_file,
                 "chunked download (multi-connection)"
             );
-            download_single_file_chunked(
+            let chunked_fut = download_single_file_chunked(
                 client,
                 file,
                 cache_dir,
@@ -673,8 +673,14 @@ async fn dispatch_download(
                 settings.connections_per_file,
                 on_progress,
                 files_remaining,
-            )
-            .await
+            );
+            tokio::time::timeout(settings.timeout_per_file, chunked_fut)
+                .await
+                .map_err(|_elapsed| FetchError::Timeout {
+                    // BORROW: explicit .clone() for owned String
+                    filename: file.filename.clone(),
+                    seconds: settings.timeout_per_file.as_secs(),
+                })?
         } else {
             tracing::debug!(
                 filename = %file.filename,

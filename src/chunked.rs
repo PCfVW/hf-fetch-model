@@ -12,6 +12,7 @@ use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -29,6 +30,9 @@ type ProgressCallback = Arc<dyn Fn(&ProgressEvent) + Send + Sync>;
 
 /// Default `HuggingFace` API endpoint.
 const HF_ENDPOINT: &str = "https://huggingface.co";
+
+/// Maximum time to establish a TCP connection to the remote server.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Result of probing a URL for HTTP Range support and cache metadata.
 pub(crate) struct RangeInfo {
@@ -77,6 +81,7 @@ pub(crate) fn build_no_redirect_client(token: Option<&str>) -> Result<Client, Fe
     }
     Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
         .default_headers(headers)
         .build()
         .map_err(|e| FetchError::Http(e.to_string()))
@@ -101,6 +106,7 @@ pub(crate) fn build_client(token: Option<&str>) -> Result<Client, FetchError> {
         headers.insert(reqwest::header::AUTHORIZATION, header_val);
     }
     Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
         .default_headers(headers)
         .build()
         .map_err(|e| FetchError::Http(e.to_string()))
