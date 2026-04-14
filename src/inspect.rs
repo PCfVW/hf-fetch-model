@@ -203,6 +203,7 @@ fn parse_header_json(json_bytes: &[u8], filename: &str) -> Result<ParsedHeader, 
             if let serde_json::Value::Object(obj) = value {
                 let mut meta_map = HashMap::new();
                 for (mk, mv) in obj {
+                    // BORROW: explicit .to_owned()/.to_string() for Value → String conversion
                     let v_str = if let Some(s) = mv.as_str() {
                         s.to_owned()
                     } else {

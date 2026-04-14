@@ -110,8 +110,8 @@ pub fn build_client(token: Option<&str>) -> Result<Client, FetchError> {
         reqwest::header::HeaderValue::from_static("hf-fetch-model"),
     );
     if let Some(tok) = token {
-        // BORROW: explicit .as_str() would be no-op on &str; format! takes &str directly
         let auth_value = format!("Bearer {tok}");
+        // BORROW: explicit .as_str() for String → &str conversion
         let header_val = reqwest::header::HeaderValue::from_str(auth_value.as_str())
             .map_err(|e| FetchError::Http(e.to_string()))?;
         headers.insert(reqwest::header::AUTHORIZATION, header_val);
