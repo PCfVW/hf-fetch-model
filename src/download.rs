@@ -204,20 +204,25 @@ pub async fn download_all_files_map(
         .filter(|f| file_matches(f.filename.as_str(), include, exclude))
         .collect();
 
-    // Build download settings and fetch metadata.
+    // Build download settings and shared HTTP client.
     let mut settings = DownloadSettings::from_config(config);
     let on_progress = config.and_then(|c| c.on_progress.clone());
+    let token_ref = config.and_then(|c| c.token.as_deref());
+    let http_client = Arc::new(chunked::build_client(token_ref)?);
+
+    // Fetch metadata using the shared client.
     let metadata_map = fetch_metadata_if_needed(
         config,
         repo_id.as_str(),
         settings.verify_checksums,
         settings.chunk_threshold,
+        &http_client,
     )
     .await;
 
-    // Build HTTP clients and resolve cache paths.
-    let (http_client, chunked_client, cache_dir, repo_folder, revision, token) =
-        build_shared_state(config, repo_id.as_str(), &settings)?;
+    // Build remaining shared state, reusing the HTTP client.
+    let (chunked_client, cache_dir, repo_folder, revision, token) =
+        build_shared_state(config, repo_id.as_str(), &settings, &http_client)?;
 
     // Implicit plan optimization: compute a lightweight plan from the
     // already-fetched metadata and merge recommended settings into any
@@ -506,12 +511,14 @@ pub(crate) async fn download_file_by_name(
     let settings = DownloadSettings::from_config(Some(config));
     // BORROW: explicit .clone() for Arc-wrapped callback
     let on_progress = config.on_progress.clone();
+    let http_client = chunked::build_client(config.token.as_deref())?;
 
     let metadata_map = fetch_metadata_if_needed(
         Some(config),
         repo_id.as_str(),
         settings.verify_checksums,
         settings.chunk_threshold,
+        &http_client,
     )
     .await;
 
@@ -595,20 +602,20 @@ pub(crate) async fn download_file_by_name(
 
 /// Builds the shared `Arc`-wrapped state needed for concurrent downloads.
 ///
-/// Returns `(http_client, chunked_client, cache_dir, repo_folder, revision, token)`.
+/// Accepts a pre-built HTTP client to reuse TCP/TLS connections from earlier
+/// metadata requests. Returns `(chunked_client, cache_dir, repo_folder, revision, token)`.
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Http`] if the HTTP client cannot be built.
 /// Returns [`FetchError::Io`] if the cache directory cannot be resolved.
 #[allow(clippy::type_complexity)]
 fn build_shared_state(
     config: Option<&FetchConfig>,
     repo_id: &str,
     settings: &DownloadSettings,
+    http_client: &Arc<reqwest::Client>,
 ) -> Result<
     (
-        Arc<reqwest::Client>,
         Option<Arc<reqwest::Client>>,
         Arc<PathBuf>,
         Arc<String>,
@@ -617,10 +624,8 @@ fn build_shared_state(
     ),
     FetchError,
 > {
-    let token_ref = config.and_then(|c| c.token.as_deref());
-    let http_client = Arc::new(chunked::build_client(token_ref)?);
     let chunked_client = if settings.chunk_threshold < u64::MAX {
-        Some(Arc::clone(&http_client))
+        Some(Arc::clone(http_client))
     } else {
         None
     };
@@ -639,14 +644,7 @@ fn build_shared_state(
     );
     let token = Arc::new(config.and_then(|c| c.token.clone()));
 
-    Ok((
-        http_client,
-        chunked_client,
-        cache_dir,
-        repo_folder,
-        revision,
-        token,
-    ))
+    Ok((chunked_client, cache_dir, repo_folder, revision, token))
 }
 
 /// Downloads a single file, choosing the best method and applying fallbacks.
@@ -871,6 +869,7 @@ async fn fetch_metadata_if_needed(
     repo_id: &str,
     verify_checksums: bool,
     chunk_threshold: u64,
+    http_client: &reqwest::Client,
 ) -> HashMap<String, RepoFile> {
     let needs_metadata = verify_checksums || chunk_threshold < u64::MAX;
     if !needs_metadata {
@@ -885,6 +884,7 @@ async fn fetch_metadata_if_needed(
         repo_id,
         config.and_then(|c| c.token.as_deref()),
         config.and_then(|c| c.revision.as_deref()),
+        http_client,
     )
     .await
     {
@@ -1270,8 +1270,9 @@ async fn fetch_metadata_map(
     repo_id: &str,
     token: Option<&str>,
     revision: Option<&str>,
+    http_client: &reqwest::Client,
 ) -> Result<HashMap<String, RepoFile>, FetchError> {
-    let files = repo::list_repo_files_with_metadata(repo_id, token, revision).await?;
+    let files = repo::list_repo_files_with_metadata(repo_id, token, revision, http_client).await?;
 
     // BORROW: explicit .clone() for owned String HashMap key
     let map = files.into_iter().map(|f| (f.filename.clone(), f)).collect();

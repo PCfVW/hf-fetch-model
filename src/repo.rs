@@ -82,6 +82,10 @@ struct ApiModelInfo {
 /// This makes a direct HTTP call to `https://huggingface.co/api/models/{repo_id}?blobs=true`
 /// to retrieve file sizes and LFS metadata that `hf-hub`'s `info()` does not expose.
 ///
+/// Accepts a shared `reqwest::Client` to reuse TCP connections and TLS sessions
+/// across calls. Use [`chunked::build_client`](crate::chunked::build_client) to
+/// create a client with the standard connect timeout and auth headers.
+///
 /// # Errors
 ///
 /// Returns [`FetchError::Http`] if the HTTP request fails.
@@ -90,13 +94,13 @@ pub async fn list_repo_files_with_metadata(
     repo_id: &str,
     token: Option<&str>,
     revision: Option<&str>,
+    client: &reqwest::Client,
 ) -> Result<Vec<RepoFile>, FetchError> {
     let mut url = format!("https://huggingface.co/api/models/{repo_id}?blobs=true");
     if let Some(rev) = revision {
         url = format!("{url}&revision={rev}");
     }
 
-    let client = reqwest::Client::new();
     // BORROW: explicit .as_str() instead of Deref coercion
     let mut request = client.get(url.as_str());
     if let Some(t) = token {

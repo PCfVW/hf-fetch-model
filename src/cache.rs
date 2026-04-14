@@ -250,8 +250,9 @@ pub async fn repo_status(
     let commit_hash = read_ref(&repo_dir, revision);
 
     // Fetch remote file list with sizes.
+    let client = crate::chunked::build_client(token)?;
     let remote_files =
-        crate::repo::list_repo_files_with_metadata(repo_id, token, Some(revision)).await?;
+        crate::repo::list_repo_files_with_metadata(repo_id, token, Some(revision), &client).await?;
 
     // Determine snapshot directory.
     // BORROW: explicit .as_deref() for Option<String> → Option<&str>

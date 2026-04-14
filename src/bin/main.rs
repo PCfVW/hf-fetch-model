@@ -2794,10 +2794,12 @@ fn run_list_files(
         path: PathBuf::from("<runtime>"),
         source: e,
     })?;
+    let client = hf_fetch_model::build_client(resolved_token.as_deref())?;
     let files = rt.block_on(repo::list_repo_files_with_metadata(
         repo_id,
         resolved_token.as_deref(),
         revision,
+        &client,
     ))?;
 
     // Apply glob filters.

@@ -94,14 +94,16 @@ pub(crate) fn build_no_redirect_client(token: Option<&str>) -> Result<Client, Fe
         .map_err(|e| FetchError::Http(e.to_string()))
 }
 
-/// Builds a `reqwest::Client` with auth token and user-agent for chunked downloads.
+/// Builds a `reqwest::Client` with auth token, user-agent, and 30-second
+/// TCP connect timeout.
 ///
-/// The client enforces a 30-second TCP connect timeout ([`CONNECT_TIMEOUT`]).
+/// Use this to create a shared client for [`crate::repo::list_repo_files_with_metadata`]
+/// and other API calls that benefit from connection reuse.
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Http`] if the client or auth header cannot be constructed.
-pub(crate) fn build_client(token: Option<&str>) -> Result<Client, FetchError> {
+/// Returns [`FetchError::Http`](crate::FetchError::Http) if the client or auth header cannot be constructed.
+pub fn build_client(token: Option<&str>) -> Result<Client, FetchError> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::USER_AGENT,

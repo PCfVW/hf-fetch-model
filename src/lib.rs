@@ -83,6 +83,7 @@ pub mod progress;
 pub mod repo;
 mod retry;
 
+pub use chunked::build_client;
 pub use config::{
     compile_glob_patterns, file_matches, has_glob_chars, FetchConfig, FetchConfigBuilder, Filter,
 };
@@ -131,10 +132,12 @@ async fn preflight_gated_check(repo_id: &str, config: &FetchConfig) -> Result<()
     }
 
     // Token is present — verify it grants access with a lightweight probe.
+    let probe_client = chunked::build_client(config.token.as_deref())?;
     let probe = repo::list_repo_files_with_metadata(
         repo_id,
         config.token.as_deref(),
         config.revision.as_deref(),
+        &probe_client,
     )
     .await;
 

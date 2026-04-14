@@ -162,8 +162,9 @@ pub async fn download_plan(
     let token = config.token.as_deref();
 
     // Fetch remote file list with metadata.
+    let client = chunked::build_client(token)?;
     let remote_files =
-        repo::list_repo_files_with_metadata(repo_id, token, Some(revision_str)).await?;
+        repo::list_repo_files_with_metadata(repo_id, token, Some(revision_str), &client).await?;
 
     // Apply glob filters.
     let filtered: Vec<_> = remote_files

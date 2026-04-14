@@ -524,7 +524,9 @@ pub async fn inspect_repo_safetensors(
     token: Option<&str>,
     revision: Option<&str>,
 ) -> Result<Vec<(String, SafetensorsHeaderInfo, InspectSource)>, FetchError> {
-    let files = crate::repo::list_repo_files_with_metadata(repo_id, token, revision).await?;
+    let client = crate::chunked::build_client(token)?;
+    let files =
+        crate::repo::list_repo_files_with_metadata(repo_id, token, revision, &client).await?;
 
     let safetensors_files: Vec<String> = files
         .into_iter()
