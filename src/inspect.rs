@@ -197,19 +197,17 @@ fn parse_header_json(json_bytes: &[u8], filename: &str) -> Result<ParsedHeader, 
     let mut metadata: Option<HashMap<String, String>> = None;
     let mut tensors = Vec::new();
 
-    for (key, value) in &raw {
+    for (key, value) in raw {
         if key == "__metadata__" {
-            if let Some(obj) = value.as_object() {
+            if let serde_json::Value::Object(obj) = value {
                 let mut meta_map = HashMap::new();
                 for (mk, mv) in obj {
-                    // BORROW: explicit .to_string() for Value → String (strips quotes from strings)
                     let v_str = if let Some(s) = mv.as_str() {
                         s.to_owned()
                     } else {
                         mv.to_string()
                     };
-                    // BORROW: explicit .clone() for owned String
-                    meta_map.insert(mk.clone(), v_str);
+                    meta_map.insert(mk, v_str);
                 }
                 metadata = Some(meta_map);
             }
@@ -217,14 +215,13 @@ fn parse_header_json(json_bytes: &[u8], filename: &str) -> Result<ParsedHeader, 
         }
 
         let entry: RawTensorEntry =
-            serde_json::from_value(value.clone()).map_err(|e| FetchError::SafetensorsHeader {
+            serde_json::from_value(value).map_err(|e| FetchError::SafetensorsHeader {
                 filename: filename.to_owned(),
                 reason: format!("failed to parse tensor \"{key}\": {e}"),
             })?;
 
         tensors.push(TensorInfo {
-            // BORROW: explicit .clone() for owned String
-            name: key.clone(),
+            name: key,
             dtype: entry.dtype,
             shape: entry.shape,
             data_offsets: entry.data_offsets,

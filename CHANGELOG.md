@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TCP connect timeout** — both HTTP clients (`build_client`, `build_no_redirect_client`) now set a 30-second TCP connect timeout, bounding the connection handshake phase for all download, probe, inspect, and info operations that use these clients.
 - **Windows blob corruption** — on Windows without symlink privileges, the pointer finalization step now copies the blob instead of renaming it. `rename` destroyed the `blobs/<etag>` entry, breaking cross-revision deduplication and causing full re-downloads when the same model was accessed at different revisions. Diverges from `hf-hub`'s `symlink_or_rename()` which has the same defect upstream.
 
+### Changed
+
+- **`parse_header_json` zero-clone iteration** — the safetensors header parser now consumes the intermediate `HashMap` via `into_iter()` instead of borrowing it, eliminating per-tensor `value.clone()` and `key.clone()` allocations.
+
 ## [0.9.4] — Search tags, cache path & du age
 
 ### Added
