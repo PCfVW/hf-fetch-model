@@ -303,6 +303,7 @@ pub(crate) async fn download_chunked(
 
     // Create directories and pre-allocate temp file.
     let temp_path = prepare_temp_file(&blob_path, &pointer_path, total_size).await?;
+    let mut temp_guard = TempFileGuard::new(temp_path.clone());
 
     // Compute chunk boundaries.
     let chunk_size = total_size / u64::try_from(connections).unwrap_or(1);
@@ -367,8 +368,7 @@ pub(crate) async fn download_chunked(
     }
 
     if !failures.is_empty() {
-        // Clean up temp file on failure.
-        let _ = tokio::fs::remove_file(&temp_path).await;
+        // temp_guard drops here and removes the temp file.
         return Err(FetchError::ChunkedDownload {
             // BORROW: explicit .clone() for owned String
             filename: filename.clone(),
@@ -386,7 +386,44 @@ pub(crate) async fn download_chunked(
     )
     .await?;
 
+    // Download and finalization succeeded — prevent guard from removing the file.
+    temp_guard.commit();
+
     Ok(pointer_path)
+}
+
+/// RAII guard that removes a temp file on drop unless explicitly committed.
+///
+/// Ensures `.chunked.part` files are cleaned up even when a task is aborted
+/// (e.g., via `JoinSet::abort_all()`), since `Drop` runs on abort.
+struct TempFileGuard {
+    /// Path to the temp file to remove on drop.
+    path: PathBuf,
+    /// Set to `true` after successful finalization to prevent removal.
+    committed: bool,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    /// Marks the temp file as successfully finalized — `Drop` will not remove it.
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Sync remove is safe here: runs on the aborting thread, single syscall.
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// Creates parent directories for blob and pointer paths, then pre-allocates a temp file.
