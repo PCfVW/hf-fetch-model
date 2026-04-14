@@ -372,6 +372,10 @@ async fn download_single_file(
 }
 
 /// Downloads a large file using multi-connection chunked download with retry and checksum.
+///
+/// Before starting the download, checks the CDN signed URL's `X-Amz-Expires`
+/// parameter. If the estimated download time exceeds the remaining URL validity,
+/// logs a warning and re-probes for a fresh URL.
 #[allow(clippy::too_many_arguments)]
 async fn download_single_file_chunked(
     client: &reqwest::Client,

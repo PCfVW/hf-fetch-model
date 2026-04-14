@@ -126,7 +126,8 @@ pub(crate) fn build_client(token: Option<&str>) -> Result<Client, FetchError> {
 /// Sends a `Range: bytes=0-0` request mirroring `hf-hub`'s `metadata()` method.
 /// Extracts `x-repo-commit` (commit hash) and `x-linked-etag`/`etag` from the
 /// HF API response, then follows the redirect to the CDN to get the file size
-/// from `Content-Range`.
+/// from `Content-Range`. Also parses `X-Amz-Expires` from the CDN signed URL
+/// to populate [`RangeInfo::cdn_expires_at`].
 ///
 /// Returns `None` if Range requests are not supported.
 ///
@@ -255,6 +256,10 @@ fn parse_cdn_expiry(url: &str) -> Option<Instant> {
 }
 
 /// Downloads a file using parallel Range requests and writes it to the `hf-hub` cache.
+///
+/// Pre-allocates a `.chunked.part` temp file protected by a [`TempFileGuard`] — the
+/// temp file is removed automatically on error or task abort (e.g., via
+/// `JoinSet::abort_all()`), and committed only after successful finalization.
 ///
 /// # Arguments
 ///
