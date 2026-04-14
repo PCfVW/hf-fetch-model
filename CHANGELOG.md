@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Watch-based progress channel** — `FetchConfigBuilder::progress_channel()` returns a `tokio::sync::watch::Receiver<ProgressEvent>` for async consumers. Call `.changed().await` to receive the latest progress update. Composes with the existing `on_progress()` callback — both can be active simultaneously.
+
 ### Fixed
 
 - **Chunked download timeout** — chunked (multi-connection) downloads now respect `timeout_per_file` (default 300 s), matching the single-file download path. Previously, a silent network partition during a chunked download could stall indefinitely, holding the concurrency semaphore and blocking the entire batch.

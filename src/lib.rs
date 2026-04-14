@@ -93,7 +93,7 @@ pub use download::DownloadOutcome;
 pub use error::{FetchError, FileFailure};
 pub use inspect::AdapterConfig;
 pub use plan::{download_plan, DownloadPlan, FilePlan};
-pub use progress::ProgressEvent;
+pub use progress::{ProgressEvent, ProgressReceiver};
 
 use std::collections::HashMap;
 use std::path::PathBuf;

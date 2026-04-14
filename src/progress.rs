@@ -9,7 +9,7 @@
 /// A progress event emitted during download.
 ///
 /// Passed to the `on_progress` callback on [`crate::FetchConfig`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProgressEvent {
     /// The filename currently being downloaded.
     pub filename: String,
@@ -58,6 +58,15 @@ pub(crate) fn streaming_event(
         files_remaining,
     }
 }
+
+/// A watch-based receiver for [`ProgressEvent`] updates.
+///
+/// Obtained from
+/// [`FetchConfigBuilder::progress_channel()`](crate::FetchConfigBuilder::progress_channel).
+/// Call `.changed().await` to wait for the next update, then `.borrow()` to read
+/// the latest event. Only the most recent event is retained — intermediate
+/// updates that arrive between `.changed()` polls are coalesced.
+pub type ProgressReceiver = tokio::sync::watch::Receiver<ProgressEvent>;
 
 /// Multi-progress bar display using `indicatif`.
 ///

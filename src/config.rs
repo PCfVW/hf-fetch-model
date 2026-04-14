@@ -299,6 +299,28 @@ impl FetchConfigBuilder {
         self
     }
 
+    /// Creates a `tokio::sync::watch` channel for async progress consumption.
+    ///
+    /// Returns `(self, receiver)`. The receiver yields the latest [`ProgressEvent`]
+    /// via `.changed().await` + `.borrow()`. Only the most recent event is retained.
+    ///
+    /// Composes with [`on_progress()`](Self::on_progress) — if a callback was
+    /// already set, both the callback and the watch channel fire for every event.
+    #[must_use]
+    pub fn progress_channel(mut self) -> (Self, crate::progress::ProgressReceiver) {
+        let (tx, rx) = tokio::sync::watch::channel(ProgressEvent::default());
+        let existing = self.on_progress.take();
+        // TRAIT_OBJECT: heterogeneous progress handlers composed with watch sender
+        self.on_progress = Some(Arc::new(move |event: &ProgressEvent| {
+            if let Some(ref cb) = existing {
+                cb(event);
+            }
+            // BORROW: explicit .clone() for owned ProgressEvent sent through watch channel
+            let _ = tx.send(event.clone());
+        }));
+        (self, rx)
+    }
+
     /// Builds the [`FetchConfig`].
     ///
     /// # Errors
