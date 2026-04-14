@@ -304,6 +304,10 @@ impl FetchConfigBuilder {
     /// Returns `(self, receiver)`. The receiver yields the latest [`ProgressEvent`]
     /// via `.changed().await` + `.borrow()`. Only the most recent event is retained.
     ///
+    /// The channel is initialized with [`ProgressEvent::default()`] (all zeros,
+    /// empty filename). Use `.changed().await` rather than eager `.borrow()` to
+    /// avoid observing this sentinel value before the first real event.
+    ///
     /// Composes with [`on_progress()`](Self::on_progress) — if a callback was
     /// already set, both the callback and the watch channel fire for every event.
     #[must_use]
@@ -315,8 +319,11 @@ impl FetchConfigBuilder {
             if let Some(ref cb) = existing {
                 cb(event);
             }
-            // BORROW: explicit .clone() for owned ProgressEvent sent through watch channel
-            let _ = tx.send(event.clone());
+            // Skip clone + send if no receiver is listening.
+            if tx.receiver_count() > 0 {
+                // BORROW: explicit .clone() for owned ProgressEvent sent through watch channel
+                let _ = tx.send(event.clone());
+            }
         }));
         (self, rx)
     }
