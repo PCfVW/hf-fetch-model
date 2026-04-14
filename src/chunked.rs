@@ -64,6 +64,8 @@ pub(crate) fn repo_folder_name(repo_id: &str) -> String {
 
 /// Builds a `reqwest::Client` with no-redirect policy for probing.
 ///
+/// The client enforces a 30-second TCP connect timeout ([`CONNECT_TIMEOUT`]).
+///
 /// # Errors
 ///
 /// Returns [`FetchError::Http`] if the client or auth header cannot be constructed.
@@ -88,6 +90,8 @@ pub(crate) fn build_no_redirect_client(token: Option<&str>) -> Result<Client, Fe
 }
 
 /// Builds a `reqwest::Client` with auth token and user-agent for chunked downloads.
+///
+/// The client enforces a 30-second TCP connect timeout ([`CONNECT_TIMEOUT`]).
 ///
 /// # Errors
 ///
