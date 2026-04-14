@@ -35,7 +35,8 @@ let outcome = hf_fetch_model::download_with_config(
 | `.verify_checksums(bool)` | SHA256 verification | true |
 | `.chunk_threshold(bytes)` | Min file size for multi-connection download | auto-tuned |
 | `.connections_per_file(n)` | Parallel connections per large file | auto-tuned |
-| `.on_progress(closure)` | Progress callback | — |
+| `.on_progress(closure)` | Progress callback (sync) | — |
+| `.progress_channel()` | Returns `(self, ProgressReceiver)` for async consumers | — |
 
 ## Filter presets
 
@@ -80,6 +81,33 @@ let outcome = hf_fetch_model::download_file(
     &config,
 ).await?;
 ```
+
+## Async progress channel
+
+For async consumers (GUI/TUI apps), use `progress_channel()` instead of `on_progress()` to receive updates via a `tokio::sync::watch` receiver:
+
+```rust
+use hf_fetch_model::{FetchConfig, Filter};
+
+let (builder, progress_rx) = Filter::safetensors()
+    .progress_channel();
+let config = builder.build()?;
+
+// Spawn a task to consume progress updates
+tokio::spawn(async move {
+    while progress_rx.changed().await.is_ok() {
+        let event = progress_rx.borrow();
+        println!("{}: {:.1}%", event.filename, event.percent);
+    }
+});
+
+let outcome = hf_fetch_model::download_with_config(
+    "google/gemma-2-2b-it".to_owned(),
+    &config,
+).await?;
+```
+
+Both `on_progress()` and `progress_channel()` can be active simultaneously — the callback fires synchronously in the download task, while the watch channel coalesces updates for async polling.
 
 ## Blocking wrappers
 
@@ -181,6 +209,19 @@ if let Some(index) = inspect::fetch_shard_index("google/gemma-2-2b-it", None, No
 `TensorInfo` provides helpers: `num_elements()` (product of shape), `byte_len()` (data size from offsets), and `dtype_bytes()` (bytes per element for known dtypes).
 
 All types derive `serde::Serialize` for JSON output.
+
+## Shared HTTP client
+
+`repo::list_repo_files_with_metadata()` now requires a `&reqwest::Client` parameter to reuse TCP/TLS connections. Use `build_client()` to create one with the standard connect timeout and auth headers:
+
+```rust
+use hf_fetch_model::{build_client, repo};
+
+let client = build_client(Some("hf_..."))?;
+let files = repo::list_repo_files_with_metadata(
+    "google/gemma-2-2b-it", Some("hf_..."), None, &client,
+).await?;
+```
 
 ## Cache disk usage
 

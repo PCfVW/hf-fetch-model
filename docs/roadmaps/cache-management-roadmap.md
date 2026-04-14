@@ -206,14 +206,14 @@ Also shipped in v0.9.3 beyond the original plan: gated model pre-flight check, `
 
 Also shipped in v0.9.4 beyond the original plan: `--tag` search flag, binary name fix, em-dash legend, `--exact` help text, search cross-references, algorithmic fixes (targeted cache scans, BTreeSet dedup, filter-before-clone, TiB formatting). **Shipped.**
 
-### v0.9.5 — Library hardening
+### v0.9.5 — Library hardening ✓
 
 | Feature | Scope |
 |---------|-------|
 | Cache layout centralization | Extract all hf-hub cache path construction (`models--org--name`, `snapshots/`, `refs/`, `blobs/`) into a single `cache_layout.rs` module that delegates to `hf_hub::Repo::folder_name()`, `CacheRepo::pointer_path()`, etc. Replaces ~15 scattered `format!("models--{}", ...)` call sites across `chunked.rs`, `cache.rs`, `download.rs`, and `main.rs`. One file to audit when hf-hub bumps. |
 | Watch-based progress channel | Add a `tokio::sync::watch::Receiver<ProgressEvent>` API alongside the existing `Arc<dyn Fn>` callback. Async GUI/TUI consumers can `.changed().await` on the receiver instead of bridging the callback into a channel themselves. The existing callback API stays unchanged (backward compatible). |
 
-Internal release — no CLI changes, no new subcommands. Eliminates the two architectural weaknesses identified during v0.9.3 review (hf-hub layout coupling, callback-only progress API) and sets up clean foundations for v0.10.0 feature work.
+Also shipped in v0.9.5 beyond the original plan: 8 audit fixes (chunked download timeout, TCP connect timeout, Windows blob corruption, POSIX symlink TOCTOU race, inspect task cancellation, blocking I/O moved to `spawn_blocking`, CDN URL expiry detection with re-probe, temp file RAII cleanup), shared HTTP client for `list_repo_files_with_metadata`, `parse_header_json` zero-clone iteration, `check_disk_space` cache scan removal. **Shipped.**
 
 ### v0.10.0 — Cache maturity
 
