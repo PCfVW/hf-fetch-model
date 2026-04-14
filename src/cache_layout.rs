@@ -59,9 +59,15 @@ pub fn blob_path(repo_dir: &Path, etag: &str) -> PathBuf {
 }
 
 /// Temp blob path for chunked downloads: `{repo_dir}/blobs/{etag}.chunked.part`.
+///
+/// Uses string concatenation rather than [`Path::with_extension`] to handle
+/// etags containing periods (e.g., `"abc.def"` → `"abc.def.chunked.part"`,
+/// not `"abc.chunked.part"`).
 #[must_use]
 pub fn temp_blob_path(repo_dir: &Path, etag: &str) -> PathBuf {
-    blob_path(repo_dir, etag).with_extension("chunked.part")
+    let mut name = etag.to_owned();
+    name.push_str(".chunked.part");
+    blobs_dir(repo_dir).join(name)
 }
 
 /// Refs directory: `{repo_dir}/refs/`.

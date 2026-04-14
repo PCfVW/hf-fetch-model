@@ -304,7 +304,8 @@ pub(crate) async fn download_chunked(
     }
 
     // Create directories and pre-allocate temp file.
-    let temp_path = prepare_temp_file(&blob_path, &pointer_path, total_size).await?;
+    let temp_path = crate::cache_layout::temp_blob_path(&repo_dir, range_info.etag.as_str());
+    prepare_temp_file(&blob_path, &pointer_path, &temp_path, total_size).await?;
     let mut temp_guard = TempFileGuard::new(temp_path.clone());
 
     // Compute chunk boundaries.
@@ -433,8 +434,9 @@ impl Drop for TempFileGuard {
 async fn prepare_temp_file(
     blob_path: &std::path::Path,
     pointer_path: &std::path::Path,
+    temp_path: &std::path::Path,
     total_size: u64,
-) -> Result<PathBuf, FetchError> {
+) -> Result<(), FetchError> {
     if let Some(parent) = blob_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -452,21 +454,18 @@ async fn prepare_temp_file(
             })?;
     }
 
-    let temp_path = blob_path.with_extension("chunked.part");
-    let f = tokio::fs::File::create(&temp_path)
+    let f = tokio::fs::File::create(temp_path)
         .await
         .map_err(|e| FetchError::Io {
-            // BORROW: explicit .clone() for owned PathBuf
-            path: temp_path.clone(),
+            path: temp_path.to_path_buf(),
             source: e,
         })?;
     f.set_len(total_size).await.map_err(|e| FetchError::Io {
-        // BORROW: explicit .clone() for owned PathBuf
-        path: temp_path.clone(),
+        path: temp_path.to_path_buf(),
         source: e,
     })?;
 
-    Ok(temp_path)
+    Ok(())
 }
 
 /// Finalizes a chunked download: renames temp → blob, creates pointer symlink, writes refs.
