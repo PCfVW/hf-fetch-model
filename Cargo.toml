@@ -1,6 +1,6 @@
 [package]
 name = "hf-fetch-model"
-version = "0.9.4"
+version = "0.9.5"
 edition = "2021"
 rust-version = "1.88"
 description = "Fast HuggingFace model downloads for Rust — an embeddable library for downloading HuggingFace models with maximum throughput"

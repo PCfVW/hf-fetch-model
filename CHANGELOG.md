@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] — Library hardening
+
 ### Added
 
 - **Watch-based progress channel** — `FetchConfigBuilder::progress_channel()` returns a `tokio::sync::watch::Receiver<ProgressEvent>` for async consumers. Call `.changed().await` to receive the latest progress update. Composes with the existing `on_progress()` callback — both can be active simultaneously.
