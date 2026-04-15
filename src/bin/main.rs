@@ -865,9 +865,17 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
     println!();
 
     // Display file table.
-    println!("  {:<48} {:>10}  Status", "File", "Size");
+    let fw = plan
+        .files
+        .iter()
+        .map(|fp| fp.filename.len())
+        .max()
+        .unwrap_or(4)
+        .max(4); // BORROW: "File".len()
+    let row_width = fw + 2 + 10 + 2 + 11;
+    println!("  {:<fw$} {:>10}  Status", "File", "Size");
     println!(
-        "  {:\u{2500}<48} {:\u{2500}<10}  {:\u{2500}<12}",
+        "  {:\u{2500}<fw$} {:\u{2500}<10}  {:\u{2500}<12}",
         "", "", ""
     );
     for fp in &plan.files {
@@ -877,14 +885,14 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
             "to download"
         };
         println!(
-            "  {:<48} {:>10}  {status}",
+            "  {:<fw$} {:>10}  {status}",
             fp.filename,
             format_size(fp.size)
         );
     }
 
     // Summary.
-    println!("{:\u{2500}<74}", "  ");
+    println!("{:\u{2500}<row_width$}", "  ");
     let cached_count = plan.files.len() - plan.files_to_download();
     let to_dl = plan.files_to_download();
     println!(
@@ -1151,11 +1159,28 @@ fn run_list_families() -> Result<(), FetchError> {
         return Ok(());
     }
 
-    println!("{:<16}Models", "Family");
-    println!("{:-<16}{:-<64}", "", "");
-    for (model_type, repos) in &families {
-        let repos_str = repos.join(", ");
-        println!("{model_type:<16}{repos_str}");
+    let fw = families
+        .keys()
+        .map(String::len)
+        .max()
+        .unwrap_or(6)
+        .max(6) // BORROW: "Family".len()
+        + 2;
+    // Pre-join repo lists to avoid computing the join twice (once for width, once for display).
+    let rows: Vec<(&String, String)> = families
+        .iter()
+        .map(|(model_type, repos)| (model_type, repos.join(", ")))
+        .collect();
+    let mw = rows
+        .iter()
+        .map(|(_, joined)| joined.len())
+        .max()
+        .unwrap_or(6)
+        .max(6); // BORROW: "Models".len()
+    println!("{:<fw$}Models", "Family");
+    println!("{:-<fw$}{:-<mw$}", "", "");
+    for (model_type, repos_str) in &rows {
+        println!("{model_type:<fw$}{repos_str}");
     }
 
     Ok(())
@@ -1178,10 +1203,23 @@ fn run_discover(limit: usize) -> Result<(), FetchError> {
     }
 
     println!("New families not in local cache (top models by downloads):\n");
-    println!("{:<16}Top Model", "Family");
-    println!("{:-<16}{:-<64}", "", "");
+    let fw = discovered
+        .iter()
+        .map(|f| f.model_type.len())
+        .max()
+        .unwrap_or(6)
+        .max(6) // BORROW: "Family".len()
+        + 2;
+    let mw = discovered
+        .iter()
+        .map(|f| f.top_model.len())
+        .max()
+        .unwrap_or(9)
+        .max(9); // BORROW: "Top Model".len()
+    println!("{:<fw$}Top Model", "Family");
+    println!("{:-<fw$}{:-<mw$}", "", "");
     for family in &discovered {
-        println!("{:<16}{}", family.model_type, family.top_model);
+        println!("{:<fw$}{}", family.model_type, family.top_model);
     }
 
     Ok(())
@@ -1279,7 +1317,7 @@ fn run_search(
 
         if let Some(matched) = exact_match {
             println!("Exact match:\n");
-            print_search_result(matched);
+            print_search_result(matched, matched.model_id.len());
 
             // Fetch and display model card metadata
             match rt.block_on(discover::fetch_model_card(
@@ -1292,8 +1330,9 @@ fn run_search(
             println!("No exact match for \"{query}\".");
             if !filtered.is_empty() {
                 println!("\nDid you mean:\n");
+                let nw = filtered.iter().map(|r| r.model_id.len()).max().unwrap_or(0);
                 for result in &filtered {
-                    print_search_result(result);
+                    print_search_result(result, nw);
                 }
             }
         }
@@ -1302,9 +1341,10 @@ fn run_search(
         if filtered.is_empty() {
             println!("No models found matching \"{query}\".");
         } else {
+            let nw = filtered.iter().map(|r| r.model_id.len()).max().unwrap_or(0);
             println!("Models matching \"{query}\" (by downloads):\n");
             for result in &filtered {
-                print_search_result(result);
+                print_search_result(result, nw);
             }
         }
     }
@@ -1312,7 +1352,7 @@ fn run_search(
     Ok(())
 }
 
-fn print_search_result(result: &discover::SearchResult) {
+fn print_search_result(result: &discover::SearchResult, name_width: usize) {
     let suffix = match (&result.library_name, &result.pipeline_tag) {
         (Some(lib), Some(pipe)) => format!("  [{lib}, {pipe}]"),
         (Some(lib), None) => format!("  [{lib}]"),
@@ -1320,9 +1360,10 @@ fn print_search_result(result: &discover::SearchResult) {
         (None, None) => String::new(),
     };
     println!(
-        "  hf-fm {:<48} ({} downloads){suffix}",
+        "  hf-fm {:<nw$} ({} downloads){suffix}",
         result.model_id,
-        format_downloads(result.downloads)
+        format_downloads(result.downloads),
+        nw = name_width,
     );
 }
 
@@ -1516,16 +1557,22 @@ fn run_status_all() -> Result<(), FetchError> {
     }
 
     println!("Cache: {}\n", cache_dir.display());
+    let rw = summaries
+        .iter()
+        .map(|s| s.repo_id.len())
+        .max()
+        .unwrap_or(10)
+        .max(10); // BORROW: "Repository".len()
     println!(
-        "  {:<48} {:>5}  {:>10}  Status",
+        "  {:<rw$} {:>5}  {:>10}  Status",
         "Repository", "Files", "Size"
     );
-    println!("  {:-<48} {:-<5}  {:-<10}  {:-<8}", "", "", "", "");
+    println!("  {:-<rw$} {:-<5}  {:-<10}  {:-<8}", "", "", "", "");
 
     for s in &summaries {
         let status_label = if s.has_partial { "PARTIAL" } else { "ok" };
         println!(
-            "  {:<48} {:>5}  {:>10}  {}",
+            "  {:<rw$} {:>5}  {:>10}  {}",
             s.repo_id,
             s.file_count,
             format_size(s.total_size),
@@ -1687,6 +1734,13 @@ fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
     }
 
     println!("  {repo_id}:\n");
+    let fw = files
+        .iter()
+        .map(|f| f.filename.len())
+        .max()
+        .unwrap_or(4)
+        .max(4); // BORROW: "FILE".len()
+    let row_width = 3 + 2 + 10 + 2 + fw;
     println!("  {:>3}  {:>10}  FILE", "#", "SIZE");
 
     let mut total_size: u64 = 0;
@@ -1701,7 +1755,7 @@ fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
         );
     }
 
-    println!("  {}", "\u{2500}".repeat(66));
+    println!("  {}", "\u{2500}".repeat(row_width));
     println!(
         "  {:>10}  total ({} files)",
         format_size(total_size),
@@ -2004,6 +2058,14 @@ fn run_diff(
     println!("  B: {repo_b}");
 
     if !summary {
+        // Compute name width across only-A and only-B sections for consistent columns.
+        let nw = only_a
+            .iter()
+            .chain(only_b.iter())
+            .map(|n| n.len())
+            .max()
+            .unwrap_or(0);
+
         println!();
 
         // Print only-in-A.
@@ -2017,7 +2079,7 @@ fn run_diff(
             for name in &only_a {
                 if let Some(t) = tensors_a.get(*name) {
                     let shape_str = format!("{:?}", t.shape);
-                    println!("    {name:<50} {:<8} {shape_str}", t.dtype);
+                    println!("    {name:<nw$} {:<8} {shape_str}", t.dtype);
                 }
             }
             println!();
@@ -2034,7 +2096,7 @@ fn run_diff(
             for name in &only_b {
                 if let Some(t) = tensors_b.get(*name) {
                     let shape_str = format!("{:?}", t.shape);
-                    println!("    {name:<50} {:<8} {shape_str}", t.dtype);
+                    println!("    {name:<nw$} {:<8} {shape_str}", t.dtype);
                 }
             }
             println!();
@@ -2292,23 +2354,38 @@ fn run_inspect_single(
         }
     }
 
+    // Compute dynamic column widths from the actual data.
+    let nw = info
+        .tensors
+        .iter()
+        .map(|t| t.name.len())
+        .max()
+        .unwrap_or(6)
+        .max(6); // BORROW: "Tensor".len()
+    let shape_strs: Vec<String> = info
+        .tensors
+        .iter()
+        .map(|t| format!("{:?}", t.shape))
+        .collect();
+    let sw = shape_strs.iter().map(String::len).max().unwrap_or(5).max(5); // BORROW: "Shape".len()
+    let row_width = nw + 2 + 8 + sw + 2 + 10 + 2 + 10;
+
     println!();
     println!(
-        "  {:<50} {:<8} {:<16} {:>10} {:>10}",
-        "Tensor", "Dtype", "Shape", "Size", "Params"
+        "  {:<nw$} {:<8} {:<sw$} {:>10} {:>10}",
+        "Tensor", "Dtype", "Shape", "Size", "Params",
     );
 
-    for t in &info.tensors {
-        let shape_str = format!("{:?}", t.shape);
+    for (t, shape_str) in info.tensors.iter().zip(shape_strs.iter()) {
         let size_str = format_size(t.byte_len());
         let params_str = inspect::format_params(t.num_elements());
         println!(
-            "  {:<50} {:<8} {:<16} {:>10} {:>10}",
-            t.name, t.dtype, shape_str, size_str, params_str
+            "  {:<nw$} {:<8} {:<sw$} {:>10} {:>10}",
+            t.name, t.dtype, shape_str, size_str, params_str,
         );
     }
 
-    println!("  {}", "\u{2500}".repeat(96));
+    println!("  {}", "\u{2500}".repeat(row_width));
     let filtered_count = info.tensors.len();
     let filtered_params = info.total_params();
     let tensor_label = if filtered_count == 1 {
@@ -2497,17 +2574,25 @@ fn print_shard_index_summary(repo_id: &str, index: &inspect::ShardedIndex, filte
         filtered_total += 1;
     }
 
-    println!("  {:<48} {:>8}", "File", "Tensors");
+    let fw = index
+        .shards
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(4)
+        .max(4); // BORROW: "File".len()
+    let row_width = fw + 2 + 8;
+    println!("  {:<fw$} {:>8}", "File", "Tensors");
 
     for shard in &index.shards {
         let count = by_shard.get(shard).copied().unwrap_or(0);
         if filter.is_some() && count == 0 {
             continue;
         }
-        println!("  {shard:<48} {count:>8}");
+        println!("  {shard:<fw$} {count:>8}");
     }
 
-    println!("  {}", "\u{2500}".repeat(58));
+    println!("  {}", "\u{2500}".repeat(row_width));
 
     let displayed_shards = if filter.is_some() {
         by_shard.len()
@@ -2587,7 +2672,15 @@ fn print_multi_file_summary(
     println!("  Repo:   {repo_id}");
     println!("  Source: {source}");
     println!();
-    println!("  {:<48} {:>8} {:>12}", "File", "Tensors", "Params");
+
+    let fw = results
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(4)
+        .max(4); // BORROW: "File".len()
+    let row_width = fw + 2 + 8 + 1 + 12;
+    println!("  {:<fw$} {:>8} {:>12}", "File", "Tensors", "Params");
 
     let mut total_tensors_unfiltered: usize = 0;
     let mut total_params_unfiltered: u64 = 0;
@@ -2620,12 +2713,12 @@ fn print_multi_file_summary(
         total_tensors_filtered = total_tensors_filtered.saturating_add(tensor_count);
         total_params_filtered = total_params_filtered.saturating_add(params);
         println!(
-            "  {name:<48} {tensor_count:>8} {:>12}",
+            "  {name:<fw$} {tensor_count:>8} {:>12}",
             inspect::format_params(params)
         );
     }
 
-    println!("  {}", "\u{2500}".repeat(70));
+    println!("  {}", "\u{2500}".repeat(row_width));
     let file_label = if files_with_matches == 1 {
         "file"
     } else {
@@ -2686,11 +2779,18 @@ fn run_status(
     }
 
     // File table
+    let fw = status
+        .files
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(4)
+        .max(4); // BORROW: "File".len()
     for (filename, file_status) in &status.files {
         match file_status {
             cache::FileStatus::Complete { local_size } => {
                 println!(
-                    "  {:<48} {:>10}  complete",
+                    "  {:<fw$} {:>10}  complete",
                     filename,
                     format_size(*local_size)
                 );
@@ -2700,7 +2800,7 @@ fn run_status(
                 expected_size,
             } => {
                 println!(
-                    "  {:<48} {:>10} / {:<10}  PARTIAL",
+                    "  {:<fw$} {:>10} / {:<10}  PARTIAL",
                     filename,
                     format_size(*local_size),
                     format_size(*expected_size)
@@ -2709,17 +2809,17 @@ fn run_status(
             cache::FileStatus::Missing { expected_size } => {
                 if *expected_size > 0 {
                     println!(
-                        "  {:<48} {:>10}  MISSING",
+                        "  {:<fw$} {:>10}  MISSING",
                         filename,
                         format_size(*expected_size)
                     );
                 } else {
-                    println!("  {filename:<48}          —  MISSING");
+                    println!("  {filename:<fw$} {:>10}  MISSING", "\u{2014}");
                 }
             }
             // EXPLICIT: future FileStatus variants display as UNKNOWN
             _ => {
-                println!("  {filename:<48}                UNKNOWN");
+                println!("  {filename:<fw$}              UNKNOWN");
             }
         }
     }
@@ -2843,21 +2943,29 @@ fn run_list_files(
         Vec::new()
     };
 
+    // Compute file-name column width from the actual data.
+    let fw = filtered
+        .iter()
+        .map(|f| f.filename.len())
+        .max()
+        .unwrap_or(4)
+        .max(4); // BORROW: "File".len()
+
     // Print table header.
     if no_checksum {
         if show_cached {
-            println!("  {:<48} {:>10}  Cached", "File", "Size");
-            println!("  {:<48} {:>10}  {:-<6}", "", "", "");
+            println!("  {:<fw$} {:>10}  Cached", "File", "Size");
+            println!("  {:<fw$} {:>10}  {:-<6}", "", "", "");
         } else {
-            println!("  {:<48} {:>10}", "File", "Size");
-            println!("  {:<48} {:>10}", "", "");
+            println!("  {:<fw$} {:>10}", "File", "Size");
+            println!("  {:<fw$} {:>10}", "", "");
         }
     } else if show_cached {
-        println!("  {:<48} {:>10}  {:<12}  Cached", "File", "Size", "SHA256");
-        println!("  {:<48} {:>10}  {:<12}  {:-<6}", "", "", "", "");
+        println!("  {:<fw$} {:>10}  {:<12}  Cached", "File", "Size", "SHA256");
+        println!("  {:<fw$} {:>10}  {:<12}  {:-<6}", "", "", "", "");
     } else {
-        println!("  {:<48} {:>10}  {:<12}", "File", "Size", "SHA256");
-        println!("  {:<48} {:>10}  {:<12}", "", "", "");
+        println!("  {:<fw$} {:>10}  {:<12}", "File", "Size", "SHA256");
+        println!("  {:<fw$} {:>10}  {:<12}", "", "", "");
     }
 
     // Print each file row.
@@ -2885,23 +2993,24 @@ fn run_list_files(
                 cached_count += 1;
             }
             if no_checksum {
-                println!("  {:<48} {:>10}  {mark}", f.filename, size_str);
+                println!("  {:<fw$} {:>10}  {mark}", f.filename, size_str);
             } else {
                 println!(
-                    "  {:<48} {:>10}  {:<12}  {mark}",
+                    "  {:<fw$} {:>10}  {:<12}  {mark}",
                     f.filename, size_str, sha_str
                 );
             }
         } else if no_checksum {
-            println!("  {:<48} {:>10}", f.filename, size_str);
+            println!("  {:<fw$} {:>10}", f.filename, size_str);
         } else {
-            println!("  {:<48} {:>10}  {sha_str}", f.filename, size_str);
+            println!("  {:<fw$} {:>10}  {sha_str}", f.filename, size_str);
         }
     }
 
     // Summary line.
     let count = filtered.len();
-    println!("  {:\u{2500}<72}", "");
+    let row_width = fw + 2 + 10 + 2 + 12;
+    println!("  {:\u{2500}<row_width$}", "");
     if show_cached {
         println!(
             "  {count} files, {} total ({cached_count} cached)",
