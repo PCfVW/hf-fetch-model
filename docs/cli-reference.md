@@ -191,6 +191,12 @@ hf-fm inspect google/gemma-2-2b-it
 # Suppress metadata line
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --no-metadata
 
+# Per-dtype summary (tensor count, params, size per dtype)
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --dtypes
+
+# Dtype summary for a subset of tensors
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --dtypes --filter "layers.0"
+
 # Inspect a PEFT adapter repo (auto-detects adapter_config.json)
 hf-fm inspect some-user/llama-2-7b-lora-adapter
 ```
@@ -369,6 +375,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--cached` | Cache-only mode: fail if the file is not cached locally | off |
+| `--dtypes` | Show a per-dtype summary (tensor count, params, size) instead of individual tensors | off |
 | `--filter` | Show only tensors whose name contains this substring | — |
 | `--json` | Output the full header as JSON instead of a human-readable table | off |
 | `--no-metadata` | Suppress the `Metadata:` line in human-readable output | off |

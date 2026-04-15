@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`inspect --dtypes` flag** — shows a per-dtype summary (tensor count, parameter count, byte size) instead of listing individual tensors. Composes with `--filter` to show dtype breakdown for a subset of tensors.
+
 ### Fixed
 
 - **Dynamic table column widths** — all CLI table outputs (`inspect`, `diff`, `list-files`, `status`, `du`, `search`, `list-families`, `discover`, `--dry-run`) now compute column widths from the actual data instead of using hardcoded values. Fixes misaligned columns when tensor names, filenames, or repo IDs exceed the previous fixed width (e.g., multimodal models with long tensor prefixes like `model.vision_tower.encoder.layers.*.mlp.*`).

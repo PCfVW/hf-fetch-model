@@ -276,6 +276,9 @@ enum Commands {
         /// Show only tensors whose name contains this substring.
         #[arg(long)]
         filter: Option<String>,
+        /// Show a per-dtype summary instead of individual tensors.
+        #[arg(long)]
+        dtypes: bool,
     },
     /// List files in a remote `HuggingFace` repository (no download).
     ListFiles {
@@ -538,6 +541,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             no_metadata,
             json,
             filter,
+            dtypes,
         }) => run_inspect(
             repo_id.as_str(),
             filename.as_deref(),
@@ -547,6 +551,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             no_metadata,
             json,
             filter.as_deref(),
+            dtypes,
         ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::ListFiles {
@@ -2261,6 +2266,7 @@ fn run_inspect(
     no_metadata: bool,
     json: bool,
     filter: Option<&str>,
+    dtypes: bool,
 ) -> Result<(), FetchError> {
     match filename {
         Some(f) => run_inspect_single(
@@ -2272,6 +2278,7 @@ fn run_inspect(
             no_metadata,
             json,
             filter,
+            dtypes,
         ),
         None => run_inspect_repo(repo_id, revision, token, cached, json, filter),
     }
@@ -2288,6 +2295,7 @@ fn run_inspect_single(
     no_metadata: bool,
     json: bool,
     filter: Option<&str>,
+    dtypes: bool,
 ) -> Result<(), FetchError> {
     let (mut info, source) = if cached {
         let info = inspect::inspect_safetensors_cached(repo_id, filename, revision)?;
@@ -2352,6 +2360,12 @@ fn run_inspect_single(
             // BORROW: explicit .join() on slice
             println!("  Metadata: {}", entries.join(", "));
         }
+    }
+
+    // Per-dtype summary mode.
+    if dtypes {
+        print_dtype_summary(&info.tensors, filter, total_tensor_count, total_params);
+        return Ok(());
     }
 
     // Compute dynamic column widths from the actual data.
@@ -2550,6 +2564,81 @@ fn print_adapter_config_if_present(
     }
     if !config.target_modules.is_empty() {
         println!("    Target modules:  {}", config.target_modules.join(", "));
+    }
+}
+
+/// Prints a per-dtype summary table (tensor count, param count, byte size per dtype).
+fn print_dtype_summary(
+    tensors: &[inspect::TensorInfo],
+    filter: Option<&str>,
+    total_tensor_count: usize,
+    total_params: u64,
+) {
+    // Accumulate per-dtype counts.
+    let mut groups: HashMap<&str, (usize, u64, u64)> = HashMap::new();
+    for t in tensors {
+        let entry = groups
+            .entry(t.dtype.as_str()) // BORROW: explicit .as_str()
+            .or_insert((0, 0, 0));
+        entry.0 += 1;
+        entry.1 = entry.1.saturating_add(t.num_elements());
+        entry.2 = entry.2.saturating_add(t.byte_len());
+    }
+
+    // Sort by tensor count descending.
+    // BORROW: flatten nested HashMap tuple into (dtype, count, params, bytes)
+    let mut rows: Vec<(&str, usize, u64, u64)> = groups
+        .into_iter()
+        .map(|(dtype, (count, params, bytes))| (dtype, count, params, bytes))
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Dynamic column widths.
+    let dw = rows
+        .iter()
+        .map(|(d, _, _, _)| d.len())
+        .max()
+        .unwrap_or(5)
+        .max(5); // BORROW: "Dtype".len()
+    let row_width = dw + 2 + 8 + 2 + 12 + 2 + 10;
+
+    println!();
+    println!(
+        "  {:<dw$} {:>8} {:>12} {:>10}",
+        "Dtype", "Tensors", "Params", "Size",
+    );
+
+    for (dtype, count, params, bytes) in &rows {
+        println!(
+            "  {:<dw$} {:>8} {:>12} {:>10}",
+            dtype,
+            count,
+            inspect::format_params(*params),
+            format_size(*bytes),
+        );
+    }
+
+    println!("  {}", "\u{2500}".repeat(row_width));
+
+    let filtered_count: usize = rows.iter().map(|(_, count, _, _)| count).sum();
+    let filtered_params: u64 = rows.iter().map(|(_, _, params, _)| params).sum();
+    let tensor_label = if filtered_count == 1 {
+        "tensor"
+    } else {
+        "tensors"
+    };
+
+    if filter.is_some() {
+        println!(
+            "  {filtered_count}/{total_tensor_count} {tensor_label}, {}/{} params",
+            inspect::format_params(filtered_params),
+            inspect::format_params(total_params),
+        );
+    } else {
+        println!(
+            "  {filtered_count} {tensor_label}, {} params",
+            inspect::format_params(filtered_params),
+        );
     }
 }
 
