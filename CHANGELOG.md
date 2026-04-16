@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`inspect --dtypes` flag** — shows a per-dtype summary (tensor count, parameter count, byte size) instead of listing individual tensors. Composes with `--filter` to show dtype breakdown for a subset of tensors.
+- **`inspect --limit N` flag** — caps the tensor list to the first N entries (applied after `--filter`). Solves the "wall of JSON" problem when peeking at a large model's schema. The human-readable footer shows `shown/total` or `shown/matched/total` when truncation occurs; the `--json` output gains a top-level `truncated: { shown, total }` field so downstream consumers can detect incomplete output. Non-truncated JSON output is schema-identical to v0.9.5.
 
 ### Fixed
 

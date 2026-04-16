@@ -197,6 +197,12 @@ hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --dtypes
 # Dtype summary for a subset of tensors
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --dtypes --filter "layers.0"
 
+# Show only the first 10 tensors (useful when you just want to peek)
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --limit 10
+
+# First 5 tensors matching a filter (JSON adds a `truncated` field so consumers detect the cap)
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --filter "layers.0" --limit 5 --json
+
 # Inspect a PEFT adapter repo (auto-detects adapter_config.json)
 hf-fm inspect some-user/llama-2-7b-lora-adapter
 ```
@@ -378,6 +384,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--dtypes` | Show a per-dtype summary (tensor count, params, size) instead of individual tensors | off |
 | `--filter` | Show only tensors whose name contains this substring | — |
 | `--json` | Output the full header as JSON instead of a human-readable table | off |
+| `--limit` | Show only the first N tensors (applied after `--filter`). JSON output gains a `truncated` field when the cap is reached. | — |
 | `--no-metadata` | Suppress the `Metadata:` line in human-readable output | off |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |

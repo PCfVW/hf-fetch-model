@@ -279,6 +279,9 @@ enum Commands {
         /// Show a per-dtype summary instead of individual tensors.
         #[arg(long)]
         dtypes: bool,
+        /// Show only the first N tensors (applied after `--filter`).
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// List files in a remote `HuggingFace` repository (no download).
     ListFiles {
@@ -542,6 +545,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             json,
             filter,
             dtypes,
+            limit,
         }) => run_inspect(
             repo_id.as_str(),
             filename.as_deref(),
@@ -552,6 +556,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             json,
             filter.as_deref(),
             dtypes,
+            limit,
         ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::ListFiles {
@@ -2267,6 +2272,7 @@ fn run_inspect(
     json: bool,
     filter: Option<&str>,
     dtypes: bool,
+    limit: Option<usize>,
 ) -> Result<(), FetchError> {
     match filename {
         Some(f) => run_inspect_single(
@@ -2279,9 +2285,31 @@ fn run_inspect(
             json,
             filter,
             dtypes,
+            limit,
         ),
         None => run_inspect_repo(repo_id, revision, token, cached, json, filter),
     }
+}
+
+/// Truncation metadata added to `--json` output when `--limit` cuts the tensor list short.
+#[derive(serde::Serialize)]
+struct TruncationInfo {
+    /// Number of tensors in the `tensors` array (after filter and limit).
+    shown: usize,
+    /// Total tensors in the file (before any filter or limit).
+    total: usize,
+}
+
+/// JSON wrapper that adds a top-level `truncated` field when the output was capped by `--limit`.
+///
+/// The field is omitted entirely when the tensor list is complete, preserving
+/// the plain `SafetensorsHeaderInfo` schema for non-truncated output.
+#[derive(serde::Serialize)]
+struct InspectJsonOutput<'a> {
+    #[serde(flatten)]
+    header: &'a inspect::SafetensorsHeaderInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<TruncationInfo>,
 }
 
 /// Inspects a single `.safetensors` file and prints the result.
@@ -2296,6 +2324,7 @@ fn run_inspect_single(
     json: bool,
     filter: Option<&str>,
     dtypes: bool,
+    limit: Option<usize>,
 ) -> Result<(), FetchError> {
     let (mut info, source) = if cached {
         let info = inspect::inspect_safetensors_cached(repo_id, filename, revision)?;
@@ -2327,8 +2356,25 @@ fn run_inspect_single(
         info.tensors.retain(|t| t.name.as_str().contains(pattern));
     }
 
+    // Apply limit after filter. Track matched counts to report truncation.
+    let matched_count = info.tensors.len();
+    let matched_params = info.total_params();
+    let truncated_by_limit = matches!(limit, Some(n) if matched_count > n);
+    if let Some(n) = limit {
+        info.tensors.truncate(n);
+    }
+
     if json {
-        let output = serde_json::to_string_pretty(&info)
+        // `truncated` is `None` when the list is complete, which `skip_serializing_if`
+        // suppresses — so non-truncated output is schema-identical to v0.9.5.
+        let wrapped = InspectJsonOutput {
+            header: &info,
+            truncated: truncated_by_limit.then_some(TruncationInfo {
+                shown: info.tensors.len(),
+                total: total_tensor_count,
+            }),
+        };
+        let output = serde_json::to_string_pretty(&wrapped)
             .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
         println!("{output}");
         return Ok(());
@@ -2400,26 +2446,48 @@ fn run_inspect_single(
     }
 
     println!("  {}", "\u{2500}".repeat(row_width));
-    let filtered_count = info.tensors.len();
-    let filtered_params = info.total_params();
-    let tensor_label = if filtered_count == 1 {
+    let shown_count = info.tensors.len();
+    let shown_params = info.total_params();
+    let tensor_label = if shown_count == 1 {
         "tensor"
     } else {
         "tensors"
     };
 
-    if filter.is_some() {
-        println!(
-            "  {filtered_count}/{total_tensor_count} {tensor_label}, {}/{} params (filter: {:?})",
-            inspect::format_params(filtered_params),
-            inspect::format_params(total_params),
-            filter.unwrap_or_default(),
-        );
-    } else {
-        println!(
-            "  {filtered_count} {tensor_label}, {} params",
-            inspect::format_params(filtered_params)
-        );
+    match (filter.is_some(), truncated_by_limit) {
+        (false, false) => {
+            println!(
+                "  {shown_count} {tensor_label}, {} params",
+                inspect::format_params(shown_params)
+            );
+        }
+        (true, false) => {
+            println!(
+                "  {shown_count}/{total_tensor_count} {tensor_label}, {}/{} params (filter: {:?})",
+                inspect::format_params(shown_params),
+                inspect::format_params(total_params),
+                filter.unwrap_or_default(),
+            );
+        }
+        (false, true) => {
+            println!(
+                "  {shown_count}/{total_tensor_count} {tensor_label} shown, {}/{} params (limit: {})",
+                inspect::format_params(shown_params),
+                inspect::format_params(total_params),
+                limit.unwrap_or(0),
+            );
+        }
+        (true, true) => {
+            // Three-number format: shown/matched/total.
+            println!(
+                "  {shown_count}/{matched_count}/{total_tensor_count} {tensor_label} shown, {}/{}/{} params (filter: {:?}, limit: {})",
+                inspect::format_params(shown_params),
+                inspect::format_params(matched_params),
+                inspect::format_params(total_params),
+                filter.unwrap_or_default(),
+                limit.unwrap_or(0),
+            );
+        }
     }
 
     Ok(())
