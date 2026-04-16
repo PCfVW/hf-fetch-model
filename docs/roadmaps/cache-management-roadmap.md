@@ -232,15 +232,16 @@ Closest prior art: [EricLBuehler/safetensors_explorer](https://github.com/EricLB
 
 Critical for answering candle ecosystem issues ([#3448](https://github.com/huggingface/candle/issues/3448), [#2875](https://github.com/huggingface/candle/issues/2875)) where users are stuck because they can't see the tensor structure.
 
-### v0.10.0 — Cache maturity
+### v0.10.0 — Cache maturity & first docs
 
 | Feature | Scope |
 |---------|-------|
 | `cache verify` | SHA256 re-verification against HF LFS metadata (requires network). Detailed design in [v0.10.0 roadmap](v0.10.0-roadmap.md). |
 | `cache gc` | Age-based (`--older-than`) and budget-based (`--max-size`) eviction, with `--except`, `--dry-run`. Requires the "last accessed" heuristic. |
 | `du --tree` | Tree-view of cache directory structure with box-drawing characters. Reuses the visual style established by `inspect --tree` in v0.9.6 (same `├──`, `└──`, `│   ` connectors and dynamic column-width approach). |
+| **First docs effort** | **Workflow tutorial (`search` → `inspect` → `download` → `cache` lifecycle); per-feature "how to use" docs for the new cache commands (`verify`, `gc`, `du --tree`); first batch of `docs/case-studies/` capturing real-world investigations (e.g., candle [#3448](https://github.com/huggingface/candle/issues/3448) Gemma 4 multimodal naming + per-layer shape variation, [#2875](https://github.com/huggingface/candle/issues/2875) Flux F8_E4M3 dtype audit). Case studies are written *after* the issue comments have had time to gather feedback, so the narrative is informed by real reception. Establishes the habit of shipping docs alongside features.** |
 
-These are more complex: verify needs network + checksum comparison, gc needs the last-accessed heuristic and interactive prompt safety, `du --tree` is a display feature that benefits from the `du --age` timestamps added in v0.9.4. Bundle them as the "cache maturity" release.
+These are more complex than prior releases: verify needs network + checksum comparison, gc needs the last-accessed heuristic and interactive prompt safety, `du --tree` is a display feature that benefits from the `du --age` timestamps added in v0.9.4. The docs effort scopes to the new v0.10.0 cache features plus the first case studies (not a comprehensive rewrite of all existing docs). This is the project's coming-of-age release: where `hf-fetch-model` graduates from "useful tool with `--help`" to "documented, mature tool with narrative onboarding".
 
 ### v0.10.1 — GGUF inspect (cached)
 
