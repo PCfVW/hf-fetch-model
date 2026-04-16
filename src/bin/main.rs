@@ -2364,6 +2364,11 @@ fn run_inspect_single(
         info.tensors.truncate(n);
     }
 
+    // `--dtypes --json`: compact dtype breakdown as JSON (distinct schema from plain --json).
+    if dtypes && json {
+        return print_dtype_summary_json(&info.tensors, total_tensor_count, total_params);
+    }
+
     if json {
         // `truncated` is `None` when the list is complete, which `skip_serializing_if`
         // suppresses — so non-truncated output is schema-identical to v0.9.5.
@@ -2635,14 +2640,30 @@ fn print_adapter_config_if_present(
     }
 }
 
-/// Prints a per-dtype summary table (tensor count, param count, byte size per dtype).
-fn print_dtype_summary(
-    tensors: &[inspect::TensorInfo],
-    filter: Option<&str>,
-    total_tensor_count: usize,
+/// One row of a `--dtypes` summary.
+#[derive(serde::Serialize)]
+struct DtypeGroup<'a> {
+    dtype: &'a str,
+    tensors: usize,
+    params: u64,
+    bytes: u64,
+}
+
+/// JSON shape emitted by `inspect --dtypes --json`.
+///
+/// `total_tensors` and `total_params` always reflect the whole file, before any
+/// filter. Summing the `dtypes` array gives the filtered totals.
+#[derive(serde::Serialize)]
+struct DtypeSummaryJson<'a> {
+    dtypes: Vec<DtypeGroup<'a>>,
+    total_tensors: usize,
     total_params: u64,
-) {
-    // Accumulate per-dtype counts.
+}
+
+/// Groups tensors by dtype and returns rows sorted by tensor count descending.
+///
+/// Each row is `(dtype, count, params, bytes)`.
+fn compute_dtype_groups(tensors: &[inspect::TensorInfo]) -> Vec<(&str, usize, u64, u64)> {
     let mut groups: HashMap<&str, (usize, u64, u64)> = HashMap::new();
     for t in tensors {
         let entry = groups
@@ -2652,14 +2673,49 @@ fn print_dtype_summary(
         entry.1 = entry.1.saturating_add(t.num_elements());
         entry.2 = entry.2.saturating_add(t.byte_len());
     }
-
-    // Sort by tensor count descending.
     // BORROW: flatten nested HashMap tuple into (dtype, count, params, bytes)
     let mut rows: Vec<(&str, usize, u64, u64)> = groups
         .into_iter()
         .map(|(dtype, (count, params, bytes))| (dtype, count, params, bytes))
         .collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows
+}
+
+/// Emits the `--dtypes` summary as JSON.
+fn print_dtype_summary_json(
+    tensors: &[inspect::TensorInfo],
+    total_tensor_count: usize,
+    total_params: u64,
+) -> Result<(), FetchError> {
+    let rows = compute_dtype_groups(tensors);
+    let output = DtypeSummaryJson {
+        dtypes: rows
+            .into_iter()
+            .map(|(dtype, tensors, params, bytes)| DtypeGroup {
+                dtype,
+                tensors,
+                params,
+                bytes,
+            })
+            .collect(),
+        total_tensors: total_tensor_count,
+        total_params,
+    };
+    let serialized = serde_json::to_string_pretty(&output)
+        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+    println!("{serialized}");
+    Ok(())
+}
+
+/// Prints a per-dtype summary table (tensor count, param count, byte size per dtype).
+fn print_dtype_summary(
+    tensors: &[inspect::TensorInfo],
+    filter: Option<&str>,
+    total_tensor_count: usize,
+    total_params: u64,
+) {
+    let rows = compute_dtype_groups(tensors);
 
     // Dynamic column widths.
     let dw = rows

@@ -197,6 +197,9 @@ hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --dtypes
 # Dtype summary for a subset of tensors
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --dtypes --filter "layers.0"
 
+# Dtype summary as JSON (for scripting / cross-model aggregation)
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --dtypes --json
+
 # Show only the first 10 tensors (useful when you just want to peek)
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --limit 10
 
@@ -381,7 +384,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--cached` | Cache-only mode: fail if the file is not cached locally | off |
-| `--dtypes` | Show a per-dtype summary (tensor count, params, size) instead of individual tensors | off |
+| `--dtypes` | Show a per-dtype summary (tensor count, params, size) instead of individual tensors. Composes with `--json` to emit `{ dtypes: [...], total_tensors, total_params }`. | off |
 | `--filter` | Show only tensors whose name contains this substring | — |
 | `--json` | Output the full header as JSON instead of a human-readable table | off |
 | `--limit` | Show only the first N tensors (applied after `--filter`). JSON output gains a `truncated` field when the cap is reached. | — |
