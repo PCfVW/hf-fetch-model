@@ -2359,7 +2359,7 @@ fn run_inspect_single(
     // Apply limit after filter. Track matched counts to report truncation.
     let matched_count = info.tensors.len();
     let matched_params = info.total_params();
-    let truncated_by_limit = matches!(limit, Some(n) if matched_count > n);
+    let truncated_by_limit = limit.is_some_and(|n| matched_count > n);
     if let Some(n) = limit {
         info.tensors.truncate(n);
     }
