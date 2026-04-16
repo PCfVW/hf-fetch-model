@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] — Inspect discoverability
+
 ### Added
 
 - **`inspect --dtypes` flag** — shows a per-dtype summary (tensor count, parameter count, byte size) instead of listing individual tensors. Composes with `--filter` to show dtype breakdown for a subset of tensors.

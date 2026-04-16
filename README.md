@@ -124,6 +124,22 @@ $ hf-fm inspect EleutherAI/pythia-1.4b model.safetensors --cached --filter "laye
   ────────────────────────────────────────────────────────────────────────────────────────────────
   15/364 tensors, 54.6M/1.52B params (filter: "layers.0.")
 
+$ hf-fm inspect google/gemma-4-E2B-it model.safetensors --tree --filter "embed"
+  Repo:     google/gemma-4-E2B-it
+  File:     model.safetensors
+  Source:   remote (2 HTTP requests)
+
+  └── model.
+      ├── embed_audio.embedding_projection.weight   BF16  [1536, 1536]   4.50 MiB
+      ├── embed_vision.embedding_projection.weight  BF16  [1536, 768]    2.25 MiB
+      ├── language_model.
+      │   ├── embed_tokens.weight            BF16  [262144, 1536]      768.00 MiB
+      │   └── embed_tokens_per_layer.weight  BF16  [262144, 8960]        4.38 GiB
+      └── vision_tower.patch_embedder.
+          ├── input_proj.weight         BF16  [768, 768]        1.12 MiB
+          └── position_embedding_table  BF16  [2, 10240, 768]  30.00 MiB
+  6/2011 tensors, 2.77B/5.12B params (filter: "embed")
+
 $ hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq --cached --summary
   A: RedHatAI/Llama-3.2-1B-Instruct-FP8
   B: casperhansen/llama-3.2-1b-instruct-awq
@@ -131,7 +147,7 @@ $ hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instru
   A: 371 tensors | B: 370 tensors | only-A: 337 | only-B: 336 | differ: 34 | match: 0
 ```
 
-Inspect reads tensor metadata via HTTP Range requests (2 requests per file) — no weight data downloaded. Diff compares tensor names, dtypes, and shapes between any two models (remote or cached).
+Inspect reads tensor metadata via HTTP Range requests (2 requests per file) — no weight data downloaded. The `--tree` flag shows the hierarchical namespace with numeric sibling groups auto-collapsed to `[0..N]` for structural discovery. Diff compares tensor names, dtypes, and shapes between any two models (remote or cached).
 
 ## Disk usage
 
