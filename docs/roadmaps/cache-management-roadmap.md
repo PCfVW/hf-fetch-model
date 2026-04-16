@@ -215,12 +215,47 @@ Also shipped in v0.9.4 beyond the original plan: `--tag` search flag, binary nam
 
 Also shipped in v0.9.5 beyond the original plan: 8 audit fixes (chunked download timeout, TCP connect timeout, Windows blob corruption, POSIX symlink TOCTOU race, inspect task cancellation, blocking I/O moved to `spawn_blocking`, CDN URL expiry detection with re-probe, temp file RAII cleanup), shared HTTP client for `list_repo_files_with_metadata`, `parse_header_json` zero-clone iteration, `check_disk_space` cache scan removal. **Shipped.**
 
+### v0.9.6 — Inspect discoverability
+
+| Feature | Scope |
+|---------|-------|
+| Dynamic table column widths | All 12 CLI tables (`inspect`, `diff`, `list-files`, `status`, `du`, `search`, `list-families`, `discover`, `--dry-run`, shard summary, multi-file summary, cache status) compute widths from actual data instead of hardcoded values. Fixes misalignment for long tensor/file names (e.g., multimodal models with `model.vision_tower.encoder.layers.*.mlp.*` prefixes). |
+| `inspect --dtypes` | Per-dtype summary (tensor count, params, bytes) instead of individual tensors. Composes with `--filter` for subset breakdowns. |
+| `inspect --dtypes --json` | Compact JSON schema (`{ dtypes: [...], total_tensors, total_params }`) for cross-model scripting (e.g., "find all cached models with FP8 tensors"). |
+| `inspect --limit N` | Truncates tensor list to first N entries (applied after `--filter`). Solves the "wall of JSON" problem; the `--json` output gains a `truncated: { shown, total }` field so consumers can detect incomplete output. Schema-identical to v0.9.5 when not truncated. |
+| `inspect --tree` | Hierarchical view grouped by dotted namespace. Single-child chains merge into one line; numeric sibling groups with structurally-identical sub-trees collapse to `layers.[0..N]   (×K)` with the template shown once. Composes with `--filter` and `--json` (tagged-enum schema: `leaf` / `branch` / `ranged`). Conflicts with `--dtypes` and `--limit` (clap parse-time rejection). |
+| Cargo + GitHub description | Updated to reflect inspect/diff scope, not just downloads ("Download, inspect, and compare HuggingFace models from Rust..."). |
+
+**Theme: structural discovery.** The HuggingFace ecosystem has many tools for *aggregating* (param counts, dtype distributions) but few for *exploring* (where do these tensors live? what's the namespace structure?). The `--tree` view in particular surfaces architectural variation (e.g., Gemma 4's per-layer shape differences) that flat listings hide.
+
+Closest prior art: [EricLBuehler/safetensors_explorer](https://github.com/EricLBuehler/safetensors_explorer) — interactive TUI for local files. `hf-fm inspect --tree` differs by being remote-capable (HTTP Range), printable (pasteable into bug reports/comments), explicitly range-collapsing, and integrated with the same toolchain as downloads.
+
+Critical for answering candle ecosystem issues ([#3448](https://github.com/huggingface/candle/issues/3448), [#2875](https://github.com/huggingface/candle/issues/2875)) where users are stuck because they can't see the tensor structure.
+
 ### v0.10.0 — Cache maturity
 
 | Feature | Scope |
 |---------|-------|
 | `cache verify` | SHA256 re-verification against HF LFS metadata (requires network). Detailed design in [v0.10.0 roadmap](v0.10.0-roadmap.md). |
 | `cache gc` | Age-based (`--older-than`) and budget-based (`--max-size`) eviction, with `--except`, `--dry-run`. Requires the "last accessed" heuristic. |
-| `du --tree` | Tree-view of cache directory structure with box-drawing characters. |
+| `du --tree` | Tree-view of cache directory structure with box-drawing characters. Reuses the visual style established by `inspect --tree` in v0.9.6 (same `├──`, `└──`, `│   ` connectors and dynamic column-width approach). |
 
 These are more complex: verify needs network + checksum comparison, gc needs the last-accessed heuristic and interactive prompt safety, `du --tree` is a display feature that benefits from the `du --age` timestamps added in v0.9.4. Bundle them as the "cache maturity" release.
+
+### v0.10.1 — GGUF inspect (cached)
+
+| Feature | Scope |
+|---------|-------|
+| `inspect <repo> file.gguf --cached` | Parse GGUF metadata block from locally-cached files. |
+| `--tree` for GGUF | Same hierarchical view, applied to GGUF tensor names. |
+| `--dtypes` for GGUF | Same per-dtype summary, applied to GGUF tensors (which use a different dtype encoding than safetensors — needs a small mapping layer). |
+
+Closes the format-coverage gap with `safetensors_explorer` for cached files. Lower lift than full remote support — local file reading only, leverages existing tree/dtypes infrastructure from v0.9.6. The dominant audience here is `llama.cpp` users who already have GGUF files in their HF cache.
+
+### v0.11.0 — GGUF remote inspect
+
+| Feature | Scope |
+|---------|-------|
+| GGUF metadata fetch via HTTP Range | Custom binary parser for GGUF's variable-length metadata header. Allows `inspect <repo> file.gguf --tree` *without* `--cached`. |
+
+Brings the "no weight data downloaded" advantage to GGUF — a 2 GiB quantized LLM inspectable in one HTTP request. Requires understanding GGUF's binary layout (magic + version + tensor count + key-value metadata, then tensor info table). More involved than safetensors (which has a self-describing JSON header), warranting the minor-version bump.
