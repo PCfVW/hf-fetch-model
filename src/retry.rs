@@ -135,7 +135,7 @@ mod tests {
         // Attempt 3: 5 * 2^3 = 40s, capped to 10s, then jittered to 5–10s range
         let delay = compute_delay(&policy, 3);
         assert!(delay <= Duration::from_secs(10));
-        assert!(delay >= Duration::from_millis(5000));
+        assert!(delay >= Duration::from_secs(5));
     }
 
     #[test]

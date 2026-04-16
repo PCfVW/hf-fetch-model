@@ -276,7 +276,7 @@ pub async fn repo_status(
 
         let status = if let Some(ref path) = local_path {
             if path.exists() {
-                let local_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                let local_size = std::fs::metadata(path).map_or(0, |m| m.len());
 
                 if expected_size > 0 && local_size < expected_size {
                     FileStatus::Partial {
@@ -506,7 +506,7 @@ fn find_partial_blob_size(blobs_dir: &Path) -> u64 {
         let name = entry.file_name();
         // BORROW: explicit .to_string_lossy() for OsString → str conversion
         if name.to_string_lossy().ends_with(".chunked.part") {
-            return entry.metadata().map(|m| m.len()).unwrap_or(0);
+            return entry.metadata().map_or(0, |m| m.len());
         }
     }
 
@@ -580,7 +580,7 @@ pub fn find_partial_files(repo_filter: Option<&str>) -> Result<Vec<PartialFile>,
             // BORROW: explicit .to_string_lossy() for OsString → str conversion
             let name_str = name.to_string_lossy();
             if name_str.ends_with(".chunked.part") {
-                let size = blob_entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let size = blob_entry.metadata().map_or(0, |m| m.len());
                 partials.push(PartialFile {
                     // BORROW: explicit .clone() for owned String
                     repo_id: repo_id.clone(),
@@ -640,7 +640,7 @@ pub fn cache_repo_usage(repo_id: &str) -> Result<Vec<CacheFileUsage>, FetchError
         collect_snapshot_files(&snap_path, "", &mut files);
     }
 
-    files.sort_by(|a, b| b.size.cmp(&a.size));
+    files.sort_by_key(|f| std::cmp::Reverse(f.size));
 
     Ok(files)
 }
@@ -673,7 +673,7 @@ fn collect_snapshot_files(dir: &Path, prefix: &str, files: &mut Vec<CacheFileUsa
             } else {
                 format!("{prefix}/{name}")
             };
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let size = entry.metadata().map_or(0, |m| m.len());
             files.push(CacheFileUsage { filename, size });
         }
     }

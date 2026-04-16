@@ -589,10 +589,7 @@ pub(crate) async fn download_file_by_name(
 
     // Report progress for the completed file.
     if let Some(ref cb) = on_progress {
-        let file_size = tokio::fs::metadata(&path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_size = tokio::fs::metadata(&path).await.map_or(0, |m| m.len());
         let event = progress::completed_event(filename, file_size, 0);
         cb(&event);
     }
@@ -815,10 +812,7 @@ async fn collect_results(
             Ok(path) => {
                 // Report progress for completed file.
                 let remaining = total.saturating_sub(completed_count);
-                let file_size = tokio::fs::metadata(&path)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let file_size = tokio::fs::metadata(&path).await.map_or(0, |m| m.len());
                 // BORROW: explicit .as_str() instead of Deref coercion
                 let event = progress::completed_event(file.filename.as_str(), file_size, remaining);
 

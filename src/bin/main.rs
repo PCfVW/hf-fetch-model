@@ -1623,7 +1623,7 @@ fn resolve_du_arg(arg: &str) -> Result<String, FetchError> {
     // Numeric index: resolve against the size-sorted cache summary.
     if let Ok(n) = arg.parse::<usize>() {
         let mut summaries = cache::cache_summary()?;
-        summaries.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+        summaries.sort_by_key(|s| std::cmp::Reverse(s.total_size));
 
         if n == 0 || n > summaries.len() {
             return Err(FetchError::InvalidArgument(format!(
@@ -1656,7 +1656,7 @@ fn run_du(age: bool) -> Result<(), FetchError> {
         return Ok(());
     }
 
-    summaries.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.total_size));
 
     // Compute REPO column width from the longest repo ID (minimum 48).
     let repo_width = summaries
@@ -3259,7 +3259,7 @@ fn compute_dtype_groups(tensors: &[inspect::TensorInfo]) -> Vec<(&str, usize, u6
         .into_iter()
         .map(|(dtype, (count, params, bytes))| (dtype, count, params, bytes))
         .collect();
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1));
     rows
 }
 
@@ -3410,7 +3410,7 @@ fn print_shard_index_summary(repo_id: &str, index: &inspect::ShardedIndex, filte
             filter.unwrap_or_default(),
         );
     } else {
-        println!("  {displayed_shards} {shard_label}, {filtered_total} {tensor_label}",);
+        println!("  {displayed_shards} {shard_label}, {filtered_total} {tensor_label}");
     }
     println!("  Hint: use `hf-fm inspect {repo_id} <filename>` for per-tensor detail");
 }
@@ -3721,7 +3721,7 @@ fn run_list_files(
                     .map(|dir| dir.join(f.filename.as_str()));
                 match local_path {
                     Some(ref path) if path.exists() => {
-                        let local_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                        let local_size = std::fs::metadata(path).map_or(0, |m| m.len());
                         let expected = f.size.unwrap_or(0);
                         if expected > 0 && local_size < expected {
                             "partial".to_owned()
@@ -4024,7 +4024,7 @@ fn print_download_summary(path: &Path, elapsed: Duration) {
     let total_bytes = if path.is_dir() {
         walk_dir_size(path)
     } else {
-        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+        std::fs::metadata(path).map_or(0, |m| m.len())
     };
     let elapsed_secs = elapsed.as_secs_f64();
     if total_bytes > 0 && elapsed_secs > 0.0 {
