@@ -4,7 +4,7 @@
 //!
 //! Installed as both `hf-fetch-model` and `hf-fm`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -282,6 +282,12 @@ enum Commands {
         /// Show only the first N tensors (applied after `--filter`).
         #[arg(long)]
         limit: Option<usize>,
+        /// Show a hierarchical tree view grouped by dotted namespace prefix.
+        ///
+        /// Numeric sibling groups with identical structure are collapsed to
+        /// `[0..N]` with a `×K` marker. Composes with `--filter` and `--json`.
+        #[arg(long, conflicts_with_all = ["dtypes", "limit"])]
+        tree: bool,
     },
     /// List files in a remote `HuggingFace` repository (no download).
     ListFiles {
@@ -546,6 +552,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             filter,
             dtypes,
             limit,
+            tree,
         }) => run_inspect(
             repo_id.as_str(),
             filename.as_deref(),
@@ -557,6 +564,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             filter.as_deref(),
             dtypes,
             limit,
+            tree,
         ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::ListFiles {
@@ -2273,6 +2281,7 @@ fn run_inspect(
     filter: Option<&str>,
     dtypes: bool,
     limit: Option<usize>,
+    tree: bool,
 ) -> Result<(), FetchError> {
     match filename {
         Some(f) => run_inspect_single(
@@ -2286,10 +2295,564 @@ fn run_inspect(
             filter,
             dtypes,
             limit,
+            tree,
         ),
         None => run_inspect_repo(repo_id, revision, token, cached, json, filter),
     }
 }
+
+// ============================================================================
+// --tree: hierarchical tensor-name view with auto-collapsing of numeric ranges
+// ============================================================================
+
+/// One node in a displayable tensor-name tree.
+#[allow(clippy::exhaustive_enums)] // EXHAUSTIVE: internal view type; crate owns all render paths
+#[derive(Debug, Clone)]
+enum TreeNode {
+    /// A single tensor (terminal leaf).
+    Leaf(LeafNode),
+    /// An internal node with named children.
+    Branch(BranchNode),
+    /// A collapsed numeric range like `layers.[0..27]` with shared sub-structure.
+    Ranged(RangedNode),
+}
+
+/// Leaf node: one tensor with its display-relevant metadata.
+#[derive(Debug, Clone)]
+struct LeafNode {
+    /// Segment(s) of the tensor name, collapsed from any single-child ancestor chain.
+    name: String,
+    /// Dtype string (`"BF16"`, `"F32"`, `"F8_E4M3"`, ...).
+    dtype: String,
+    /// Tensor shape.
+    shape: Vec<usize>,
+    /// Number of elements (product of shape).
+    params: u64,
+    /// Byte length of the tensor data.
+    bytes: u64,
+}
+
+/// Internal branch: children under a common dotted prefix.
+#[derive(Debug, Clone)]
+struct BranchNode {
+    /// Segment(s) for this level, collapsed from single-child ancestor chains.
+    segment: String,
+    /// Child nodes, sorted by segment (from `BTreeMap` iteration).
+    children: Vec<TreeNode>,
+    /// Aggregate tensor count across the subtree.
+    total_tensors: usize,
+    /// Aggregate parameter count across the subtree.
+    total_params: u64,
+    /// Aggregate byte count across the subtree.
+    total_bytes: u64,
+}
+
+/// Collapsed numeric range: `layers.[0..N]` with an N+1-instance identical sub-structure.
+#[derive(Debug, Clone)]
+struct RangedNode {
+    /// Segment name (e.g., `"layers"`).
+    segment: String,
+    /// Inclusive start index.
+    range_start: usize,
+    /// Inclusive end index.
+    range_end: usize,
+    /// Sub-structure appearing once; multiplied by `count` instances at display time.
+    template: Vec<TreeNode>,
+    /// Aggregate tensor count across all instances.
+    total_tensors: usize,
+    /// Aggregate parameter count across all instances.
+    total_params: u64,
+    /// Aggregate byte count across all instances.
+    total_bytes: u64,
+}
+
+impl TreeNode {
+    /// Aggregate tensor count at this subtree (including all instances for `Ranged`).
+    fn total_tensors(&self) -> usize {
+        match self {
+            Self::Leaf(_) => 1,
+            Self::Branch(b) => b.total_tensors,
+            Self::Ranged(r) => r.total_tensors,
+        }
+    }
+
+    /// Aggregate parameter count at this subtree.
+    fn total_params(&self) -> u64 {
+        match self {
+            Self::Leaf(l) => l.params,
+            Self::Branch(b) => b.total_params,
+            Self::Ranged(r) => r.total_params,
+        }
+    }
+
+    /// Aggregate byte count at this subtree.
+    fn total_bytes(&self) -> u64 {
+        match self {
+            Self::Leaf(l) => l.bytes,
+            Self::Branch(b) => b.total_bytes,
+            Self::Ranged(r) => r.total_bytes,
+        }
+    }
+}
+
+/// Intermediate trie used while building a `TreeNode` tree.
+///
+/// Each node may terminate a tensor (if `tensor` is `Some`) AND/OR have children
+/// (in the `BTreeMap`). Using a `BTreeMap` gives deterministic, sorted iteration.
+#[derive(Debug, Default)]
+struct TrieNode {
+    /// Tensor whose full name terminates at this node, if any.
+    tensor: Option<inspect::TensorInfo>,
+    /// Child nodes keyed by segment, sorted alphabetically.
+    children: BTreeMap<String, TrieNode>,
+}
+
+/// Builds a `TreeNode` forest from a slice of tensors.
+///
+/// Splits each tensor name on `.`, inserts into a trie, then converts to
+/// `TreeNode`s, collapsing single-child chains into dotted paths.
+fn build_tree(tensors: &[inspect::TensorInfo]) -> Vec<TreeNode> {
+    let mut root = TrieNode::default();
+    for t in tensors {
+        // BORROW: explicit .as_str() instead of Deref coercion
+        let segments: Vec<&str> = t.name.as_str().split('.').collect();
+        insert_trie(&mut root, &segments, t.clone());
+    }
+    // Top-level nodes come from root's children (root itself has no segment).
+    root.children
+        .into_iter()
+        .map(|(seg, child)| trie_to_tree(seg, child))
+        .collect()
+}
+
+/// Inserts a tensor into the trie along a path of segments.
+fn insert_trie(node: &mut TrieNode, segments: &[&str], tensor: inspect::TensorInfo) {
+    // INDEX: slice split — first element and tail used; empty segments unreachable
+    //        because .split('.') on a non-empty string always yields at least one item
+    let Some((head, rest)) = segments.split_first() else {
+        node.tensor = Some(tensor);
+        return;
+    };
+    if rest.is_empty() {
+        // BORROW: (*head).to_owned() for &&str → String key
+        let child = node.children.entry((*head).to_owned()).or_default();
+        child.tensor = Some(tensor);
+    } else {
+        // BORROW: (*head).to_owned() for &&str → String key
+        let child = node.children.entry((*head).to_owned()).or_default();
+        insert_trie(child, rest, tensor);
+    }
+}
+
+/// Converts a trie node into a `TreeNode`, collapsing single-child chains.
+fn trie_to_tree(segment: String, mut node: TrieNode) -> TreeNode {
+    // No children: must be a leaf (or a degenerate empty node — treat as empty branch).
+    if node.children.is_empty() {
+        if let Some(tensor) = node.tensor {
+            // Compute stats before moving out dtype/shape.
+            let params = tensor.num_elements();
+            let bytes = tensor.byte_len();
+            return TreeNode::Leaf(LeafNode {
+                name: segment,
+                dtype: tensor.dtype,
+                shape: tensor.shape,
+                params,
+                bytes,
+            });
+        }
+        // EXPLICIT: unreachable in well-formed input; fall through to empty branch for safety
+        return TreeNode::Branch(BranchNode {
+            segment,
+            children: Vec::new(),
+            total_tensors: 0,
+            total_params: 0,
+            total_bytes: 0,
+        });
+    }
+
+    // Single-child collapse: if no own tensor and exactly one child, merge segments.
+    if node.tensor.is_none() && node.children.len() == 1 {
+        if let Some((child_segment, child)) = node.children.pop_first() {
+            let merged = format!("{segment}.{child_segment}");
+            return trie_to_tree(merged, child);
+        }
+    }
+
+    // Multi-child branch: recurse into each, compute aggregates.
+    let mut children: Vec<TreeNode> = node
+        .children
+        .into_iter()
+        .map(|(seg, child)| trie_to_tree(seg, child))
+        .collect();
+
+    // If this node also carries its own tensor alongside children, surface it as
+    // a pseudo-leaf with an empty name (rare in safetensors; kept for correctness).
+    if let Some(tensor) = node.tensor {
+        // Compute stats before moving out dtype/shape.
+        let params = tensor.num_elements();
+        let bytes = tensor.byte_len();
+        children.insert(
+            0,
+            TreeNode::Leaf(LeafNode {
+                name: String::new(),
+                dtype: tensor.dtype,
+                shape: tensor.shape,
+                params,
+                bytes,
+            }),
+        );
+    }
+
+    let total_tensors: usize = children.iter().map(TreeNode::total_tensors).sum();
+    let total_params: u64 = children
+        .iter()
+        .map(TreeNode::total_params)
+        .fold(0u64, u64::saturating_add);
+    let total_bytes: u64 = children
+        .iter()
+        .map(TreeNode::total_bytes)
+        .fold(0u64, u64::saturating_add);
+
+    TreeNode::Branch(BranchNode {
+        segment,
+        children,
+        total_tensors,
+        total_params,
+        total_bytes,
+    })
+}
+
+/// Post-processes a tree in place, collapsing numeric-indexed sibling branches
+/// into `Ranged` nodes when their sub-structures match.
+fn collapse_ranges(nodes: Vec<TreeNode>) -> Vec<TreeNode> {
+    nodes.into_iter().map(collapse_node).collect()
+}
+
+fn collapse_node(node: TreeNode) -> TreeNode {
+    match node {
+        TreeNode::Leaf(_) => node,
+        TreeNode::Branch(mut branch) => {
+            // Recurse first: child-level collapses before parent-level check.
+            branch.children = collapse_ranges(branch.children);
+            try_collapse_range(&branch).map_or(TreeNode::Branch(branch), TreeNode::Ranged)
+        }
+        TreeNode::Ranged(mut ranged) => {
+            // Already ranged — recurse into template anyway for nested structure.
+            ranged.template = collapse_ranges(ranged.template);
+            TreeNode::Ranged(ranged)
+        }
+    }
+}
+
+/// Checks whether a branch's children form a collapsible contiguous numeric range
+/// `0..N` with structurally identical sub-trees. Returns the collapsed `RangedNode`
+/// if so, or `None` if any requirement fails.
+fn try_collapse_range(branch: &BranchNode) -> Option<RangedNode> {
+    // Require at least 2 children; a single numeric child isn't a range.
+    if branch.children.len() < 2 {
+        return None;
+    }
+
+    // All children must be Branches with purely numeric segments.
+    let mut indexed: Vec<(usize, &BranchNode)> = Vec::with_capacity(branch.children.len());
+    for child in &branch.children {
+        let TreeNode::Branch(sub) = child else {
+            return None;
+        };
+        // BORROW: explicit .as_str() instead of Deref coercion
+        let idx: usize = sub.segment.as_str().parse().ok()?;
+        indexed.push((idx, sub));
+    }
+
+    // Indices must already be sorted ascending (BTreeMap order) — verify contiguous 0..N.
+    indexed.sort_by_key(|(i, _)| *i);
+    for (expected, (actual, _)) in indexed.iter().enumerate() {
+        if expected != *actual {
+            return None;
+        }
+    }
+
+    // Structurally compare every branch's children against the first.
+    // INDEX: indexed.len() >= 2 checked above, so indexed[0] is valid
+    #[allow(clippy::indexing_slicing)]
+    let (_, first_branch) = &indexed[0];
+    #[allow(clippy::indexing_slicing)]
+    for (_, other) in &indexed[1..] {
+        if !branches_structurally_equal(first_branch, other) {
+            return None;
+        }
+    }
+
+    // Collapse: use the first branch's children as the template.
+    let count = indexed.len();
+    // CAST: usize → usize, no cast needed; range_end is last index
+    let range_end = count.saturating_sub(1);
+
+    Some(RangedNode {
+        segment: branch.segment.clone(),
+        range_start: 0,
+        range_end,
+        template: first_branch.children.clone(),
+        total_tensors: branch.total_tensors,
+        total_params: branch.total_params,
+        total_bytes: branch.total_bytes,
+    })
+}
+
+/// Compares two branches' children for structural equivalence. Ignores the top-level
+/// segment (which is the numeric index — different by construction in a range).
+fn branches_structurally_equal(a: &BranchNode, b: &BranchNode) -> bool {
+    if a.children.len() != b.children.len() {
+        return false;
+    }
+    a.children
+        .iter()
+        .zip(b.children.iter())
+        .all(|(c1, c2)| nodes_structurally_equal(c1, c2))
+}
+
+/// Full structural equality including segments and leaf dtype/shape.
+fn nodes_structurally_equal(a: &TreeNode, b: &TreeNode) -> bool {
+    match (a, b) {
+        (TreeNode::Leaf(l1), TreeNode::Leaf(l2)) => {
+            l1.name == l2.name && l1.dtype == l2.dtype && l1.shape == l2.shape
+        }
+        (TreeNode::Branch(b1), TreeNode::Branch(b2)) => {
+            b1.segment == b2.segment && branches_structurally_equal(b1, b2)
+        }
+        (TreeNode::Ranged(r1), TreeNode::Ranged(r2)) => {
+            r1.segment == r2.segment
+                && r1.range_end == r2.range_end
+                && r1.template.len() == r2.template.len()
+                && r1
+                    .template
+                    .iter()
+                    .zip(r2.template.iter())
+                    .all(|(c1, c2)| nodes_structurally_equal(c1, c2))
+        }
+        // EXPLICIT: mismatched variants cannot be structurally equal
+        _ => false,
+    }
+}
+
+// --- Human-readable rendering ---
+
+/// Renders a tree forest to stdout using Unicode box-drawing connectors.
+fn render_tree(nodes: &[TreeNode]) {
+    render_children(nodes, "");
+}
+
+/// Renders children of a node, computing per-level leaf alignment.
+fn render_children(children: &[TreeNode], prefix: &str) {
+    // Compute max leaf-name width at THIS level for column alignment.
+    let leaf_name_width: usize = children
+        .iter()
+        .filter_map(|c| match c {
+            TreeNode::Leaf(l) => Some(l.name.len()),
+            // EXPLICIT: branch/ranged children don't contribute to leaf-name width
+            TreeNode::Branch(_) | TreeNode::Ranged(_) => None,
+        })
+        .max()
+        .unwrap_or(0);
+
+    // Max dtype width for aligned leaf rows.
+    let dtype_width: usize = children
+        .iter()
+        .filter_map(|c| match c {
+            TreeNode::Leaf(l) => Some(l.dtype.len()),
+            // EXPLICIT: branch/ranged children don't contribute to dtype width
+            TreeNode::Branch(_) | TreeNode::Ranged(_) => None,
+        })
+        .max()
+        .unwrap_or(0);
+
+    for (i, child) in children.iter().enumerate() {
+        let is_last = i + 1 == children.len();
+        render_node(child, prefix, is_last, leaf_name_width, dtype_width);
+    }
+}
+
+fn render_node(
+    node: &TreeNode,
+    prefix: &str,
+    is_last: bool,
+    leaf_name_width: usize,
+    dtype_width: usize,
+) {
+    let connector = if is_last { "└── " } else { "├── " };
+    let indent = if is_last { "    " } else { "│   " };
+
+    match node {
+        TreeNode::Leaf(leaf) => {
+            let shape_str = format!("{:?}", leaf.shape);
+            let size_str = format_size(leaf.bytes);
+            // Leaf columns: name (padded) | dtype (padded) | shape | size
+            println!(
+                "  {prefix}{connector}{name:<nw$}  {dtype:<dw$}  {shape_str}  {size_str}",
+                name = leaf.name,
+                dtype = leaf.dtype,
+                nw = leaf_name_width,
+                dw = dtype_width,
+            );
+        }
+        TreeNode::Branch(branch) => {
+            println!(
+                "  {prefix}{connector}{seg}.",
+                seg = branch.segment.as_str(), // BORROW: explicit .as_str()
+            );
+            let new_prefix = format!("{prefix}{indent}");
+            render_children(&branch.children, new_prefix.as_str()); // BORROW: explicit .as_str()
+        }
+        TreeNode::Ranged(ranged) => {
+            let count = ranged.range_end - ranged.range_start + 1;
+            println!(
+                "  {prefix}{connector}{seg}.[{start}..{end}].   (\u{00d7}{count})",
+                seg = ranged.segment.as_str(), // BORROW: explicit .as_str()
+                start = ranged.range_start,
+                end = ranged.range_end,
+            );
+            let new_prefix = format!("{prefix}{indent}");
+            render_children(&ranged.template, new_prefix.as_str()); // BORROW: explicit .as_str()
+        }
+    }
+}
+
+// --- JSON rendering ---
+
+/// JSON node: tagged enum mirroring `TreeNode` for serialization.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TreeJsonNode<'a> {
+    Leaf {
+        name: &'a str,
+        dtype: &'a str,
+        shape: &'a [usize],
+        params: u64,
+        bytes: u64,
+    },
+    Branch {
+        name: &'a str,
+        tensors: usize,
+        params: u64,
+        bytes: u64,
+        children: Vec<TreeJsonNode<'a>>,
+    },
+    Ranged {
+        name: &'a str,
+        range_start: usize,
+        range_end: usize,
+        count: usize,
+        tensors: usize,
+        params: u64,
+        bytes: u64,
+        template: Vec<TreeJsonNode<'a>>,
+    },
+}
+
+/// Top-level JSON wrapper for `--tree --json`.
+#[derive(serde::Serialize)]
+struct TreeJsonOutput<'a> {
+    repo_id: &'a str,
+    filename: &'a str,
+    total_tensors: usize,
+    total_params: u64,
+    tree: Vec<TreeJsonNode<'a>>,
+}
+
+fn tree_to_json(nodes: &[TreeNode]) -> Vec<TreeJsonNode<'_>> {
+    nodes.iter().map(node_to_json).collect()
+}
+
+/// Builds, collapses, and prints a tensor-name tree to stdout.
+///
+/// `total_tensor_count` and `total_params` are used only for the footer line
+/// (show `X/Y tensors` when `filter` is active, or `N tensors` otherwise).
+fn print_tree_summary(
+    tensors: &[inspect::TensorInfo],
+    filter: Option<&str>,
+    total_tensor_count: usize,
+    total_params: u64,
+) {
+    let forest = collapse_ranges(build_tree(tensors));
+    println!();
+    render_tree(&forest);
+
+    // Footer: mirror the regular inspect footer conventions.
+    let shown: usize = forest.iter().map(TreeNode::total_tensors).sum();
+    let shown_params: u64 = forest
+        .iter()
+        .map(TreeNode::total_params)
+        .fold(0u64, u64::saturating_add);
+    let tensor_label = if shown == 1 { "tensor" } else { "tensors" };
+    if let Some(pattern) = filter {
+        println!(
+            "  {shown}/{total_tensor_count} {tensor_label}, {}/{} params (filter: {pattern:?})",
+            inspect::format_params(shown_params),
+            inspect::format_params(total_params),
+        );
+    } else {
+        println!(
+            "  {shown} {tensor_label}, {} params",
+            inspect::format_params(shown_params),
+        );
+    }
+}
+
+/// Builds, collapses, and emits the tree as JSON to stdout.
+fn print_tree_json(
+    repo_id: &str,
+    filename: &str,
+    tensors: &[inspect::TensorInfo],
+    total_tensor_count: usize,
+    total_params: u64,
+) -> Result<(), FetchError> {
+    let forest = collapse_ranges(build_tree(tensors));
+    let output = TreeJsonOutput {
+        repo_id,
+        filename,
+        total_tensors: total_tensor_count,
+        total_params,
+        tree: tree_to_json(&forest),
+    };
+    let serialized = serde_json::to_string_pretty(&output)
+        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+    println!("{serialized}");
+    Ok(())
+}
+
+fn node_to_json(node: &TreeNode) -> TreeJsonNode<'_> {
+    match node {
+        TreeNode::Leaf(l) => TreeJsonNode::Leaf {
+            name: l.name.as_str(),     // BORROW: explicit .as_str()
+            dtype: l.dtype.as_str(),   // BORROW: explicit .as_str()
+            shape: l.shape.as_slice(), // BORROW: explicit .as_slice()
+            params: l.params,
+            bytes: l.bytes,
+        },
+        TreeNode::Branch(b) => TreeJsonNode::Branch {
+            name: b.segment.as_str(), // BORROW: explicit .as_str()
+            tensors: b.total_tensors,
+            params: b.total_params,
+            bytes: b.total_bytes,
+            children: tree_to_json(&b.children),
+        },
+        TreeNode::Ranged(r) => {
+            let count = r.range_end - r.range_start + 1;
+            TreeJsonNode::Ranged {
+                name: r.segment.as_str(), // BORROW: explicit .as_str()
+                range_start: r.range_start,
+                range_end: r.range_end,
+                count,
+                tensors: r.total_tensors,
+                params: r.total_params,
+                bytes: r.total_bytes,
+                template: tree_to_json(&r.template),
+            }
+        }
+    }
+}
+
+// ============================================================================
 
 /// Truncation metadata added to `--json` output when `--limit` cuts the tensor list short.
 #[derive(serde::Serialize)]
@@ -2325,6 +2888,7 @@ fn run_inspect_single(
     filter: Option<&str>,
     dtypes: bool,
     limit: Option<usize>,
+    tree: bool,
 ) -> Result<(), FetchError> {
     let (mut info, source) = if cached {
         let info = inspect::inspect_safetensors_cached(repo_id, filename, revision)?;
@@ -2362,6 +2926,17 @@ fn run_inspect_single(
     let truncated_by_limit = limit.is_some_and(|n| matched_count > n);
     if let Some(n) = limit {
         info.tensors.truncate(n);
+    }
+
+    // `--tree --json`: hierarchical tree as JSON (distinct schema from plain --json).
+    if tree && json {
+        return print_tree_json(
+            repo_id,
+            filename,
+            &info.tensors,
+            total_tensor_count,
+            total_params,
+        );
     }
 
     // `--dtypes --json`: compact dtype breakdown as JSON (distinct schema from plain --json).
@@ -2411,6 +2986,12 @@ fn run_inspect_single(
             // BORROW: explicit .join() on slice
             println!("  Metadata: {}", entries.join(", "));
         }
+    }
+
+    // Hierarchical tree mode.
+    if tree {
+        print_tree_summary(&info.tensors, filter, total_tensor_count, total_params);
+        return Ok(());
     }
 
     // Per-dtype summary mode.

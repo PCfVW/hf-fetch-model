@@ -200,6 +200,15 @@ hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --dtypes --f
 # Dtype summary as JSON (for scripting / cross-model aggregation)
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --dtypes --json
 
+# Hierarchical tree view (numeric sibling groups auto-collapsed to [0..N])
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --tree
+
+# Tree view of a subset of tensors
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --tree --filter "embed"
+
+# Tree as JSON (tagged enum: leaf / branch / ranged)
+hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --tree --json
+
 # Show only the first 10 tensors (useful when you just want to peek)
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --limit 10
 
@@ -389,6 +398,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--json` | Output the full header as JSON instead of a human-readable table | off |
 | `--limit` | Show only the first N tensors (applied after `--filter`). JSON output gains a `truncated` field when the cap is reached. | — |
 | `--no-metadata` | Suppress the `Metadata:` line in human-readable output | off |
+| `--tree` | Show a hierarchical tree view grouped by dotted namespace prefix; numeric sibling groups with identical sub-structure collapse to `[0..N]`. Composes with `--filter` and `--json`. Conflicts with `--dtypes` and `--limit`. | off |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
