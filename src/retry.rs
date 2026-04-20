@@ -109,7 +109,8 @@ pub(crate) fn is_retryable(error: &FetchError) -> bool {
         | FetchError::PartialDownload { .. }
         | FetchError::InvalidArgument(_)
         | FetchError::NoFilesMatched { .. }
-        | FetchError::SafetensorsHeader { .. } => false,
+        | FetchError::SafetensorsHeader { .. }
+        | FetchError::UnsupportedInspectFormat { .. } => false,
     }
 }
 

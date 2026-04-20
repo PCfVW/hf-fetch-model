@@ -580,6 +580,88 @@ pub async fn inspect_repo_safetensors(
     Ok(results)
 }
 
+/// A `(filename, size_bytes)` enumeration of safetensors files in a repo,
+/// paired with the commit SHA of the resolved revision (when known).
+///
+/// The same tuple shape serves both local and remote listings: [`list_cached_safetensors`]
+/// produces it from a cached snapshot; `repo::list_repo_files_with_commit` filtered to
+/// `*.safetensors` produces it from the `HuggingFace` API. Callers that need a uniform
+/// view over "what safetensors can I inspect?" regardless of source use this alias.
+pub type SafetensorsListing = (Vec<(String, u64)>, Option<String>);
+
+/// Lists `.safetensors` files in the cached snapshot for `repo_id`@`revision`.
+///
+/// Returns `(entries, commit_sha)` where `entries` is a sorted list of
+/// `(filename, size_bytes)` tuples, and `commit_sha` is the snapshot's commit
+/// hash (same value stored in `refs/<revision>`). Returns empty lists when the
+/// repo or revision is not cached. Unlike [`inspect_repo_safetensors_cached`],
+/// this does **not** parse any headers — it is a cheap name-and-size enumeration
+/// intended for discovery UI (e.g. `inspect --list --cached`).
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the snapshot directory cannot be read.
+pub fn list_cached_safetensors(
+    repo_id: &str,
+    revision: Option<&str>,
+) -> Result<SafetensorsListing, FetchError> {
+    let rev = revision.unwrap_or("main");
+    let cache_dir = cache::hf_cache_dir()?;
+    let repo_dir = cache_layout::repo_dir(&cache_dir, repo_id);
+
+    let Some(commit_hash) = cache::read_ref(&repo_dir, rev) else {
+        return Ok((Vec::new(), None));
+    };
+
+    let snapshot_dir = cache_layout::snapshot_dir(&repo_dir, &commit_hash);
+    if !snapshot_dir.exists() {
+        return Ok((Vec::new(), Some(commit_hash)));
+    }
+
+    let mut results = Vec::new();
+    collect_safetensors_names_sizes(&snapshot_dir, "", &mut results)?;
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((results, Some(commit_hash)))
+}
+
+/// Recursively collects `(filename, size)` pairs for `.safetensors` files.
+fn collect_safetensors_names_sizes(
+    dir: &Path,
+    prefix: &str,
+    results: &mut Vec<(String, u64)>,
+) -> Result<(), FetchError> {
+    let entries = std::fs::read_dir(dir).map_err(|e| FetchError::Io {
+        path: dir.to_path_buf(),
+        source: e,
+    })?;
+
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        // BORROW: explicit .to_string_lossy() for OsString → str conversion
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_dir() {
+            let child_prefix = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            collect_safetensors_names_sizes(&path, &child_prefix, results)?;
+        } else if name.ends_with(".safetensors") {
+            let filename = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let size = entry.metadata().map_or(0, |m| m.len());
+            results.push((filename, size));
+        }
+    }
+
+    Ok(())
+}
+
 /// Inspects all `.safetensors` files in a cached repository (no network).
 ///
 /// Walks the snapshot directory and inspects each `.safetensors` file's

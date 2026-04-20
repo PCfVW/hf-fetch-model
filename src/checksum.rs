@@ -55,6 +55,7 @@ async fn compute_sha256(path: &Path) -> Result<String, std::io::Error> {
     // BORROW: explicit .to_path_buf() — owned PathBuf needed to move into closure
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
+        use std::fmt::Write as _;
         use std::io::Read;
 
         let mut file = std::fs::File::open(&path)?;
@@ -71,8 +72,16 @@ async fn compute_sha256(path: &Path) -> Result<String, std::io::Error> {
             }
         }
 
+        // Manual lowercase-hex encoding: `sha2` 0.11 returns
+        // `hybrid_array::Array<u8, _>`, which (unlike `generic_array::GenericArray`)
+        // does not implement `fmt::LowerHex`, so `format!("{digest:x}")` no longer
+        // compiles. `write!` into `String` is infallible; the `Result` is discarded.
         let digest = hasher.finalize();
-        Ok(format!("{digest:x}"))
+        let mut hex = String::with_capacity(digest.len() * 2);
+        for &b in &digest {
+            let _ = write!(&mut hex, "{b:02x}");
+        }
+        Ok(hex)
     })
     .await
     .map_err(std::io::Error::other)?

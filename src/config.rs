@@ -389,6 +389,19 @@ impl Filter {
             .filter("*.txt")
     }
 
+    /// Returns a builder pre-configured to download only `.npz` and `.npy`
+    /// files plus common config files. Matches NumPy-based weight repos
+    /// such as Google's `GemmaScope` transcoders (`config.yaml` + many `.npz`).
+    #[must_use]
+    pub fn npz() -> FetchConfigBuilder {
+        FetchConfigBuilder::default()
+            .filter("*.npz")
+            .filter("*.npy")
+            .filter("config.yaml")
+            .filter("*.json")
+            .filter("*.txt")
+    }
+
     /// Returns a builder pre-configured to download only `pytorch_model*.bin`
     /// files plus common config files.
     #[must_use]

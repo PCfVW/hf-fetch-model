@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 use hf_fetch_model::cache;
@@ -253,10 +253,18 @@ enum Commands {
     ///
     /// Reads tensor metadata without downloading full weight data.
     /// Checks the local cache first; falls back to HTTP Range requests.
+    #[command(after_help = "Examples:\n  \
+        hf-fm inspect <repo>                             # inspect every .safetensors in the repo\n  \
+        hf-fm inspect <repo> --list                      # list safetensors files (no headers read)\n  \
+        hf-fm inspect <repo> 3                           # inspect file #3 from --list\n  \
+        hf-fm inspect <repo> model.safetensors --tree    # hierarchical view of one file\n\n\
+        Indices returned by --list are stable as long as the repo has not\n\
+        changed remotely between invocations. Pass --revision <sha> on both\n\
+        --list and the follow-up run to lock the view end-to-end.")]
     Inspect {
         /// The repository identifier (e.g., `"google/gemma-2-2b-it"`).
         repo_id: String,
-        /// Specific `.safetensors` file to inspect (omit for all).
+        /// Specific `.safetensors` file, numeric index from `--list`, or omit for all.
         filename: Option<String>,
         /// Git revision (branch, tag, or commit SHA).
         #[arg(long)]
@@ -267,6 +275,13 @@ enum Commands {
         /// Cache-only mode: fail if the file is not cached locally.
         #[arg(long)]
         cached: bool,
+        /// List `.safetensors` files in the repo (filename + size) and exit.
+        ///
+        /// Prints a numbered table; the `#` column can be used as the `filename`
+        /// argument on a follow-up run (e.g. `hf-fm inspect <repo> 3`). Indices
+        /// are alphabetical, so shard ordering is natural. No headers are read.
+        #[arg(long, conflicts_with_all = ["filename", "no_metadata", "json", "filter", "dtypes", "limit", "tree"])]
+        list: bool,
         /// Suppress the `Metadata:` line in human-readable output.
         #[arg(long)]
         no_metadata: bool,
@@ -305,7 +320,7 @@ enum Commands {
         /// Exclude glob pattern (repeatable).
         #[arg(long, action = clap::ArgAction::Append)]
         exclude: Vec<String>,
-        /// Filter preset (`safetensors`, `gguf`, `pth`, `config-only`).
+        /// Filter preset (`safetensors`, `gguf`, `npz`, `pth`, `config-only`).
         #[arg(long, value_enum)]
         preset: Option<Preset>,
         /// Suppress the SHA256 column.
@@ -365,12 +380,37 @@ enum CacheCommands {
 enum Preset {
     Safetensors,
     Gguf,
+    Npz,
     Pth,
     ConfigOnly,
 }
 
+/// Sorts a [`clap::Command`]'s subcommands alphabetically by assigning
+/// ascending `display_order` values in sorted-name order. Recurses into
+/// each subcommand so nested command trees (e.g., `cache …`) are sorted
+/// at every level.
+#[must_use]
+fn sort_subcommands_alphabetically(mut cmd: clap::Command) -> clap::Command {
+    let mut names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|sc| sc.get_name().to_owned()) // BORROW: clap borrows sc; owned String outlives the closure
+        .collect();
+    names.sort();
+    for (i, name) in names.iter().enumerate() {
+        cmd = cmd.mut_subcommand(name, |sc| {
+            sort_subcommands_alphabetically(sc).display_order(i)
+        });
+    }
+    cmd
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cmd = sort_subcommands_alphabetically(Cli::command());
+    let matches = cmd.get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
 
     // Extract --verbose from the active command context.
     // EXHAUSTIVE: non-download subcommands have no --verbose flag
@@ -547,6 +587,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             revision,
             token,
             cached,
+            list,
             no_metadata,
             json,
             filter,
@@ -559,6 +600,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             revision.as_deref(),
             token.as_deref(),
             cached,
+            list,
             no_metadata,
             json,
             filter.as_deref(),
@@ -717,6 +759,7 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
     let mut builder = match args.preset {
         Some(Preset::Safetensors) => Filter::safetensors(),
         Some(Preset::Gguf) => Filter::gguf(),
+        Some(Preset::Npz) => Filter::npz(),
         Some(Preset::Pth) => Filter::pth(),
         Some(Preset::ConfigOnly) => Filter::config_only(),
         None => FetchConfig::builder(),
@@ -828,6 +871,7 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
     let mut builder = match args.preset {
         Some(Preset::Safetensors) => Filter::safetensors(),
         Some(Preset::Gguf) => Filter::gguf(),
+        Some(Preset::Npz) => Filter::npz(),
         Some(Preset::Pth) => Filter::pth(),
         Some(Preset::ConfigOnly) => Filter::config_only(),
         None => FetchConfig::builder(),
@@ -1170,7 +1214,11 @@ fn run_download_file_glob(params: DownloadFileParams<'_>) -> Result<(), FetchErr
 }
 
 fn run_list_families() -> Result<(), FetchError> {
+    let cache_dir = cache::hf_cache_dir()?;
     let families = cache::list_cached_families()?;
+
+    println!("Cache: {}", cache_dir.display());
+    println!();
 
     if families.is_empty() {
         println!("No model families found in local cache.");
@@ -1184,21 +1232,22 @@ fn run_list_families() -> Result<(), FetchError> {
         .unwrap_or(6)
         .max(6) // BORROW: "Family".len()
         + 2;
-    // Pre-join repo lists to avoid computing the join twice (once for width, once for display).
-    let rows: Vec<(&String, String)> = families
-        .iter()
-        .map(|(model_type, repos)| (model_type, repos.join(", ")))
-        .collect();
-    let mw = rows
-        .iter()
-        .map(|(_, joined)| joined.len())
+    let mw = families
+        .values()
+        .flat_map(|repos| repos.iter().map(String::len))
         .max()
         .unwrap_or(6)
         .max(6); // BORROW: "Models".len()
     println!("{:<fw$}Models", "Family");
     println!("{:-<fw$}{:-<mw$}", "", "");
-    for (model_type, repos_str) in &rows {
-        println!("{model_type:<fw$}{repos_str}");
+    for (model_type, repos) in &families {
+        for (i, repo) in repos.iter().enumerate() {
+            if i == 0 {
+                println!("{model_type:<fw$}{repo}");
+            } else {
+                println!("{:<fw$}{repo}", "");
+            }
+        }
     }
 
     Ok(())
@@ -2268,6 +2317,14 @@ fn print_diff_json(
     Ok(())
 }
 
+/// Returns whether `filename` ends in `.safetensors` (case-insensitive).
+fn has_safetensors_extension(filename: &str) -> bool {
+    Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"))
+}
+
 /// Inspects `.safetensors` file headers for tensor metadata.
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 fn run_inspect(
@@ -2276,6 +2333,7 @@ fn run_inspect(
     revision: Option<&str>,
     token: Option<&str>,
     cached: bool,
+    list: bool,
     no_metadata: bool,
     json: bool,
     filter: Option<&str>,
@@ -2283,22 +2341,210 @@ fn run_inspect(
     limit: Option<usize>,
     tree: bool,
 ) -> Result<(), FetchError> {
+    if list {
+        return run_inspect_list(repo_id, revision, token, cached);
+    }
     match filename {
-        Some(f) => run_inspect_single(
-            repo_id,
-            f,
-            revision,
-            token,
-            cached,
-            no_metadata,
-            json,
-            filter,
-            dtypes,
-            limit,
-            tree,
-        ),
+        Some(f) => {
+            let resolved = resolve_inspect_filename_arg(f, repo_id, revision, token, cached)?;
+            // BORROW: explicit .as_str() for String → &str argument
+            run_inspect_single(
+                repo_id,
+                resolved.as_str(),
+                revision,
+                token,
+                cached,
+                no_metadata,
+                json,
+                filter,
+                dtypes,
+                limit,
+                tree,
+            )
+        }
         None => run_inspect_repo(repo_id, revision, token, cached, json, filter),
     }
+}
+
+/// Resolves an inspect filename argument to a concrete filename.
+///
+/// If `arg` parses as a positive `usize`, treats it as a 1-based index into
+/// the repository's alphabetically-sorted list of `.safetensors` files and
+/// returns the corresponding filename. Otherwise returns `arg` unchanged.
+///
+/// When an index is resolved, a one-line `Resolving index N → <name>` note
+/// is printed to stderr so the user can confirm the pick before the inspect
+/// proceeds.
+fn resolve_inspect_filename_arg(
+    arg: &str,
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+) -> Result<String, FetchError> {
+    let Ok(n) = arg.parse::<usize>() else {
+        // Not a number — treat as a literal filename.
+        // BORROW: explicit .to_owned() for &str → owned String
+        return Ok(arg.to_owned());
+    };
+
+    let (entries, commit_sha) = gather_safetensors_listing(repo_id, revision, token, cached)?;
+
+    if entries.is_empty() {
+        return Err(FetchError::InvalidArgument(format!(
+            "index {n} cannot be resolved: no .safetensors files in repository {repo_id} \
+             (run `hf-fm inspect {repo_id} --list` to confirm)"
+        )));
+    }
+
+    if n == 0 || n > entries.len() {
+        return Err(FetchError::InvalidArgument(format!(
+            "index {n} is out of range (repository has {count} .safetensors files — \
+             use 1..{count}; run `hf-fm inspect {repo_id} --list` to see them)",
+            count = entries.len()
+        )));
+    }
+
+    // INDEX: n is bounded by 1..=entries.len() checked above
+    #[allow(clippy::indexing_slicing)]
+    let (filename, _size) = &entries[n - 1];
+
+    // Transparency: show what the index resolved to before proceeding.
+    let rev_note = match &commit_sha {
+        Some(sha) => format!(" (repo rev: {})", short_sha(sha)),
+        None => String::new(),
+    };
+    eprintln!("Resolving index {n} → {filename}{rev_note}");
+
+    // BORROW: explicit .clone() for owned String result
+    Ok(filename.clone())
+}
+
+/// Returns a short (12-char) prefix of a commit SHA for display.
+fn short_sha(sha: &str) -> String {
+    // BORROW: explicit .to_owned() for &str → owned String fallback
+    sha.get(..12).map_or_else(|| sha.to_owned(), str::to_owned)
+}
+
+/// Fetches the `(filename, size_bytes)` list of safetensors files for a repo,
+/// from either the local cache or the `HuggingFace` API, sorted alphabetically.
+///
+/// Also returns the commit SHA of the resolved revision when available.
+fn gather_safetensors_listing(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+) -> Result<inspect::SafetensorsListing, FetchError> {
+    if cached {
+        return inspect::list_cached_safetensors(repo_id, revision);
+    }
+
+    // BORROW: explicit .to_owned() for Option<&str> → Option<String>
+    let resolved_token = token
+        .map(ToOwned::to_owned)
+        .or_else(|| std::env::var("HF_TOKEN").ok());
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+    let client = hf_fetch_model::build_client(resolved_token.as_deref())?;
+    let (files, commit_sha) = rt.block_on(repo::list_repo_files_with_commit(
+        repo_id,
+        resolved_token.as_deref(),
+        revision,
+        &client,
+    ))?;
+
+    let mut entries: Vec<(String, u64)> = files
+        .into_iter()
+        .filter(|f| f.filename.ends_with(".safetensors"))
+        .map(|f| (f.filename, f.size.unwrap_or(0)))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((entries, commit_sha))
+}
+
+/// Prints the numbered list of `.safetensors` files in `repo_id`.
+///
+/// Used for discovery: tells the user what filenames / indices they can pass
+/// to a follow-up `hf-fm inspect <repo> <n>` run. Does not read file headers.
+fn run_inspect_list(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+) -> Result<(), FetchError> {
+    let (entries, commit_sha) = gather_safetensors_listing(repo_id, revision, token, cached)?;
+
+    println!("Repo: {repo_id}");
+    let rev_label = revision.unwrap_or("main");
+    match &commit_sha {
+        Some(sha) => println!("Rev:  {sha} ({rev_label})"),
+        None => println!("Rev:  (unknown) ({rev_label})"),
+    }
+    println!();
+
+    if entries.is_empty() {
+        println!("No .safetensors files in this repository.");
+        if cached {
+            println!();
+            println!("Hint: the repo may not be cached locally. Try without --cached.");
+        }
+        return Ok(());
+    }
+
+    let count = entries.len();
+    // Column widths: index gutter matches the highest number; filename/size scale to data.
+    let index_width = count.to_string().len();
+    let file_width = entries
+        .iter()
+        .map(|(f, _)| f.len())
+        .max()
+        .unwrap_or(4)
+        .max(4); // BORROW: "File".len()
+    let size_strings: Vec<String> = entries.iter().map(|(_, s)| format_size(*s)).collect();
+    let size_width = size_strings
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(4)
+        .max(4); // BORROW: "Size".len()
+
+    println!(
+        "{:>index_width$}  {:<file_width$}  {:>size_width$}",
+        "#", "File", "Size"
+    );
+    println!(
+        "{:->index_width$}  {:-<file_width$}  {:->size_width$}",
+        "", "", ""
+    );
+    let mut total: u64 = 0;
+    for (i, ((filename, size), size_str)) in entries.iter().zip(size_strings.iter()).enumerate() {
+        let n = i + 1;
+        println!("{n:>index_width$}  {filename:<file_width$}  {size_str:>size_width$}");
+        total = total.saturating_add(*size);
+    }
+    println!();
+    println!("{count} file(s), {} total", format_size(total));
+
+    // Reproducibility hints: only show when the user did not pin a revision.
+    if revision.is_none() {
+        if let Some(sha) = commit_sha.as_deref() {
+            println!();
+            println!(
+                "Tip: run `hf-fm inspect {repo_id} <n>` to inspect file #n.\n     \
+                 Pass `--revision {}` on both sides to lock against this view.",
+                short_sha(sha)
+            );
+        } else {
+            println!();
+            println!("Tip: run `hf-fm inspect {repo_id} <n>` to inspect file #n.");
+        }
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -2890,6 +3136,19 @@ fn run_inspect_single(
     limit: Option<usize>,
     tree: bool,
 ) -> Result<(), FetchError> {
+    if !has_safetensors_extension(filename) {
+        // BORROW: owned Strings for error variant fields
+        let extension = Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        return Err(FetchError::UnsupportedInspectFormat {
+            filename: filename.to_owned(),
+            extension,
+        });
+    }
+
     let (mut info, source) = if cached {
         let info = inspect::inspect_safetensors_cached(repo_id, filename, revision)?;
         (info, inspect::InspectSource::Cached)
@@ -3656,6 +3915,13 @@ fn run_list_files(
             "*.txt".to_owned(),
         ],
         Some(&Preset::Gguf) => vec!["*.gguf".to_owned(), "*.json".to_owned(), "*.txt".to_owned()],
+        Some(&Preset::Npz) => vec![
+            "*.npz".to_owned(),
+            "*.npy".to_owned(),
+            "config.yaml".to_owned(),
+            "*.json".to_owned(),
+            "*.txt".to_owned(),
+        ],
         Some(&Preset::Pth) => vec![
             "pytorch_model*.bin".to_owned(),
             "*.json".to_owned(),
@@ -3984,6 +4250,10 @@ fn warn_redundant_filters(preset: &Preset, filters: &[String]) {
     let (preset_globs, preset_name): (&[&str], &str) = match preset {
         Preset::Safetensors => (&["*.safetensors", "*.json", "*.txt"], "safetensors"),
         Preset::Gguf => (&["*.gguf", "*.json", "*.txt"], "gguf"),
+        Preset::Npz => {
+            let globs: &[&str] = &["*.npz", "*.npy", "config.yaml", "*.json", "*.txt"];
+            (globs, "npz")
+        }
         Preset::Pth => {
             let globs: &[&str] = &["pytorch_model*.bin", "*.json", "*.txt"];
             (globs, "pth")

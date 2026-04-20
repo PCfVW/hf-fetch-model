@@ -1,6 +1,6 @@
 [package]
 name = "hf-fetch-model"
-version = "0.9.6"
+version = "0.9.7"
 edition = "2021"
 rust-version = "1.88"
 description = "Download, inspect, and compare HuggingFace models from Rust. Multi-connection parallel downloads plus safetensors header inspection via HTTP Range. No weight data downloaded."
@@ -23,12 +23,12 @@ dirs = "6"
 fs2 = "0.4"
 globset = "0.4"
 hf-hub = { version = "0.5", features = ["tokio"] }
-indicatif = { version = "0.17", optional = true }
+indicatif = { version = "0.18", optional = true }
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 tracing = "0.1"

@@ -114,6 +114,18 @@ pub enum FetchError {
         /// Description of the parse failure.
         reason: String,
     },
+
+    /// `inspect` was asked to read a file whose extension is not supported.
+    ///
+    /// Emitted before any parse attempt so users see a clear format mismatch
+    /// rather than a misleading header-parse error.
+    #[error("hf-fm inspect supports .safetensors only (got .{extension} for {filename})")]
+    UnsupportedInspectFormat {
+        /// The filename whose extension is unsupported.
+        filename: String,
+        /// The actual extension without the leading dot, or `unknown` if none.
+        extension: String,
+    },
 }
 
 /// A per-file download failure with structured context.

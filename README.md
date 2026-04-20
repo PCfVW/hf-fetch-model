@@ -203,6 +203,7 @@ Filter, progress, auth, and more via the builder — see [Configuration](docs/co
 | Topic | |
 |-------|---|
 | [CLI Reference](docs/cli-reference.md) | All subcommands, flags, and output examples |
+| [FAQ](docs/FAQ.md) | Common questions — installation, auth, cache location, discovery, errors |
 | [Search](docs/search.md) | Comma filtering, `--exact`, model card metadata |
 | [Configuration](docs/configuration.md) | Builder API, presets, progress callbacks |
 | [Architecture](docs/architecture.md) | How hf-fetch-model relates to `hf-hub` and `candle-mi` |

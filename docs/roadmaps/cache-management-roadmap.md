@@ -215,7 +215,7 @@ Also shipped in v0.9.4 beyond the original plan: `--tag` search flag, binary nam
 
 Also shipped in v0.9.5 beyond the original plan: 8 audit fixes (chunked download timeout, TCP connect timeout, Windows blob corruption, POSIX symlink TOCTOU race, inspect task cancellation, blocking I/O moved to `spawn_blocking`, CDN URL expiry detection with re-probe, temp file RAII cleanup), shared HTTP client for `list_repo_files_with_metadata`, `parse_header_json` zero-clone iteration, `check_disk_space` cache scan removal. **Shipped.**
 
-### v0.9.6 — Inspect discoverability
+### v0.9.6 — Inspect discoverability ✓ ✓
 
 | Feature | Scope |
 |---------|-------|
@@ -231,6 +231,29 @@ Also shipped in v0.9.5 beyond the original plan: 8 audit fixes (chunked download
 Closest prior art: [EricLBuehler/safetensors_explorer](https://github.com/EricLBuehler/safetensors_explorer) — interactive TUI for local files. `hf-fm inspect --tree` differs by being remote-capable (HTTP Range), printable (pasteable into bug reports/comments), explicitly range-collapsing, and integrated with the same toolchain as downloads.
 
 Critical for answering candle ecosystem issues ([#3448](https://github.com/huggingface/candle/issues/3448), [#2875](https://github.com/huggingface/candle/issues/2875)) where users are stuck because they can't see the tensor structure.
+
+### v0.9.7 — Inspect discoverability & newbie-friendly UX ✓
+
+| Feature | Scope |
+|---------|-------|
+| `inspect --list` | New discovery flag: numbered `.safetensors` table (filename + size) with `Repo:` and `Rev: <commit-sha>` header, alphabetically sorted so shards order naturally. No header parsing. Footer tip advertises the short SHA to pass via `--revision` for reproducibility. Composes with `--cached` (lists local snapshot, immune to remote changes) and `--revision` (locks both `--list` and the follow-up `inspect <n>` to the same commit). |
+| `inspect <repo> <n>` numeric index | Bare-integer filenames resolve against the alphabetically-sorted safetensors listing (1-based). Literal filenames unchanged. Transparency line `Resolving index 3 → <name> (repo rev: <short-sha>)` printed to stderr before the inspect proceeds, so users catch mismatches immediately. Out-of-range indices produce a clear error pointing at `--list`. |
+| `inspect` clear error on unsupported file types | Dogfooding Gap 1 resolved: passing a non-safetensors file (e.g. `.npz`) now emits `hf-fm inspect supports .safetensors only (got .npz for <path>)` instead of the misleading `failed to parse header JSON: expected value at line 1 column 1`. Driven by a new `FetchError::UnsupportedInspectFormat { filename, extension }` variant; retry classification updated accordingly. |
+| `--preset npz` | Dogfooding Gap 3 resolved: new `Preset::Npz` variant plus `Filter::npz()` builder helper. Matches `*.npz`, `*.npy`, `config.yaml`, `*.json`, `*.txt` — tuned to NumPy-based weight repos such as Google's GemmaScope transcoders. Wired into the default download command, `--dry-run`, `list-files`, and `warn_redundant_filters`. |
+| Alphabetical `--help` command listing | `hf-fm --help` and `hf-fm cache --help` now list subcommands alphabetically at runtime (via `display_order` re-assignment in `main`). Adding a new command lands in the right place automatically regardless of enum declaration order — no reviewer discipline required. |
+| `list-families` line wrapping + cache header | Each repo prints on its own line, indented under the family column (the single run-on line for large families like `llama` is gone). Output now starts with `Cache: <absolute path>`, matching the header style used by `du`. |
+| `inspect --help` examples block | `after_help` footer on the `inspect` subcommand with four concrete invocations (inspect-all / --list / index / --tree) plus a note on index stability and `--revision` pinning. Highest-ROI newbie-facing change: visible the moment the user types `--help`. |
+| `indicatif` bumped `0.17 → 0.18` | Zero source changes needed — every API we call (`MultiProgress`, `ProgressBar`, `ProgressStyle`) was stable across the bump. Concrete build-tree win: `hf-hub` already pulled in `indicatif 0.18`, so we were compiling it **twice**; now we compile it once. |
+| `cargo update` patch bumps | Eleven semver-compatible updates (tokio, openssl, clap, clap_derive, hyper-rustls, typenum, webpki-roots, and others). Routine hygiene. |
+
+**Theme: discoverability + cache visibility.** v0.9.6 shipped structural discovery *inside* a safetensors file (`--tree`, `--dtypes`); v0.9.7 extends the principle *outward* to the repo level — "what can I inspect in this repo?" answered by `--list`, "which cache am I looking at?" answered by the new `Cache:` header on `list-families`, "which commit am I picking from?" answered by `Rev:` on `inspect --list`. The pattern unifies as: **every discovery command announces its scope before showing results**, so the user never has to guess at provenance.
+
+**New public APIs.** Two additions to the library surface, both narrow and documented:
+
+- `hf_fetch_model::repo::list_repo_files_with_commit(repo_id, token, revision, client) → (Vec<RepoFile>, Option<String>)` — same HTTP call as `list_repo_files_with_metadata` but also returns the resolved commit SHA. The existing `list_repo_files_with_metadata` is now a thin wrapper over this, so the seven existing callers in the crate see no breaking change.
+- `hf_fetch_model::inspect::list_cached_safetensors(repo_id, revision) → (Vec<(String, u64)>, Option<String>)` — cheap name-and-size enumeration of cached safetensors, paired with the snapshot's commit SHA. Does **not** parse headers (unlike `inspect_repo_safetensors_cached`). Type-aliased as `CachedSafetensorsListing`.
+
+**Known narrow gap surfaced.** Building the `--revision` hardening for `inspect --list` revealed a pre-existing limitation of every `--cached` code path: `cache::read_ref` looks for `refs/<revision>` on disk, which exists for branches/tags (`main`, `v1.0.0`) but **not** for raw commit SHAs — SHAs live in `snapshots/`, not `refs/`. So `--cached --revision <full-sha>` currently prints `Rev: (unknown)` and an empty listing even when the snapshot directory exists on disk. Not a regression — every existing `--cached` path has this limitation; `--list` just made it newly *visible*. ~10-line fix in `cache.rs`, deserves its own PR with tests. Detailed analysis in [`docs/dogfooding-feedbacks/hf-fm-dogfooding.md`](../dogfooding-feedbacks/hf-fm-dogfooding.md) under "Known narrow gap uncovered".
 
 ### v0.10.0 — Cache maturity & first docs
 

@@ -75,6 +75,9 @@ struct ApiLfs {
 #[derive(Debug, Deserialize)]
 struct ApiModelInfo {
     siblings: Vec<ApiSibling>,
+    /// Commit SHA of the resolved revision, when present in the API response.
+    #[serde(default)]
+    sha: Option<String>,
 }
 
 /// Fetches extended file metadata (sizes and SHA256 hashes) via the `HuggingFace` REST API.
@@ -96,6 +99,30 @@ pub async fn list_repo_files_with_metadata(
     revision: Option<&str>,
     client: &reqwest::Client,
 ) -> Result<Vec<RepoFile>, FetchError> {
+    let (files, _commit) = list_repo_files_with_commit(repo_id, token, revision, client).await?;
+    Ok(files)
+}
+
+/// Fetches file metadata **and** the resolved commit SHA of the revision.
+///
+/// Same HTTP call as [`list_repo_files_with_metadata`], but also returns the
+/// `sha` field from the `HuggingFace` API response. Callers that need to show
+/// or pin the current revision (e.g. `inspect --list`) use this variant; all
+/// other callers should prefer [`list_repo_files_with_metadata`].
+///
+/// The commit SHA is `Option<String>` because the API has not always returned
+/// it on every endpoint variant; treat it as informational.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`] if the HTTP request fails.
+/// Returns [`FetchError::RepoNotFound`] if the repository does not exist.
+pub async fn list_repo_files_with_commit(
+    repo_id: &str,
+    token: Option<&str>,
+    revision: Option<&str>,
+    client: &reqwest::Client,
+) -> Result<(Vec<RepoFile>, Option<String>), FetchError> {
     let mut url = format!("https://huggingface.co/api/models/{repo_id}?blobs=true");
     if let Some(rev) = revision {
         url = format!("{url}&revision={rev}");
@@ -131,6 +158,7 @@ pub async fn list_repo_files_with_metadata(
         .await
         .map_err(|e| FetchError::Http(e.to_string()))?;
 
+    let commit_sha = info.sha;
     let files = info
         .siblings
         .into_iter()
@@ -147,5 +175,5 @@ pub async fn list_repo_files_with_metadata(
         })
         .collect();
 
-    Ok(files)
+    Ok((files, commit_sha))
 }

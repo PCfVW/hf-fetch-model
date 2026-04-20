@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] — Inspect discoverability & newbie-friendly UX
+
+### Added
+
+- **`--preset npz`** — new filter preset for NumPy-based weight repositories such as Google's GemmaScope transcoders (hundreds of `.npz` files + `config.yaml`). Matches `*.npz`, `*.npy`, `config.yaml`, `*.json`, `*.txt`. Available on the default download command, `--dry-run`, and `list-files`. Library users can call `Filter::npz()` directly.
+- **`inspect --list`** — new discovery flag that prints a numbered `.safetensors` file table (filename + size) for the target repo and exits without reading any headers. Output starts with `Repo:` and `Rev: <commit-sha>` so the user sees which snapshot they are looking at. Each row is a 1-based index that can be used as the `filename` argument on a follow-up run (e.g. `hf-fm inspect <repo> 3`). Files are sorted alphabetically, so shard orderings (`model-00001-of-00016.safetensors`, …) are natural.
+- **`inspect` accepts a numeric index as `filename`** — `hf-fm inspect <repo> 3` resolves index 3 against the alphabetically-sorted safetensors list, prints `Resolving index 3 → <name> (repo rev: <short-sha>)` to stderr, and then runs the normal inspect flow on the resolved name. Literal filenames continue to work exactly as before. Out-of-range indices produce a clear error pointing to `--list`.
+- **`inspect --list` composes with `--cached` and `--revision`** — `--cached` lists safetensors in the local snapshot (immune to remote changes); `--revision <sha>` locks both `--list` and the follow-up `inspect <n>` run to the same commit for end-to-end reproducibility. When no `--revision` is given, the tip line in the `--list` footer shows the short SHA users can pass to lock the view.
+- **New public API in `hf_fetch_model::repo`: `list_repo_files_with_commit`** — returns `(Vec<RepoFile>, Option<String>)` where the second element is the resolved commit SHA. Callers who only need the files should keep using `list_repo_files_with_metadata` (now a thin wrapper).
+- **New public API in `hf_fetch_model::inspect`: `list_cached_safetensors`** — cheap name-and-size enumeration of `.safetensors` files in a cached snapshot, paired with the snapshot's commit SHA. Does not parse headers.
+- **`docs/FAQ.md`** — first entry in the v0.10.0 docs effort ahead of schedule. Fifteen entries across five sections (About / Installation & auth / Discovery / Cache / Errors), conversational tone, clickable table of contents, style conventions embedded as HTML comments so future growth stays consistent. Linked from the `README.md` documentation index.
+
+### Fixed
+
+- **`inspect` on unsupported file types now emits a clear error** — previously, passing a non-safetensors file (e.g. an `.npz`) produced `safetensors header error … failed to parse header JSON: expected value at line 1 column 1`, which misled users into thinking the download was corrupt. The new error names the mismatch explicitly: `hf-fm inspect supports .safetensors only (got .npz for <path>)`. Driven by a new `FetchError::UnsupportedInspectFormat` variant.
+
+### Changed
+
+- **`--help` now sorts subcommands alphabetically** — `hf-fm --help` and `hf-fm cache --help` list commands in alphabetical order at runtime via `display_order`, so new commands land in the right place automatically regardless of enum declaration order.
+- **`list-families` wraps repo lists onto multiple lines** — each repo now prints on its own line, indented under the family column. The single run-on line for large families (e.g., `llama`) is gone, and the separator rule is sized to the widest single repo name rather than the widest joined list. The output now begins with a `Cache: <absolute path>` header so it is immediately clear which cache directory is being listed.
+- **`indicatif` bumped `0.17` → `0.18`** — no source changes required; every API we call (`MultiProgress`, `ProgressBar`, `ProgressStyle`) is unchanged across the bump. The 0.18 break was internal (`console` crate 0.15 → 0.16). Concrete build-tree win: `hf-hub` already pulled in indicatif 0.18, so we were compiling indicatif twice; now we compile it once.
+- **`sha2` bumped `0.10` → `0.11`** — one three-line source change in [`src/checksum.rs`](src/checksum.rs) to replace `format!("{digest:x}")` with a manual lowercase-hex loop, because `sha2` 0.11 returns `hybrid_array::Array<u8, _>` from `finalize()`, which (unlike the old `generic_array::GenericArray`) does not implement `fmt::LowerHex`. Verified against the existing known-value test (SHA256 of `"hello\n"` matches the canonical `5891b5…6be03` digest). Follow-on benefit: `generic-array`, `block-buffer 0.10`, `crypto-common 0.1`, and `typenum 1.19` all drop out of the build tree, and the recurring `cargo install` notice `"Adding generic-array v0.14.7 (available: v0.14.9)"` is silenced (a transitive `crypto-common 0.1.7` had pinned `generic-array = "=0.14.7"` — nothing in that chain could budge until `sha2` moved to the `digest` 0.11 wave).
+
 ## [0.9.6] — Inspect discoverability
 
 ### Added
