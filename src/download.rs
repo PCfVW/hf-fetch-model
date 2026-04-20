@@ -552,10 +552,11 @@ pub(crate) async fn download_file_by_name(
         sha256: file_meta.and_then(|m| m.sha256.clone()),
     };
 
-    // Build reqwest client (used by chunked downloads and 416 fallback).
-    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
-    let http_client = chunked::build_client(config.token.as_deref())?;
-
+    // Reuse the `http_client` built at the top of this function (used for the
+    // metadata fetch) for chunked downloads and the 416 fallback — the
+    // connection pool and TLS session established during metadata fetch are
+    // preserved, avoiding a redundant handshake.
+    //
     // Reuse cache_dir and repo_folder resolved above for the cache check.
     // BORROW: explicit .to_owned() for &str → owned String
     let revision = revision_str.to_owned();

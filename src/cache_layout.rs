@@ -82,3 +82,29 @@ pub fn refs_dir(repo_dir: &Path) -> PathBuf {
 pub fn ref_path(repo_dir: &Path, revision: &str) -> PathBuf {
     refs_dir(repo_dir).join(revision)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn blob_path_joins_repo_dir_and_etag() {
+        let rd = Path::new("/tmp/models--x--y");
+        assert_eq!(blob_path(rd, "abc123"), rd.join("blobs").join("abc123"));
+    }
+
+    #[test]
+    fn temp_blob_path_preserves_periods_in_etag() {
+        // Guards the specific behaviour called out in the `temp_blob_path`
+        // doc comment: etags containing periods must not be truncated by
+        // `Path::with_extension`. `"abc.def"` + `".chunked.part"` →
+        // `"abc.def.chunked.part"`, NOT `"abc.chunked.part"`.
+        let rd = Path::new("/tmp/models--x--y");
+        assert_eq!(
+            temp_blob_path(rd, "abc.def"),
+            rd.join("blobs").join("abc.def.chunked.part")
+        );
+    }
+}

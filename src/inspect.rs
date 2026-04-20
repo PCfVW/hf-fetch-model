@@ -264,6 +264,13 @@ fn resolve_cached_path(repo_id: &str, revision: &str, filename: &str) -> Option<
 ///
 /// Reads the first `8 + header_size` bytes from disk. Does not read tensor data.
 ///
+/// # Blocking I/O
+///
+/// This function performs synchronous filesystem I/O. In async contexts, wrap
+/// it in [`tokio::task::spawn_blocking`] so the calling task does not stall
+/// the runtime — particularly important on network-mounted caches (NFS/CIFS)
+/// where `read`/`stat` calls can take tens of milliseconds each.
+///
 /// # Errors
 ///
 /// Returns [`FetchError::Io`] if the file cannot be read.
@@ -480,6 +487,11 @@ pub async fn inspect_safetensors(
 /// Resolves the file in the local HF cache using the given `repo_id`,
 /// `revision`, and `filename`. Returns an error if the file is not cached.
 ///
+/// # Blocking I/O
+///
+/// Performs synchronous filesystem I/O; wrap in [`tokio::task::spawn_blocking`]
+/// from async contexts. See [`inspect_safetensors_local`] for rationale.
+///
 /// # Errors
 ///
 /// Returns [`FetchError::SafetensorsHeader`] if the file is not in the cache.
@@ -598,6 +610,13 @@ pub type SafetensorsListing = (Vec<(String, u64)>, Option<String>);
 /// this does **not** parse any headers — it is a cheap name-and-size enumeration
 /// intended for discovery UI (e.g. `inspect --list --cached`).
 ///
+/// # Blocking I/O
+///
+/// Performs a synchronous recursive directory walk with a `stat` call per
+/// `.safetensors` entry. On local SSDs the cost is sub-millisecond; on
+/// networked caches (NFS/CIFS) a large sharded repo can take seconds. Wrap
+/// in [`tokio::task::spawn_blocking`] from async contexts.
+///
 /// # Errors
 ///
 /// Returns [`FetchError::Io`] if the snapshot directory cannot be read.
@@ -666,6 +685,12 @@ fn collect_safetensors_names_sizes(
 ///
 /// Walks the snapshot directory and inspects each `.safetensors` file's
 /// header from local disk. Returns results in filename order.
+///
+/// # Blocking I/O
+///
+/// Walks the snapshot directory and reads each header synchronously. In async
+/// contexts, wrap in [`tokio::task::spawn_blocking`] to avoid stalling the
+/// runtime — multi-shard repos on network-mounted caches can take seconds.
 ///
 /// # Errors
 ///

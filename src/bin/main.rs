@@ -2535,8 +2535,7 @@ fn run_inspect_list(
             println!();
             println!(
                 "Tip: run `hf-fm inspect {repo_id} <n>` to inspect file #n.\n     \
-                 Pass `--revision {}` on both sides to lock against this view.",
-                short_sha(sha)
+                 Pass `--revision {sha}` on both sides to lock against this view."
             );
         } else {
             println!();
