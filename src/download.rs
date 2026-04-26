@@ -193,12 +193,15 @@ pub async fn download_all_files_map(
 ) -> Result<DownloadOutcome<HashMap<String, PathBuf>>, FetchError> {
     let overall_start = tokio::time::Instant::now();
 
-    // Check local cache first — return immediately if all files are present (no network).
-    if let Some(file_map) = try_resolve_repo_from_cache(config, repo_id.as_str()).await? {
-        return Ok(DownloadOutcome::Cached(file_map));
-    }
-
-    // Cache miss — list files from the network.
+    // List files from the network first. Until v0.9.8 we tried a "no
+    // network" cache fast-path before this listing, but that path scanned
+    // the snapshot directory and applied the user's filter to whatever
+    // happened to be on disk — so a snapshot containing only `config.json`
+    // + `tokenizer.json` (both matching `--preset safetensors`'s `*.json`
+    // clause) was incorrectly reported as fully cached even with
+    // `model.safetensors` absent. The only way to know whether the cache
+    // is complete *for this filter* is to compare against the remote
+    // listing, which is one cheap HTTP call.
     tracing::debug!(repo_id = %repo_id, "listing repository files");
     let include = config.and_then(|c| c.include.as_ref());
     let exclude = config.and_then(|c| c.exclude.as_ref());
@@ -208,6 +211,17 @@ pub async fn download_all_files_map(
         // BORROW: explicit .as_str() instead of Deref coercion
         .filter(|f| file_matches(f.filename.as_str(), include, exclude))
         .collect();
+
+    // Cache fast-path: every filtered remote file must exist on disk in
+    // the snapshot directory. Returns `None` if any single file is
+    // missing — partial caches fall through to the regular download
+    // pipeline, which then fetches only the missing files (or all of
+    // them, depending on which `dispatch_download` paths trigger).
+    if let Some(file_map) =
+        try_resolve_filtered_from_cache(config, repo_id.as_str(), files.as_slice()).await?
+    {
+        return Ok(DownloadOutcome::Cached(file_map));
+    }
 
     // Build download settings and shared HTTP client.
     let mut settings = DownloadSettings::from_config(config);
@@ -1066,47 +1080,68 @@ fn resolve_cached_file(
 /// # Errors
 ///
 /// Returns [`FetchError::Io`] if the cache directory cannot be resolved.
-async fn try_resolve_repo_from_cache(
+/// Attempts to resolve every file in `filtered_remote_files` from the local cache.
+///
+/// Returns `Some(file_map)` only when **every** file in the filtered remote
+/// listing resolves to a real path under the snapshot directory — i.e. the
+/// cache is complete *for the filter the user asked about*. Returns `None`
+/// if the snapshot dir does not exist, the refs file is missing, or any
+/// single filtered file is absent on disk.
+///
+/// This is the post-v0.9.8 replacement for the old `try_resolve_all_from_cache`,
+/// which scanned the snapshot directory and applied the filter to on-disk
+/// contents. That earlier approach was unsound: a snapshot containing only
+/// `config.json` + `tokenizer.json` (matching `--preset safetensors`'s
+/// `*.json` clause) reported as fully cached even with `model.safetensors`
+/// absent — the function had no idea what files the remote actually
+/// contained. Verifying against the remote-derived list closes that gap.
+async fn try_resolve_filtered_from_cache(
     config: Option<&FetchConfig>,
     repo_id: &str,
+    filtered_remote_files: &[repo::RepoFile],
 ) -> Result<Option<HashMap<String, PathBuf>>, FetchError> {
+    if filtered_remote_files.is_empty() {
+        return Ok(None);
+    }
+
     let cache_dir = config
         .and_then(|c| c.output_dir.clone())
         .map_or_else(crate::cache::hf_cache_dir, Ok)?;
     let repo_folder = crate::cache_layout::repo_folder_name(repo_id);
-    // BORROW: explicit .to_owned()/.clone() for owned values sent to spawn_blocking
+    // BORROW: explicit .to_owned() for owned String sent to spawn_blocking
     let revision = config
         .and_then(|c| c.revision.as_deref())
         .unwrap_or("main")
         .to_owned();
-    let include = config.and_then(|c| c.include.clone());
-    let exclude = config.and_then(|c| c.exclude.clone());
+    // BORROW: explicit .clone() for owned Vec<String> sent to spawn_blocking
+    let filenames: Vec<String> = filtered_remote_files
+        .iter()
+        .map(|f| f.filename.clone())
+        .collect();
 
     tokio::task::spawn_blocking(move || {
-        try_resolve_all_from_cache(
+        check_all_filenames_present(
             &cache_dir,
             repo_folder.as_str(),
             revision.as_str(),
-            include.as_ref(),
-            exclude.as_ref(),
+            &filenames,
         )
     })
     .await
     .map_err(|e| FetchError::Http(format!("cache resolution task failed: {e}")))
 }
 
-/// Attempts to resolve all repository files from the local cache (no network).
+/// Synchronous worker for [`try_resolve_filtered_from_cache`]. Resolves the
+/// snapshot directory for `(repo_folder, revision)` and verifies each of
+/// `filenames` exists as a regular file under it.
 ///
-/// Scans `<cache_dir>/<repo_folder>/snapshots/<commit_hash>/` for files,
-/// applies include/exclude filters, and returns a complete `filename → path`
-/// map if any files are found. Returns `None` if the snapshot directory
-/// does not exist or contains no matching files.
-fn try_resolve_all_from_cache(
+/// Runs inside `spawn_blocking` because `read_ref` and the per-file
+/// existence checks are synchronous filesystem I/O.
+fn check_all_filenames_present(
     cache_dir: &std::path::Path,
     repo_folder: &str,
     revision: &str,
-    include: Option<&globset::GlobSet>,
-    exclude: Option<&globset::GlobSet>,
+    filenames: &[String],
 ) -> Option<HashMap<String, PathBuf>> {
     let repo_dir = cache_dir.join(repo_folder);
     let commit_hash = crate::cache::read_ref(&repo_dir, revision)?;
@@ -1116,56 +1151,30 @@ fn try_resolve_all_from_cache(
         return None;
     }
 
-    let mut file_map = HashMap::new();
-    collect_cached_files_recursive(
-        &snapshot_dir,
-        &snapshot_dir,
-        include,
-        exclude,
-        &mut file_map,
-    );
-
-    if file_map.is_empty() {
-        return None;
+    let mut file_map = HashMap::with_capacity(filenames.len());
+    for filename in filenames {
+        // BORROW: explicit .as_str() instead of Deref coercion
+        let path = snapshot_dir.join(filename.as_str());
+        if !path.is_file() {
+            // Any single missing file kills the fast-path. Falling back
+            // to the network listing + dispatch is the correct behavior
+            // — `dispatch_download` will skip files already on disk
+            // and download the rest.
+            tracing::debug!(
+                missing = %filename,
+                "cache fast-path declined: filtered file absent on disk"
+            );
+            return None;
+        }
+        // BORROW: explicit .clone() for owned String key
+        file_map.insert(filename.clone(), path);
     }
 
     tracing::debug!(
         cached_files = file_map.len(),
-        "all files resolved from local cache (no network)"
+        "all filtered files resolved from local cache (no download needed)"
     );
     Some(file_map)
-}
-
-/// Recursively collects files from a snapshot directory into a filename → path map.
-fn collect_cached_files_recursive(
-    base: &std::path::Path,
-    dir: &std::path::Path,
-    include: Option<&globset::GlobSet>,
-    exclude: Option<&globset::GlobSet>,
-    file_map: &mut HashMap<String, PathBuf>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-
-    for entry in entries {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path.is_dir() {
-            collect_cached_files_recursive(base, &path, include, exclude, file_map);
-        } else {
-            // Compute relative filename from snapshot root.
-            let Ok(relative) = path.strip_prefix(base) else {
-                continue;
-            };
-            // BORROW: explicit .to_string_lossy() for Path → String conversion
-            let filename = relative.to_string_lossy().replace('\\', "/");
-            // BORROW: explicit .as_str() instead of Deref coercion
-            if file_matches(filename.as_str(), include, exclude) {
-                file_map.insert(filename, path);
-            }
-        }
-    }
 }
 
 /// Derives the snapshot root directory from a `(filename, downloaded_path)` pair.
@@ -1290,4 +1299,150 @@ async fn fetch_metadata_map(
     let map = files.into_iter().map(|f| (f.filename.clone(), f)).collect();
 
     Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
+
+    use super::*;
+
+    /// Builds a fake hf-hub-style cache layout under `root`:
+    /// `root/{repo_folder}/refs/main` (containing `commit_hash`) and
+    /// `root/{repo_folder}/snapshots/{commit_hash}/{filenames...}` (each
+    /// touched empty). Returns `(repo_folder_path, snapshot_dir_path)`.
+    fn make_fake_cache(
+        root: &std::path::Path,
+        repo_folder: &str,
+        commit_hash: &str,
+        present_filenames: &[&str],
+    ) -> (PathBuf, PathBuf) {
+        let repo_dir = root.join(repo_folder);
+        let refs_dir = repo_dir.join("refs");
+        let snapshot_dir = repo_dir.join("snapshots").join(commit_hash);
+        std::fs::create_dir_all(&refs_dir).unwrap();
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+        std::fs::write(refs_dir.join("main"), commit_hash).unwrap();
+        for name in present_filenames {
+            std::fs::write(snapshot_dir.join(name), b"").unwrap();
+        }
+        (repo_dir, snapshot_dir)
+    }
+
+    fn unique_temp_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "hf-fm-cache-check-{}-{}",
+            label,
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn check_all_filenames_present_returns_some_when_complete() {
+        let root = unique_temp_root("complete");
+        std::fs::create_dir_all(&root).unwrap();
+        let (_repo_dir, _snap) = make_fake_cache(
+            &root,
+            "models--org--model",
+            "deadbeef",
+            &["config.json", "tokenizer.json", "model.safetensors"],
+        );
+
+        let want: Vec<String> = ["config.json", "tokenizer.json", "model.safetensors"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let got = check_all_filenames_present(&root, "models--org--model", "main", &want);
+
+        assert!(got.is_some(), "all files present, expected Some");
+        let map = got.unwrap();
+        assert_eq!(map.len(), 3);
+        assert!(map.contains_key("model.safetensors"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The bug-for-bug regression: a snapshot directory holding only the
+    /// small config files must NOT be reported as a complete cache when
+    /// the user-filtered list also includes `model.safetensors`.
+    /// Until v0.9.8 the equivalent logic returned a non-empty `file_map`
+    /// here and led to a misleading "Cached at:" message.
+    #[test]
+    fn check_all_filenames_present_returns_none_when_one_file_missing() {
+        let root = unique_temp_root("missing");
+        std::fs::create_dir_all(&root).unwrap();
+        // Snapshot has only the small files — model.safetensors is absent.
+        let (_repo_dir, _snap) = make_fake_cache(
+            &root,
+            "models--org--model",
+            "deadbeef",
+            &["config.json", "tokenizer.json"],
+        );
+
+        let want: Vec<String> = ["config.json", "tokenizer.json", "model.safetensors"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let got = check_all_filenames_present(&root, "models--org--model", "main", &want);
+
+        assert!(
+            got.is_none(),
+            "model.safetensors missing — fast-path must decline"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_all_filenames_present_returns_none_when_snapshot_dir_missing() {
+        let root = unique_temp_root("nosnapshot");
+        std::fs::create_dir_all(&root).unwrap();
+        // Refs file present, but snapshots/<commit>/ does not exist.
+        let repo_dir = root.join("models--org--model");
+        std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
+        std::fs::write(repo_dir.join("refs").join("main"), "deadbeef").unwrap();
+
+        let want = vec!["config.json".to_owned()];
+        let got = check_all_filenames_present(&root, "models--org--model", "main", &want);
+
+        assert!(got.is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_all_filenames_present_returns_none_when_refs_missing() {
+        let root = unique_temp_root("norefs");
+        std::fs::create_dir_all(&root).unwrap();
+        // No refs/main → can't resolve the snapshot's commit hash.
+        std::fs::create_dir_all(root.join("models--org--model")).unwrap();
+
+        let want = vec!["config.json".to_owned()];
+        let got = check_all_filenames_present(&root, "models--org--model", "main", &want);
+
+        assert!(got.is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_all_filenames_present_handles_nested_paths() {
+        // Some HF repos have files in subdirectories (e.g. "checkpoints/x.bin").
+        // The fast-path must still locate them under the snapshot root.
+        let root = unique_temp_root("nested");
+        std::fs::create_dir_all(&root).unwrap();
+        let (_repo_dir, snap) = make_fake_cache(&root, "models--org--model", "deadbeef", &[]);
+        std::fs::create_dir_all(snap.join("checkpoints")).unwrap();
+        std::fs::write(snap.join("checkpoints").join("x.bin"), b"").unwrap();
+
+        let want = vec!["checkpoints/x.bin".to_owned()];
+        let got = check_all_filenames_present(&root, "models--org--model", "main", &want);
+
+        assert!(got.is_some(), "nested file should resolve");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
