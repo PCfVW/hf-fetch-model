@@ -226,8 +226,18 @@ impl FetchConfigBuilder {
 
     /// Sets the maximum time allowed per file download.
     ///
-    /// If a single file download exceeds this duration, it is aborted
-    /// and may be retried according to the retry policy.
+    /// Defaults to 300 seconds when not set. If a single file download
+    /// exceeds this duration, it is aborted and may be retried according
+    /// to the retry policy.
+    ///
+    /// For chunked (multi-connection) downloads, an abort here does **not**
+    /// discard work already on disk: the partial `.chunked.part` file and
+    /// its per-chunk progress sidecar are preserved, and a subsequent call
+    /// for the same file resumes from each chunk's last checkpoint via
+    /// `Range` requests — provided the upstream etag still matches. Raise
+    /// this when downloading large files on slow links (e.g.
+    /// `Duration::from_secs(1800)` for 5–15 GiB files at home-broadband
+    /// speeds).
     #[must_use]
     pub fn timeout_per_file(mut self, duration: Duration) -> Self {
         self.timeout_per_file = Some(duration);
@@ -236,8 +246,16 @@ impl FetchConfigBuilder {
 
     /// Sets the maximum total time for the entire download operation.
     ///
-    /// If the total download time exceeds this duration, remaining files
-    /// are skipped and a [`FetchError::Timeout`] is returned.
+    /// Defaults to no limit when not set. If the total download time
+    /// exceeds this duration, remaining files are skipped and a
+    /// [`FetchError::Timeout`] is returned.
+    ///
+    /// Independent of [`timeout_per_file`](Self::timeout_per_file): the
+    /// per-file budget bounds any single transfer, while this bounds the
+    /// whole batch (including retries between transfers). Files that
+    /// completed before the total elapsed are kept; an interrupted
+    /// in-flight chunked transfer leaves its partial + sidecar on disk
+    /// for resume on a future call.
     #[must_use]
     pub fn timeout_total(mut self, duration: Duration) -> Self {
         self.timeout_total = Some(duration);

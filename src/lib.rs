@@ -65,6 +65,38 @@
 //! Downloaded files are stored in the standard `HuggingFace` cache directory
 //! (`~/.cache/huggingface/hub/`), ensuring compatibility with Python tooling.
 //!
+//! ## Download Durability
+//!
+//! Multi-connection downloads survive interruption. When a download is
+//! aborted by [`FetchConfigBuilder::timeout_per_file`] (default 300 s),
+//! Ctrl-C, panic, or a transient chunk error, the partial `.chunked.part`
+//! file plus a small per-chunk progress sidecar are kept on disk. The next
+//! call to [`download_with_config`] for the same file picks up where it
+//! stopped — each parallel chunk sends a fresh `Range` request that skips
+//! the bytes it already has — provided the upstream etag still matches.
+//! On etag change, schema-version mismatch, or a different
+//! [`FetchConfigBuilder::connections_per_file`] count, the partial is
+//! discarded and a fresh download starts.
+//!
+//! For slow connections on multi-GiB files, raise the per-file budget to
+//! match real throughput:
+//!
+//! ```rust,no_run
+//! # async fn example() -> Result<(), hf_fetch_model::FetchError> {
+//! use std::time::Duration;
+//! use hf_fetch_model::FetchConfig;
+//!
+//! let config = FetchConfig::builder()
+//!     .timeout_per_file(Duration::from_secs(1800))
+//!     .build()?;
+//! # let _ = hf_fetch_model::download_with_config(
+//! #     "google/gemma-4-E2B-it".to_owned(),
+//! #     &config,
+//! # ).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ## Authentication
 //!
 //! Set the `HF_TOKEN` environment variable to access private or gated models,
