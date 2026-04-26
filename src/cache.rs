@@ -526,6 +526,32 @@ pub struct PartialFile {
     pub size: u64,
 }
 
+impl PartialFile {
+    /// Returns sibling sidecar paths that should be removed alongside this
+    /// partial: the resume-state sidecar `{etag}.chunked.part.state` and
+    /// any orphan write-tmp `{etag}.chunked.part.state.tmp` left by an
+    /// interrupted atomic save.
+    ///
+    /// The paths are returned even when the underlying files do not exist
+    /// — callers (`run_cache_clean_partial`) attempt removal best-effort.
+    #[must_use]
+    pub fn sidecar_paths(&self) -> Vec<PathBuf> {
+        let Some(parent) = self.path.parent() else {
+            return Vec::new();
+        };
+        // String concat (mirrors `cache_layout::temp_state_path`'s
+        // rationale): the etag may itself contain periods, so
+        // `Path::with_extension` would truncate at the wrong boundary.
+        // BORROW: explicit .clone() for owned String → mutated copy
+        let mut state_name = self.filename.clone();
+        state_name.push_str(".state");
+        // BORROW: explicit .clone() for owned String → mutated copy
+        let mut tmp_name = self.filename.clone();
+        tmp_name.push_str(".state.tmp");
+        vec![parent.join(state_name), parent.join(tmp_name)]
+    }
+}
+
 /// Finds all `.chunked.part` temp files in the `HuggingFace` cache.
 ///
 /// Walks `models--*/blobs/` directories and collects partial files.
@@ -676,5 +702,60 @@ fn collect_snapshot_files(dir: &Path, prefix: &str, files: &mut Vec<CacheFileUsa
             let size = entry.metadata().map_or(0, |m| m.len());
             files.push(CacheFileUsage { filename, size });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
+
+    use super::*;
+
+    fn sample_partial(filename: &str) -> PartialFile {
+        PartialFile {
+            repo_id: "org/model".to_owned(),
+            filename: filename.to_owned(),
+            path: PathBuf::from("/tmp/models--org--model/blobs").join(filename),
+            size: 1024,
+        }
+    }
+
+    #[test]
+    fn sidecar_paths_returns_state_and_state_tmp() {
+        let p = sample_partial("abc123.chunked.part");
+        let sidecars = p.sidecar_paths();
+
+        assert_eq!(sidecars.len(), 2);
+        assert_eq!(
+            sidecars[0],
+            PathBuf::from("/tmp/models--org--model/blobs/abc123.chunked.part.state")
+        );
+        assert_eq!(
+            sidecars[1],
+            PathBuf::from("/tmp/models--org--model/blobs/abc123.chunked.part.state.tmp")
+        );
+    }
+
+    #[test]
+    fn sidecar_paths_handles_etag_with_periods() {
+        // Same period-handling rationale as `cache_layout::temp_state_path`:
+        // the etag may itself contain dots, so naive `Path::with_extension`
+        // would chop at the wrong boundary.
+        let p = sample_partial("abc.def.chunked.part");
+        let sidecars = p.sidecar_paths();
+
+        assert_eq!(
+            sidecars[0],
+            PathBuf::from("/tmp/models--org--model/blobs/abc.def.chunked.part.state")
+        );
+        assert_eq!(
+            sidecars[1],
+            PathBuf::from("/tmp/models--org--model/blobs/abc.def.chunked.part.state.tmp")
+        );
     }
 }

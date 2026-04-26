@@ -1975,6 +1975,14 @@ fn run_cache_clean_partial(
             path: p.path.clone(),
             source: e,
         })?;
+        // Sidecars (`.chunked.part.state`, `.chunked.part.state.tmp`) are
+        // best-effort companions: they may not exist for every partial
+        // (older interrupted downloads pre-date the sidecar) and they're
+        // kilobyte-sized, so a removal failure here is not worth aborting
+        // the whole sweep. Errors are silently ignored.
+        for sidecar in p.sidecar_paths() {
+            let _ = std::fs::remove_file(&sidecar);
+        }
     }
 
     println!(

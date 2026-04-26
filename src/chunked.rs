@@ -266,9 +266,16 @@ fn parse_cdn_expiry(url: &str) -> Option<Instant> {
 /// On successful finalization the temp file is renamed to its blob path
 /// (so `Drop` finds nothing left to clean up). On transient failures —
 /// timeout-induced future drop, Ctrl-C, panic, retryable chunk error —
-/// the partial bytes are preserved for a future resume; only confirmed
-/// corruption (e.g. an etag mismatch detected on resume) wipes via
-/// [`TempFileGuard::mark_corrupt`].
+/// the partial bytes plus the per-chunk progress sidecar are preserved
+/// for a future resume.
+///
+/// Resume invariants (see [`crate::chunked_state::ChunkedState::is_compatible_with`])
+/// are checked at the top of [`prepare_or_resume_temp_file`] *before* the
+/// guard is constructed: a mismatch (etag changed upstream, total size
+/// changed, different `--connections-per-file`) wipes the stale partial
+/// and sidecar inline and starts fresh. The guard's `mark_corrupt` API
+/// is reserved for future post-guard corruption checks (e.g. a
+/// finalization-time SHA256 mismatch).
 ///
 /// # Arguments
 ///
@@ -469,9 +476,11 @@ pub(crate) async fn download_chunked(
 ///
 /// Default policy is **keep on drop** so that partial bytes survive transient
 /// interruptions (timeout-induced future drop, Ctrl-C, panic) and remain
-/// available for resume on the next invocation. Callers that detect genuine
-/// corruption (e.g. an etag mismatch on resume) opt into wipe-on-drop by
-/// calling [`mark_corrupt`]; in that case `Drop` removes the file.
+/// available for resume on the next invocation. Callers that detect
+/// post-guard corruption opt into wipe-on-drop by calling [`mark_corrupt`];
+/// in that case `Drop` removes the file. (Pre-guard corruption — etag
+/// mismatch, schema-version mismatch — is wiped inline by
+/// [`prepare_or_resume_temp_file`] before this guard is ever constructed.)
 ///
 /// Note: a successful finalize renames the temp file to its blob path before
 /// the guard drops, so `Drop` finds nothing at `path` and the keep-default
@@ -498,16 +507,25 @@ impl TempFileGuard {
 
     /// Marks the partial as corrupt — `Drop` will remove it.
     ///
-    /// Call when the bytes already on disk are known to be unusable — etag
-    /// mismatch on resume, total-size mismatch in the sidecar, or a
-    /// finalization-time checksum failure. Transient interruptions
-    /// (timeout, Ctrl-C, retryable I/O) must NOT call this — their bytes
-    /// are valid-but-incomplete and a future invocation can resume from
-    /// them.
+    /// Call when bytes already written under the guard's watch are known
+    /// to be unusable. The current chunked path has no such caller yet
+    /// because every known corruption check (etag mismatch, total-size
+    /// mismatch, schema-version mismatch) happens in
+    /// [`prepare_or_resume_temp_file`] *before* the guard is constructed
+    /// and is handled there with a direct
+    /// [`tokio::fs::remove_file`] of the stale partial.
+    ///
+    /// The API exists for future post-guard corruption detection — for
+    /// example a planned finalization-time SHA256 verification, or a
+    /// downstream feature that detects an inconsistency mid-stream.
+    /// Transient interruptions (timeout, Ctrl-C, retryable I/O) must
+    /// NOT call this: their bytes are valid-but-incomplete and a future
+    /// invocation will resume from them via the sidecar.
     //
-    // Currently exercised only from the unit tests in this module; the
-    // resume path that detects corruption (Phase 3) will introduce
-    // production callers. The `dead_code` allow falls away then.
+    // The `dead_code` allow reflects the current "infrastructure-only"
+    // status: exercised by the unit tests in this module but unused in
+    // production. Remove the allow when the first production caller
+    // lands.
     #[allow(dead_code)]
     fn mark_corrupt(&mut self) {
         self.wipe_on_drop = true;
