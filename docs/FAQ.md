@@ -1,6 +1,6 @@
 # Frequently Asked Questions
 
-<!-- Last updated: 2026-04-26, hf-fm v0.9.8 -->
+<!-- Last updated: 2026-04-26, hf-fm v0.9.8 (post-release docs polish) -->
 
 <!--
 STYLE CONVENTIONS for editing this FAQ — keep growth consistent.
@@ -60,6 +60,7 @@ A living list of the questions we and our early users have actually run into. If
   - [What does `hf-fm inspect supports .safetensors only (got .npz for …)` mean?](#what-does-hf-fm-inspect-supports-safetensors-only-got-npz-for--mean)
   - [I got a `checksum mismatch` error — what do I do?](#i-got-a-checksum-mismatch-error--what-do-i-do)
   - [Why does `inspect` say `Source: remote (2 HTTP requests)`?](#why-does-inspect-say-source-remote-2-http-requests)
+  - [Why didn't my pipeline catch a download failure?](#why-didnt-my-pipeline-catch-a-download-failure)
 
 ---
 
@@ -209,3 +210,21 @@ A `checksum mismatch` means the file's computed SHA256 does not match the hash H
 ### Why does `inspect` say `Source: remote (2 HTTP requests)`?
 
 Reading a safetensors header remotely takes two ranged HTTP requests: the first fetches the 8-byte little-endian `u64` at the start of the file that encodes the header's length, and the second fetches exactly that many bytes of JSON. That is the entire network cost of an `inspect` run — the multi-gigabyte weight data is never touched. When the file is already in your local cache, the line reads `Source: cached` instead and there are no HTTP requests at all.
+
+### Why didn't my pipeline catch a download failure?
+
+If you wrap a hf-fm command in a shell pipe like `hf-fm download-file ... 2>&1 | tail -20`, the pipeline's exit code is the **last** command's, not hf-fm's. So a hf-fm timeout or network error can be hidden behind a successful `tail`, leaving you thinking the download worked when it didn't. This is true of every CLI tool, not just hf-fm — but it bites here because long downloads invite the impulse to wrap them in `| tail` to keep the terminal tidy. hf-fm does print `error: …` lines to stderr on failure, but if you fold stderr into stdout via `2>&1` and then truncate, the failure signal lives in the tail of the output rather than the exit code.
+
+To check hf-fm's real exit code through a pipe:
+
+```
+# bash / zsh — PIPESTATUS holds each pipeline stage's exit code
+hf-fm download-file ... 2>&1 | tail -20
+echo "hf-fm exit: ${PIPESTATUS[0]}"
+
+# PowerShell — capture and inspect $LASTEXITCODE after the producer
+hf-fm download-file ... 2>&1 | Select-Object -Last 20
+echo "hf-fm exit: $LASTEXITCODE"
+```
+
+Or skip the pipe and check `$?` (bash/zsh) / `$LASTEXITCODE` (PowerShell) directly after the bare command — simplest when you do not actually need to truncate the output.
