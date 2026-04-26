@@ -181,6 +181,11 @@ pub async fn download_all_files(
 /// Returns [`FetchError::RepoNotFound`] if the repository does not exist.
 /// Returns [`FetchError::NoFilesMatched`] if the repository is empty or all files were filtered out.
 /// Returns [`FetchError::Timeout`] if the overall timeout is exceeded.
+// EXPLICIT: orchestrates client setup, file listing, filtering, retry-policy
+// construction, concurrent downloads via JoinSet, and result aggregation into
+// a (filename → path) map. Sequential composition; splitting fragments the
+// pipeline.
+#[allow(clippy::too_many_lines)]
 pub async fn download_all_files_map(
     repo: ApiRepo,
     repo_id: String,

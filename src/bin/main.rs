@@ -20,8 +20,30 @@ use hf_fetch_model::inspect;
 use hf_fetch_model::progress::IndicatifProgress;
 use hf_fetch_model::repo;
 use hf_fetch_model::{
-    compile_glob_patterns, file_matches, has_glob_chars, FetchConfig, FetchError, Filter,
+    compile_glob_patterns, file_matches, has_glob_chars, FetchConfig, FetchConfigBuilder,
+    FetchError, Filter,
 };
+
+/// Applies optional `--timeout-per-file-secs` / `--timeout-total-secs` CLI overrides to a `FetchConfigBuilder`.
+///
+/// Both arguments are seconds; `None` leaves the corresponding builder field
+/// untouched (so the [`FetchConfig`] default — 300 s per file, no total
+/// limit — applies).
+#[must_use]
+fn apply_timeout_overrides(
+    builder: FetchConfigBuilder,
+    per_file_secs: Option<u64>,
+    total_secs: Option<u64>,
+) -> FetchConfigBuilder {
+    let mut builder = builder;
+    if let Some(secs) = per_file_secs {
+        builder = builder.timeout_per_file(Duration::from_secs(secs));
+    }
+    if let Some(secs) = total_secs {
+        builder = builder.timeout_total(Duration::from_secs(secs));
+    }
+    builder
+}
 
 /// Downloads all files from a `HuggingFace` model repository.
 ///
@@ -90,6 +112,20 @@ struct DownloadArgs {
     /// Number of parallel HTTP connections per large file (auto-tuned if omitted).
     #[arg(long)]
     connections_per_file: Option<usize>,
+
+    /// Per-file download timeout in seconds (default: 300).
+    ///
+    /// Override when downloading large files on slow connections — at
+    /// 10 MiB/s effective throughput the default 300 s caps progress at
+    /// roughly 3 GiB. Try 1800 for files in the 5–15 GiB range.
+    #[arg(long)]
+    timeout_per_file_secs: Option<u64>,
+
+    /// Total batch download timeout in seconds (default: no limit).
+    ///
+    /// Bounds the entire multi-file download. Independent of `--timeout-per-file-secs`.
+    #[arg(long)]
+    timeout_total_secs: Option<u64>,
 
     /// Preview what would be downloaded without actually downloading.
     #[arg(long)]
@@ -186,6 +222,21 @@ enum Commands {
         /// Number of parallel HTTP connections per large file (auto-tuned if omitted).
         #[arg(long)]
         connections_per_file: Option<usize>,
+
+        /// Per-file download timeout in seconds (default: 300).
+        ///
+        /// Override when downloading large files on slow connections — at
+        /// 10 MiB/s effective throughput the default 300 s caps progress at
+        /// roughly 3 GiB. Try 1800 for files in the 5–15 GiB range.
+        #[arg(long)]
+        timeout_per_file_secs: Option<u64>,
+
+        /// Total download timeout in seconds (default: no limit).
+        ///
+        /// Bounds the whole download (including retries). Independent of
+        /// `--timeout-per-file-secs`.
+        #[arg(long)]
+        timeout_total_secs: Option<u64>,
 
         /// Copy the downloaded file to flat layout: `{output-dir}/{filename}`.
         ///
@@ -486,6 +537,9 @@ fn main() -> ExitCode {
     }
 }
 
+// EXPLICIT: top-level CLI dispatch — one arm per subcommand; extracting helpers
+// would hide the dispatch shape rather than clarify it.
+#[allow(clippy::too_many_lines)]
 fn run(cli: Cli) -> Result<(), FetchError> {
     match cli.command {
         Some(Commands::ListFamilies) => run_list_families(),
@@ -530,6 +584,8 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             output_dir,
             chunk_threshold_mib,
             connections_per_file,
+            timeout_per_file_secs,
+            timeout_total_secs,
             flat,
         }) => run_download_file(DownloadFileParams {
             repo_id: repo_id.as_str(),
@@ -539,6 +595,8 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             output_dir,
             chunk_threshold_mib,
             connections_per_file,
+            timeout_per_file_secs,
+            timeout_total_secs,
             flat,
         }),
         Some(Commands::Status {
@@ -727,6 +785,10 @@ impl NonTtyProgress {
     }
 }
 
+// EXPLICIT: linear composition of preset selection, builder overrides, output-dir
+// handling, progress reporter wiring, runtime construction, and post-finalize
+// messaging. Splitting would obscure the sequential setup flow.
+#[allow(clippy::too_many_lines)]
 fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
     let dry_run = args.dry_run;
 
@@ -794,6 +856,7 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
     if let Some(cpf) = args.connections_per_file {
         builder = builder.connections_per_file(cpf);
     }
+    builder = apply_timeout_overrides(builder, args.timeout_per_file_secs, args.timeout_total_secs);
     if !flat {
         if let Some(dir) = args.output_dir {
             builder = builder.output_dir(dir);
@@ -995,6 +1058,8 @@ struct DownloadFileParams<'a> {
     output_dir: Option<PathBuf>,
     chunk_threshold_mib: Option<u64>,
     connections_per_file: Option<usize>,
+    timeout_per_file_secs: Option<u64>,
+    timeout_total_secs: Option<u64>,
     flat: bool,
 }
 
@@ -1007,6 +1072,8 @@ fn run_download_file(params: DownloadFileParams<'_>) -> Result<(), FetchError> {
         output_dir,
         chunk_threshold_mib,
         connections_per_file,
+        timeout_per_file_secs,
+        timeout_total_secs,
         flat,
     } = params;
     if !repo_id.contains('/') {
@@ -1025,6 +1092,8 @@ fn run_download_file(params: DownloadFileParams<'_>) -> Result<(), FetchError> {
             output_dir,
             chunk_threshold_mib,
             connections_per_file,
+            timeout_per_file_secs,
+            timeout_total_secs,
             flat,
         });
     }
@@ -1050,6 +1119,7 @@ fn run_download_file(params: DownloadFileParams<'_>) -> Result<(), FetchError> {
     if let Some(cpf) = connections_per_file {
         builder = builder.connections_per_file(cpf);
     }
+    builder = apply_timeout_overrides(builder, timeout_per_file_secs, timeout_total_secs);
     if !flat {
         if let Some(dir) = output_dir {
             builder = builder.output_dir(dir);
@@ -1118,6 +1188,8 @@ fn run_download_file_glob(params: DownloadFileParams<'_>) -> Result<(), FetchErr
         output_dir,
         chunk_threshold_mib,
         connections_per_file,
+        timeout_per_file_secs,
+        timeout_total_secs,
         flat,
     } = params;
     // When --flat, output_dir is the flat copy target, not the HF cache root.
@@ -1141,6 +1213,7 @@ fn run_download_file_glob(params: DownloadFileParams<'_>) -> Result<(), FetchErr
     if let Some(cpf) = connections_per_file {
         builder = builder.connections_per_file(cpf);
     }
+    builder = apply_timeout_overrides(builder, timeout_per_file_secs, timeout_total_secs);
     if !flat {
         if let Some(dir) = output_dir {
             builder = builder.output_dir(dir);
@@ -2039,7 +2112,14 @@ fn collect_repo_tensors(
 }
 
 /// Compares tensor layouts between two model repositories.
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+// EXPLICIT: orchestrates two-side metadata fetch, tensor classification (only-A,
+// only-B, dtype/shape diffs, matching), and output (table or JSON).
+// Sequential pipeline; splitting hides the comparison flow.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_lines
+)]
 fn run_diff(
     repo_a: &str,
     repo_b: &str,
@@ -3121,7 +3201,14 @@ struct InspectJsonOutput<'a> {
 }
 
 /// Inspects a single `.safetensors` file and prints the result.
-#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+// EXPLICIT: composes header fetch, filter/tree/dtypes/limit branching, and
+// JSON-vs-table output formatting. Splitting would obscure the inspect mode
+// matrix.
+#[allow(
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 fn run_inspect_single(
     repo_id: &str,
     filename: &str,
@@ -3888,7 +3975,14 @@ fn run_status(
 }
 
 /// Lists files in a remote `HuggingFace` repository without downloading.
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+// EXPLICIT: composes filter compilation, file enumeration, optional checksum
+// fetch, optional cache cross-reference, and table formatting. Sequential
+// pipeline; splitting hides the listing flow.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_lines
+)]
 fn run_list_files(
     repo_id: &str,
     revision: Option<&str>,

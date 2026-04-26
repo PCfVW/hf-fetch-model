@@ -113,6 +113,55 @@ fn download_file_help_mentions_glob() {
 }
 
 #[test]
+fn help_shows_timeout_flags() {
+    let (stdout, stderr, success) = run(hf_fm().arg("--help"));
+    assert!(success, "--help failed: {stderr}");
+    for flag in ["--timeout-per-file-secs", "--timeout-total-secs"] {
+        assert!(
+            stdout.contains(flag),
+            "help should show {flag} flag, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn download_file_help_shows_timeout_flags() {
+    let (stdout, stderr, success) = run(hf_fm().args(["download-file", "--help"]));
+    assert!(success, "download-file --help failed: {stderr}");
+    for flag in ["--timeout-per-file-secs", "--timeout-total-secs"] {
+        assert!(
+            stdout.contains(flag),
+            "download-file help should show {flag} flag, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn timeout_flags_accept_numeric_values() {
+    // Sanity check: clap should parse the values without erroring.
+    // We pass --dry-run so no network call is attempted.
+    let (_stdout, stderr, _success) = run(hf_fm().args([
+        "--timeout-per-file-secs",
+        "1800",
+        "--timeout-total-secs",
+        "3600",
+        "--dry-run",
+        "julien-c/dummy-unknown",
+    ]));
+    // We don't require success here — the dry-run still hits the API to list
+    // files and may fail offline. We only require that clap accepted the
+    // flags (no "error: invalid value" parse failure).
+    assert!(
+        !stderr.contains("error: invalid value"),
+        "timeout flags should parse cleanly, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("error: unexpected argument"),
+        "timeout flags should be recognized, got:\n{stderr}"
+    );
+}
+
+#[test]
 fn list_files_help_shows_all_flags() {
     let (stdout, stderr, success) = run(hf_fm().args(["list-files", "--help"]));
     assert!(success, "list-files --help failed: {stderr}");
