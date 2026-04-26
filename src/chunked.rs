@@ -17,13 +17,22 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use reqwest::Client;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
 
 use serde::Deserialize;
 
+use crate::chunked_state::ChunkedState;
 use crate::error::FetchError;
 use crate::progress::{self, ProgressEvent};
 use crate::retry::{self, RetryPolicy};
+
+/// Per-chunk progress checkpoint cadence: each chunk persists its
+/// `completed` byte count to the sidecar after this many new bytes
+/// arrive. Smaller values give finer-grained resume but more I/O on the
+/// sidecar; 16 MiB lands roughly one save every 1.6 s on a 10 MiB/s
+/// connection per chunk.
+const SIDECAR_CHECKPOINT_BYTES: u64 = 16 * 1024 * 1024;
 
 // TRAIT_OBJECT: heterogeneous progress handlers from different callers
 type ProgressCallback = Arc<dyn Fn(&ProgressEvent) + Send + Sync>;
@@ -278,7 +287,18 @@ fn parse_cdn_expiry(url: &str) -> Option<Instant> {
 ///
 /// Returns [`FetchError::ChunkedDownload`] if any chunk fails after retries.
 /// Returns [`FetchError::Io`] on filesystem errors.
-#[allow(clippy::too_many_arguments)]
+// EXPLICIT: orchestrates per-file path setup, resume detection,
+// chunk-boundary computation, JoinSet spawn/collect, and finalize.
+// Splitting fragments the download lifecycle. The indexing_slicing
+// allow covers `resume_offsets[chunk_idx]` — chunk_idx is in
+// [0, connections) by construction and resume_offsets always has
+// `connections` entries (`prepare_or_resume_temp_file` enforces it
+// via `is_compatible_with`'s chunks.len() check).
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::indexing_slicing
+)]
 pub(crate) async fn download_chunked(
     client: Client,
     range_info: RangeInfo,
@@ -307,15 +327,12 @@ pub(crate) async fn download_chunked(
         return Ok(pointer_path);
     }
 
-    // Create directories and pre-allocate temp file.
-    let temp_path = crate::cache_layout::temp_blob_path(&repo_dir, range_info.etag.as_str());
-    prepare_temp_file(&blob_path, &pointer_path, &temp_path, total_size).await?;
-    let _temp_guard = TempFileGuard::new(temp_path.clone());
-
-    // Compute chunk boundaries.
+    // Compute chunk boundaries first — we need them for both fresh-start
+    // and resume paths so the sidecar can be primed with the correct
+    // per-chunk byte ranges.
     // EXPLICIT: try_from for usize → u64 (infallible on 64-bit, safe fallback otherwise)
     let chunk_size = total_size / u64::try_from(connections).unwrap_or(1);
-    let chunks: Vec<(usize, u64, u64)> = (0..connections)
+    let chunks_layout: Vec<(usize, u64, u64)> = (0..connections)
         .map(|i| {
             // EXPLICIT: try_from for usize → u64 (infallible on 64-bit, safe fallback otherwise)
             let idx = u64::try_from(i).unwrap_or(0);
@@ -329,22 +346,56 @@ pub(crate) async fn download_chunked(
         })
         .collect();
 
-    // Shared progress counter.
-    let bytes_downloaded = Arc::new(AtomicU64::new(0));
+    // Prepare or resume the partial. On match the existing `.chunked.part`
+    // is left untouched and we get back the per-chunk completion offsets;
+    // on mismatch (stale etag, different connection count, etc.) the
+    // partial and sidecar are removed and a fresh state is written.
+    let temp_path = crate::cache_layout::temp_blob_path(&repo_dir, range_info.etag.as_str());
+    let state_path = crate::cache_layout::temp_state_path(&repo_dir, range_info.etag.as_str());
+    let resume_state = prepare_or_resume_temp_file(
+        &blob_path,
+        &pointer_path,
+        &temp_path,
+        &state_path,
+        range_info.etag.as_str(),
+        total_size,
+        chunks_layout.as_slice(),
+        connections,
+    )
+    .await?;
+    let _temp_guard = TempFileGuard::new(temp_path.clone());
+
+    // Pre-charge the global byte counter with bytes already on disk from
+    // a prior session, so the progress callback shows correct totals
+    // including resumed bytes.
+    let already_done: u64 = resume_state.chunks.iter().map(|c| c.completed).sum();
+    let bytes_downloaded = Arc::new(AtomicU64::new(already_done));
+
+    // Per-chunk completion offsets (relative to chunk start), captured
+    // before the state moves into the shared mutex.
+    let resume_offsets: Vec<u64> = resume_state.chunks.iter().map(|c| c.completed).collect();
+
+    // Shared sidecar state: each chunk task locks it briefly to update
+    // its own `completed` field and snapshot for atomic save.
+    let shared_state = Arc::new(AsyncMutex::new(resume_state));
 
     // Spawn chunk download tasks.
     let mut join_set = JoinSet::new();
-    for (chunk_idx, start, end) in chunks {
+    for (chunk_idx, start, end) in chunks_layout {
         let task_client = client.clone();
         // BORROW: explicit .clone() for owned String
         let task_url = range_info.cdn_url.clone();
         // BORROW: explicit .clone() for owned PathBuf
         let task_temp = temp_path.clone();
+        let task_state_path = state_path.clone();
+        let task_state = Arc::clone(&shared_state);
         let task_policy = retry_policy.clone();
         let task_bytes = Arc::clone(&bytes_downloaded);
         let task_progress = on_progress.clone();
         // BORROW: explicit .clone() for owned String
         let task_filename = filename.clone();
+        // INDEX: chunk_idx is in [0, connections); resume_offsets has connections entries
+        let task_initial_offset = resume_offsets[chunk_idx];
 
         join_set.spawn(async move {
             download_chunk(
@@ -354,6 +405,9 @@ pub(crate) async fn download_chunked(
                 start,
                 end,
                 chunk_idx,
+                task_initial_offset,
+                task_state,
+                task_state_path,
                 &task_policy,
                 &task_bytes,
                 task_progress.as_ref(),
@@ -397,6 +451,13 @@ pub(crate) async fn download_chunked(
         range_info.commit_hash.as_str(),
     )
     .await?;
+
+    // The chunked download succeeded — the sidecar's job is done. Best-
+    // effort removal: a stale sidecar without its partial (the partial
+    // has just been renamed away) is harmless to leave behind and would
+    // be discarded on the next invocation by the temp-exists check in
+    // `prepare_or_resume_temp_file`.
+    let _ = ChunkedState::remove(&state_path).await;
 
     // `finalize_chunked_download` renamed the temp file to `blob_path`,
     // so when `_temp_guard` drops at the end of this scope its keep-on-drop
@@ -462,13 +523,31 @@ impl Drop for TempFileGuard {
     }
 }
 
-/// Creates parent directories for blob and pointer paths, then pre-allocates a temp file.
-async fn prepare_temp_file(
-    blob_path: &std::path::Path,
-    pointer_path: &std::path::Path,
-    temp_path: &std::path::Path,
+/// Prepares the temp file for a chunked download, resuming from an existing
+/// `.chunked.part` + `.chunked.part.state` pair when their resume invariants
+/// (schema version, etag, total size, connection count) match the current
+/// download configuration; otherwise truncates and starts fresh.
+///
+/// Always returns a `ChunkedState` describing the per-chunk completion
+/// offsets to use — zeroed for a fresh start, populated for resume.
+///
+/// On a mismatch path, both the partial and the sidecar are removed
+/// best-effort (the partial bytes are useless against a new etag or total
+/// size; keeping them would just waste disk and confuse the next run).
+// EXPLICIT: each parameter is genuinely independent (paths × identity
+// invariants × layout) and packing them into a struct would only push
+// the count to a fresh per-call constructor. Single private callsite.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_or_resume_temp_file(
+    blob_path: &Path,
+    pointer_path: &Path,
+    temp_path: &Path,
+    state_path: &Path,
+    etag: &str,
     total_size: u64,
-) -> Result<(), FetchError> {
+    chunks_layout: &[(usize, u64, u64)],
+    connections: usize,
+) -> Result<ChunkedState, FetchError> {
     if let Some(parent) = blob_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -486,18 +565,44 @@ async fn prepare_temp_file(
             })?;
     }
 
-    let f = tokio::fs::File::create(temp_path)
+    // Try to resume from an existing partial + sidecar pair.
+    let existing_state = ChunkedState::load(state_path).await?;
+    let temp_exists = tokio::fs::try_exists(temp_path)
         .await
         .map_err(|e| FetchError::Io {
             path: temp_path.to_path_buf(),
             source: e,
         })?;
-    f.set_len(total_size).await.map_err(|e| FetchError::Io {
+
+    if let Some(state) = existing_state {
+        if state.is_compatible_with(etag, total_size, connections) && temp_exists {
+            // Resume: leave the existing partial untouched and reuse the
+            // per-chunk offsets recorded in the sidecar.
+            return Ok(state);
+        }
+    }
+
+    // Either no usable sidecar, an incompatible one, or the partial is
+    // missing — start fresh. Best-effort cleanup of stale state.
+    let _ = tokio::fs::remove_file(temp_path).await;
+    ChunkedState::remove(state_path).await?;
+
+    let file = tokio::fs::File::create(temp_path)
+        .await
+        .map_err(|e| FetchError::Io {
+            path: temp_path.to_path_buf(),
+            source: e,
+        })?;
+    file.set_len(total_size).await.map_err(|e| FetchError::Io {
         path: temp_path.to_path_buf(),
         source: e,
     })?;
+    drop(file);
 
-    Ok(())
+    // BORROW: explicit .to_owned() for &str → owned String
+    let fresh = ChunkedState::new_fresh(etag.to_owned(), total_size, connections, chunks_layout);
+    fresh.save_atomic(state_path).await?;
+    Ok(fresh)
 }
 
 /// Finalizes a chunked download: renames temp → blob, creates pointer symlink, writes refs.
@@ -544,7 +649,17 @@ async fn finalize_chunked_download(
 }
 
 /// Downloads a single byte-range chunk, writing to the temp file at the correct offset.
-#[allow(clippy::too_many_arguments)]
+// EXPLICIT: linear retry-loop body composing range-request, file-seek,
+// stream-write, in-flight progress, and sidecar checkpointing. Splitting
+// hides the chunk lifecycle. The indexing_slicing allow covers three
+// `state.chunks[chunk_idx]` reads/writes — chunk_idx is in
+// [0, connections), and the shared state's `chunks` vector always has
+// exactly `connections` entries (priming and resume both guarantee it).
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::indexing_slicing
+)]
 async fn download_chunk(
     client: Client,
     url: String,
@@ -552,6 +667,9 @@ async fn download_chunk(
     start: u64,
     end: u64,
     chunk_idx: usize,
+    initial_offset: u64,
+    shared_state: Arc<AsyncMutex<ChunkedState>>,
+    state_path: PathBuf,
     retry_policy: &RetryPolicy,
     bytes_downloaded: &AtomicU64,
     on_progress: Option<&ProgressCallback>,
@@ -570,10 +688,29 @@ async fn download_chunk(
         let task_url = url_owned.clone();
         // BORROW: explicit .clone() for owned PathBuf
         let task_temp = temp_owned.clone();
+        let task_state_path = state_path.clone();
+        let task_state = Arc::clone(&shared_state);
         let task_filename = filename_owned.clone();
 
         async move {
-            let range_header = format!("bytes={start}-{end}");
+            // Re-read the current completion offset for this chunk on
+            // every retry attempt: an earlier attempt may have made
+            // progress that survived in the sidecar even if this attempt's
+            // overall result is `Err`.
+            let (resume_completed, already_done) = {
+                let guard = task_state.lock().await;
+                // INDEX: chunk_idx is in [0, connections); state.chunks has connections entries
+                let progress = &guard.chunks[chunk_idx];
+                (progress.completed, progress.is_complete())
+            };
+            if already_done {
+                // Chunk already fully downloaded by a prior session.
+                return Ok(());
+            }
+            let resume_byte = start.saturating_add(resume_completed.max(initial_offset));
+            let effective_resume_completed = resume_byte.saturating_sub(start);
+
+            let range_header = format!("bytes={resume_byte}-{end}");
             // BORROW: explicit .as_str() for request URL and header
             let response = task_client
                 .get(task_url.as_str())
@@ -592,7 +729,7 @@ async fn download_chunk(
                 });
             }
 
-            // Open file and seek to chunk offset.
+            // Open file and seek to the resume byte (= start + completed).
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)
                 .open(&task_temp)
@@ -601,15 +738,19 @@ async fn download_chunk(
                     path: task_temp.clone(),
                     source: e,
                 })?;
-            file.seek(SeekFrom::Start(start))
+            file.seek(SeekFrom::Start(resume_byte))
                 .await
                 .map_err(|e| FetchError::Io {
                     path: task_temp.clone(),
                     source: e,
                 })?;
 
-            // Stream bytes and write to file.
+            // Stream bytes and write to file. Track in-attempt completion
+            // locally so we can checkpoint the sidecar without locking on
+            // every batch.
             let mut stream = response.bytes_stream();
+            let mut current_completed = effective_resume_completed;
+            let mut last_checkpoint = current_completed;
             while let Some(chunk_result) = stream.next().await {
                 let bytes = chunk_result.map_err(|e| FetchError::ChunkedDownload {
                     filename: task_filename.clone(),
@@ -621,9 +762,9 @@ async fn download_chunk(
                     source: e,
                 })?;
 
-                // Update shared progress counter.
                 // EXPLICIT: try_from for usize → u64 (infallible on 64-bit, safe fallback otherwise)
                 let added = u64::try_from(bytes.len()).unwrap_or(0);
+                current_completed = current_completed.saturating_add(added);
                 let current = bytes_downloaded.fetch_add(added, Ordering::Relaxed) + added;
 
                 // Fire progress callback (throttled by caller if needed).
@@ -636,12 +777,42 @@ async fn download_chunk(
                     );
                     cb(&event);
                 }
+
+                // Checkpoint the sidecar every SIDECAR_CHECKPOINT_BYTES of
+                // chunk progress. We snapshot the state under the lock and
+                // do the (slow) atomic save outside the lock so other
+                // chunks aren't blocked on our I/O.
+                if current_completed.saturating_sub(last_checkpoint) >= SIDECAR_CHECKPOINT_BYTES {
+                    let snapshot = {
+                        let mut guard = task_state.lock().await;
+                        // INDEX: chunk_idx is in [0, connections); state.chunks has connections entries
+                        guard.chunks[chunk_idx].completed = current_completed;
+                        guard.clone()
+                    };
+                    // Best-effort: a sidecar save failure is logged via
+                    // the FetchError display but does not abort the
+                    // chunk download — the in-memory state is still
+                    // authoritative for the rest of this run.
+                    let _ = snapshot.save_atomic(task_state_path.as_path()).await;
+                    last_checkpoint = current_completed;
+                }
             }
 
             file.flush().await.map_err(|e| FetchError::Io {
                 path: task_temp,
                 source: e,
             })?;
+
+            // Final checkpoint: persist the chunk's terminal completion
+            // count so a successful chunk's progress is durable even if
+            // a later chunk fails.
+            let snapshot = {
+                let mut guard = task_state.lock().await;
+                // INDEX: chunk_idx is in [0, connections); state.chunks has connections entries
+                guard.chunks[chunk_idx].completed = current_completed;
+                guard.clone()
+            };
+            let _ = snapshot.save_atomic(task_state_path.as_path()).await;
 
             Ok(())
         }

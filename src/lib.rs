@@ -74,6 +74,7 @@ pub mod cache;
 pub mod cache_layout;
 pub mod checksum;
 mod chunked;
+mod chunked_state;
 pub mod config;
 pub mod discover;
 pub mod download;

@@ -71,6 +71,25 @@ pub fn temp_blob_path(repo_dir: &Path, etag: &str) -> PathBuf {
     blobs_dir(repo_dir).join(name)
 }
 
+/// Resume-state sidecar path for chunked downloads:
+/// `{repo_dir}/blobs/{etag}.chunked.part.state`.
+///
+/// Lives next to the [`temp_blob_path`] partial and tracks per-chunk
+/// completion offsets so that an interrupted download can resume on the
+/// next invocation. Cleaned up on successful finalization, kept alongside
+/// the partial when the download is interrupted.
+///
+/// Same period-handling rationale as [`temp_blob_path`]: explicit string
+/// concatenation rather than [`Path::with_extension`] so that etags
+/// containing periods round-trip correctly.
+#[must_use]
+pub fn temp_state_path(repo_dir: &Path, etag: &str) -> PathBuf {
+    // BORROW: explicit .to_owned() for &str → owned String for path concatenation
+    let mut name = etag.to_owned();
+    name.push_str(".chunked.part.state");
+    blobs_dir(repo_dir).join(name)
+}
+
 /// Refs directory: `{repo_dir}/refs/`.
 #[must_use]
 pub fn refs_dir(repo_dir: &Path) -> PathBuf {
@@ -105,6 +124,31 @@ mod tests {
         assert_eq!(
             temp_blob_path(rd, "abc.def"),
             rd.join("blobs").join("abc.def.chunked.part")
+        );
+    }
+
+    #[test]
+    fn temp_state_path_lives_next_to_temp_blob() {
+        let rd = Path::new("/tmp/models--x--y");
+        let etag = "abc123";
+        assert_eq!(
+            temp_state_path(rd, etag),
+            rd.join("blobs").join("abc123.chunked.part.state")
+        );
+        // The two helpers must agree on the directory so the sidecar
+        // always sits right next to its partial.
+        assert_eq!(
+            temp_blob_path(rd, etag).parent(),
+            temp_state_path(rd, etag).parent()
+        );
+    }
+
+    #[test]
+    fn temp_state_path_preserves_periods_in_etag() {
+        let rd = Path::new("/tmp/models--x--y");
+        assert_eq!(
+            temp_state_path(rd, "abc.def"),
+            rd.join("blobs").join("abc.def.chunked.part.state")
         );
     }
 }
