@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.8] — Download durability
+
+### Added
+
+- **`--timeout-per-file-secs <N>` and `--timeout-total-secs <N>` CLI flags** — plumb the existing `FetchConfigBuilder::timeout_per_file` / `timeout_total` builder methods through to the CLI. Default behaviour is unchanged when the flags are omitted (300 s per file, no total limit), so users on fast connections see no difference. Slow-connection users on multi-GiB files can now extend the budget — e.g. `--timeout-per-file-secs 1800` for a file in the 5–15 GiB range. Wired into the default download command, `download-file`, and the `download-file` glob path; a shared `apply_timeout_overrides` helper keeps the per-call-site plumbing DRY.
+- **Resume after interrupted chunked downloads** — new `chunked_state` module records per-chunk completion offsets in a small `{etag}.chunked.part.state` JSON sidecar next to the existing `.chunked.part` partial. `prepare_or_resume_temp_file` reuses an existing pair when its `(schema_version, etag, total_size, connections)` quadruple matches the current download — bytes already downloaded are kept and each chunk sends `Range: bytes=<start+completed>-<end>` to skip them. On any invariant mismatch (upstream etag changed, different `--connections-per-file`), both files are removed and a fresh state is written. The sidecar is updated atomically (write-tmp + rename) every 16 MiB of per-chunk progress and removed on successful finalize. Verified end-to-end on the real Gemma 4 multimodal repo (9.54 GiB) in the slow-connection regime where the v0.9.7 binary was unable to complete.
+- **`PartialFile::sidecar_paths()`** — new public method on `cache::PartialFile` returning the `.chunked.part.state` and `.chunked.part.state.tmp` siblings of a partial, so `cache clean-partial` can sweep the whole bundle and not leave kilobyte-sized orphans behind.
+
+### Changed
+
+- **`.chunked.part` files now persist across transient interruptions** (timeout-induced future drop, Ctrl-C, panic, retryable chunk error). Previously every interruption wiped the partial via the v0.9.5 `TempFileGuard` Drop, forcing a full restart on the next invocation; combined with the 300 s/file ceiling that left slow-connection users on large files in an unrecoverable loop. The guard now defaults to **keep on drop** and exposes a `mark_corrupt()` opt-in for the rare case where post-guard bytes are known to be unusable. The v0.9.5 audit-fix intent — clean removal of orphan partials — is preserved through `cache clean-partial`, which handles the whole partial-download bundle including the new sidecars.
+- **`download_chunked` doc-comment refreshed** to describe the resume contract and clarify which corruption cases are handled where (etag/total-size/schema-version mismatch in `prepare_or_resume_temp_file`; future post-guard checks via `TempFileGuard::mark_corrupt`).
+
 ## [0.9.7] — Inspect discoverability & newbie-friendly UX
 
 ### Added

@@ -1,6 +1,6 @@
 [package]
 name = "hf-fetch-model"
-version = "0.9.7"
+version = "0.9.8"
 edition = "2021"
 rust-version = "1.88"
 description = "Download, inspect, and compare HuggingFace models from Rust. Multi-connection parallel downloads plus safetensors header inspection via HTTP Range. No weight data downloaded."

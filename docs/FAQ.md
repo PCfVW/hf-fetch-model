@@ -1,6 +1,6 @@
 # Frequently Asked Questions
 
-<!-- Last updated: 2026-04-20, hf-fm v0.9.7 -->
+<!-- Last updated: 2026-04-26, hf-fm v0.9.8 -->
 
 <!--
 STYLE CONVENTIONS for editing this FAQ — keep growth consistent.
@@ -53,6 +53,9 @@ A living list of the questions we and our early users have actually run into. If
   - [Where does hf-fm store downloaded files? Is the layout compatible with Python `huggingface_hub`?](#where-does-hf-fm-store-downloaded-files-is-the-layout-compatible-with-python-huggingface_hub)
   - [My disk is getting full — which models are taking the most space?](#my-disk-is-getting-full--which-models-are-taking-the-most-space)
   - [What is a `.chunked.part` file, and is it safe to delete?](#what-is-a-chunkedpart-file-and-is-it-safe-to-delete)
+- [Downloading large files on slow connections](#downloading-large-files-on-slow-connections)
+  - [Why does my download keep timing out, and how do I extend the budget?](#why-does-my-download-keep-timing-out-and-how-do-i-extend-the-budget)
+  - [My download was interrupted — do I have to start over?](#my-download-was-interrupted--do-i-have-to-start-over)
 - [Errors and unexpected output](#errors-and-unexpected-output)
   - [What does `hf-fm inspect supports .safetensors only (got .npz for …)` mean?](#what-does-hf-fm-inspect-supports-safetensors-only-got-npz-for--mean)
   - [I got a `checksum mismatch` error — what do I do?](#i-got-a-checksum-mismatch-error--what-do-i-do)
@@ -173,7 +176,23 @@ Run `hf-fm du` for a size-sorted summary. Each row has a `#` index you can pass 
 
 ### What is a `.chunked.part` file, and is it safe to delete?
 
-`.chunked.part` files are leftovers from interrupted multi-connection downloads — hf-fm stages chunks into temporary files before stitching them together, and if a download is killed (Ctrl-C, network drop, crash) the partial pieces are left behind. Yes, they are safe to remove: run `hf-fm cache clean-partial` for a prompted cleanup (add `--dry-run` to preview, `--yes` to skip confirmation). A single `.chunked.part` also shows up as a `●` marker in `hf-fm du`.
+`.chunked.part` files are temporary staging files for multi-connection downloads — hf-fm writes downloaded bytes there before renaming them into the final blob. From v0.9.8 onwards they also persist across interruptions so the next invocation can resume from them, paired with a small `.chunked.part.state` JSON sidecar that tracks per-chunk progress. They are safe to delete when you have abandoned a download for good — run `hf-fm cache clean-partial` for a prompted cleanup (add `--dry-run` to preview, `--yes` to skip confirmation); the sweep removes the partial and its sidecar together. A repo with a stale partial also shows up as a `●` marker in `hf-fm du`.
+
+---
+
+## Downloading large files on slow connections
+
+### Why does my download keep timing out, and how do I extend the budget?
+
+By default hf-fm gives each file a 300-second budget — fine for typical multi-GiB safetensors at typical home-broadband speeds, but it can run out before a 10 GiB file finishes if your effective throughput is below ~35 MiB/s. Pass `--timeout-per-file-secs <N>` to extend it; `1800` (30 minutes) is a sensible value for files in the 5–15 GiB range on slower links. There is also a `--timeout-total-secs` flag that bounds the entire batch when you are downloading many files at once.
+
+```
+hf-fm google/gemma-4-E2B-it --preset safetensors --timeout-per-file-secs 1800
+```
+
+### My download was interrupted — do I have to start over?
+
+No. As of v0.9.8, hf-fm preserves the partial `.chunked.part` file plus a small `.chunked.part.state` sidecar that records per-chunk progress; the next time you run the same command, each parallel chunk picks up from where it stopped. This works across timeouts, Ctrl-C, and crashes — as long as the file on the remote did not change (the etag is verified before resuming). If the etag does not match, hf-fm starts fresh and tells you so.
 
 ---
 
