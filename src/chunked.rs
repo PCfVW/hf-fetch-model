@@ -253,9 +253,13 @@ fn parse_cdn_expiry(url: &str) -> Option<Instant> {
 
 /// Downloads a file using parallel Range requests and writes it to the `hf-hub` cache.
 ///
-/// Pre-allocates a `.chunked.part` temp file protected by a [`TempFileGuard`] — the
-/// temp file is removed automatically on error or task abort (e.g., via
-/// `JoinSet::abort_all()`), and committed only after successful finalization.
+/// Pre-allocates a `.chunked.part` temp file protected by a [`TempFileGuard`].
+/// On successful finalization the temp file is renamed to its blob path
+/// (so `Drop` finds nothing left to clean up). On transient failures —
+/// timeout-induced future drop, Ctrl-C, panic, retryable chunk error —
+/// the partial bytes are preserved for a future resume; only confirmed
+/// corruption (e.g. an etag mismatch detected on resume) wipes via
+/// [`TempFileGuard::mark_corrupt`].
 ///
 /// # Arguments
 ///
@@ -306,7 +310,7 @@ pub(crate) async fn download_chunked(
     // Create directories and pre-allocate temp file.
     let temp_path = crate::cache_layout::temp_blob_path(&repo_dir, range_info.etag.as_str());
     prepare_temp_file(&blob_path, &pointer_path, &temp_path, total_size).await?;
-    let mut temp_guard = TempFileGuard::new(temp_path.clone());
+    let _temp_guard = TempFileGuard::new(temp_path.clone());
 
     // Compute chunk boundaries.
     // EXPLICIT: try_from for usize → u64 (infallible on 64-bit, safe fallback otherwise)
@@ -372,7 +376,11 @@ pub(crate) async fn download_chunked(
     }
 
     if !failures.is_empty() {
-        // temp_guard drops here and removes the temp file.
+        // Chunk failures are treated as transient — partial bytes on disk
+        // remain valid-but-incomplete and a future invocation can resume
+        // from them. `temp_guard` drops in keep-on-drop mode, leaving the
+        // `.chunked.part` file in place. Use `hf-fm cache clean-partial`
+        // to remove it manually if the user has abandoned the download.
         return Err(FetchError::ChunkedDownload {
             // BORROW: explicit .clone() for owned String
             filename: filename.clone(),
@@ -390,40 +398,64 @@ pub(crate) async fn download_chunked(
     )
     .await?;
 
-    // Download and finalization succeeded — prevent guard from removing the file.
-    temp_guard.commit();
-
+    // `finalize_chunked_download` renamed the temp file to `blob_path`,
+    // so when `_temp_guard` drops at the end of this scope its keep-on-drop
+    // policy is moot — there is nothing left at `temp_path` to act on.
     Ok(pointer_path)
 }
 
-/// RAII guard that removes a temp file on drop unless explicitly committed.
+/// RAII guard for a `.chunked.part` temp file.
 ///
-/// Ensures `.chunked.part` files are cleaned up even when a task is aborted
-/// (e.g., via `JoinSet::abort_all()`), since `Drop` runs on abort.
+/// Default policy is **keep on drop** so that partial bytes survive transient
+/// interruptions (timeout-induced future drop, Ctrl-C, panic) and remain
+/// available for resume on the next invocation. Callers that detect genuine
+/// corruption (e.g. an etag mismatch on resume) opt into wipe-on-drop by
+/// calling [`mark_corrupt`]; in that case `Drop` removes the file.
+///
+/// Note: a successful finalize renames the temp file to its blob path before
+/// the guard drops, so `Drop` finds nothing at `path` and the keep-default
+/// is harmless. No `commit` method is needed — keep-by-default is the
+/// happy path.
+///
+/// [`mark_corrupt`]: TempFileGuard::mark_corrupt
 struct TempFileGuard {
-    /// Path to the temp file to remove on drop.
+    /// Absolute path to the `.chunked.part` temp file this guard owns.
     path: PathBuf,
-    /// Set to `true` after successful finalization to prevent removal.
-    committed: bool,
+    /// When `true`, `Drop` removes the file at `path`. Defaults to `false`
+    /// (preserve partials on transient failures); set explicitly via
+    /// [`mark_corrupt`](TempFileGuard::mark_corrupt).
+    wipe_on_drop: bool,
 }
 
 impl TempFileGuard {
     fn new(path: PathBuf) -> Self {
         Self {
             path,
-            committed: false,
+            wipe_on_drop: false,
         }
     }
 
-    /// Marks the temp file as successfully finalized — `Drop` will not remove it.
-    fn commit(&mut self) {
-        self.committed = true;
+    /// Marks the partial as corrupt — `Drop` will remove it.
+    ///
+    /// Call when the bytes already on disk are known to be unusable — etag
+    /// mismatch on resume, total-size mismatch in the sidecar, or a
+    /// finalization-time checksum failure. Transient interruptions
+    /// (timeout, Ctrl-C, retryable I/O) must NOT call this — their bytes
+    /// are valid-but-incomplete and a future invocation can resume from
+    /// them.
+    //
+    // Currently exercised only from the unit tests in this module; the
+    // resume path that detects corruption (Phase 3) will introduce
+    // production callers. The `dead_code` allow falls away then.
+    #[allow(dead_code)]
+    fn mark_corrupt(&mut self) {
+        self.wipe_on_drop = true;
     }
 }
 
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
-        if !self.committed {
+        if self.wipe_on_drop {
             // Sync remove is safe here: runs on the aborting thread, single syscall.
             let _ = std::fs::remove_file(&self.path);
         }
@@ -890,5 +922,77 @@ mod tests {
         assert_eq!(chunks[1], (250, 499));
         assert_eq!(chunks[2], (500, 749));
         assert_eq!(chunks[3], (750, 999));
+    }
+
+    /// Default policy is keep-on-drop: a guard that is never marked corrupt
+    /// must leave the file on disk when it goes out of scope. This is the
+    /// behavior that lets a partial `.chunked.part` survive a transient
+    /// timeout / Ctrl-C / panic and become resumable on the next run.
+    #[test]
+    fn temp_file_guard_keeps_file_on_drop_by_default() {
+        let dir = std::env::temp_dir().join(format!("hf-fm-tempguard-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("partial.chunked.part");
+        std::fs::write(&path, b"some bytes").unwrap();
+        assert!(path.exists());
+
+        {
+            let _guard = TempFileGuard::new(path.clone());
+            // No mark_corrupt — guard drops in keep mode.
+        }
+
+        assert!(
+            path.exists(),
+            "default-drop should preserve the file at {}",
+            path.display()
+        );
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    /// Calling `mark_corrupt` flips the guard into wipe-on-drop mode: the
+    /// file is removed when the guard goes out of scope. This is the path
+    /// for confirmed-bad bytes (etag mismatch, total-size mismatch on
+    /// resume), as opposed to "incomplete but valid" partials.
+    #[test]
+    fn temp_file_guard_wipes_file_after_mark_corrupt() {
+        let dir = std::env::temp_dir().join(format!("hf-fm-tempguard-wipe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("partial.chunked.part");
+        std::fs::write(&path, b"corrupt bytes").unwrap();
+        assert!(path.exists());
+
+        {
+            let mut guard = TempFileGuard::new(path.clone());
+            guard.mark_corrupt();
+        }
+
+        assert!(
+            !path.exists(),
+            "mark_corrupt should wipe the file at {}",
+            path.display()
+        );
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    /// `mark_corrupt` on a guard whose file has already been moved away
+    /// (the success path: `finalize_chunked_download` renamed temp → blob)
+    /// must not panic — `remove_file` silently no-ops when the path is
+    /// gone. Defensive sanity check on the Drop body.
+    #[test]
+    fn temp_file_guard_drop_is_safe_when_file_already_gone() {
+        let dir = std::env::temp_dir().join(format!("hf-fm-tempguard-gone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("never-existed.chunked.part");
+        // Note: file is NOT created — simulating the post-rename state.
+
+        {
+            let mut guard = TempFileGuard::new(path.clone());
+            guard.mark_corrupt();
+            // Drop fires here — must not panic even though file is absent.
+        }
+
+        assert!(!path.exists());
+        std::fs::remove_dir(&dir).ok();
     }
 }
