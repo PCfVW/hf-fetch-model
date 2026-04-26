@@ -270,16 +270,20 @@ Critical for answering candle ecosystem issues ([#3448](https://github.com/huggi
 
 **Test surface.** 119 tests passing (was 117 in v0.9.7, +2 sidecar-paths unit tests, +13 in the new `chunked_state` module, +3 for the TempFileGuard inversion, +3 CLI tests for the new flags, balanced against the 3 existing chunked.rs tests). `clippy --features cli --all-targets -- -D warnings -W clippy::pedantic` is clean — pre-existing `too_many_lines` warnings on six orchestration functions (`run`, `run_download`, `run_diff`, `run_inspect_single`, `run_list_files`, `download_all_files_map`) annotated with `#[allow(clippy::too_many_lines)]` + EXPLICIT reason comments, framed as a deliberate Phase-1-scope decision rather than fragmented refactors of unrelated code paths.
 
-### v0.10.0 — Cache maturity & first docs
+### v0.10.0 — Cache maturity & first docs (in progress)
 
 | Feature | Scope |
 |---------|-------|
 | `cache verify` | SHA256 re-verification against HF LFS metadata (requires network). Detailed design in [v0.10.0 roadmap](v0.10.0-roadmap.md). |
 | `cache gc` | Age-based (`--older-than`) and budget-based (`--max-size`) eviction, with `--except`, `--dry-run`. Requires the "last accessed" heuristic. |
 | `du --tree` | Tree-view of cache directory structure with box-drawing characters. Reuses the visual style established by `inspect --tree` in v0.9.6 (same `├──`, `└──`, `│   ` connectors and dynamic column-width approach). |
+| Cache fast-path correctness ✓ | `download_all_files_map` previously short-circuited to `Cached` whenever the snapshot directory contained any include-filter-matching file, leading to a misleading "Cached at:" message when only the small config files were on disk and `model.safetensors` was absent. The fast-path now runs *after* the remote file listing and verifies every filtered remote file resolves to a real path under the snapshot dir. Cost: one cheap HTTP listing per `hf-fm <repo>` call when the cache happens to be complete. Discovered while dogfooding v0.9.8; landed on `main` immediately so future `hf-fm <repo>` invocations are correct. |
+| Pipe-eats-exit-code FAQ entry ✓ | Wrapping `hf-fm download-file ... 2>&1 \| tail -20` masks hf-fm's exit code with `tail`'s, hiding download failures. New FAQ entry under "Errors and unexpected output" explains the mechanic and gives copy-paste recipes for `${PIPESTATUS[0]}` (bash/zsh) and `$LASTEXITCODE` (PowerShell). Not a code bug — pure documentation — but worth naming because long downloads invite the `\| tail` reflex. |
 | **First docs effort** | **Workflow tutorial (`search` → `inspect` → `download` → `cache` lifecycle); per-feature "how to use" docs for the new cache commands (`verify`, `gc`, `du --tree`); first batch of `docs/case-studies/` capturing real-world investigations (e.g., candle [#3448](https://github.com/huggingface/candle/issues/3448) Gemma 4 multimodal naming + per-layer shape variation, [#2875](https://github.com/huggingface/candle/issues/2875) Flux F8_E4M3 dtype audit). Case studies are written *after* the issue comments have had time to gather feedback, so the narrative is informed by real reception. Establishes the habit of shipping docs alongside features.** |
 
 These are more complex than prior releases: verify needs network + checksum comparison, gc needs the last-accessed heuristic and interactive prompt safety, `du --tree` is a display feature that benefits from the `du --age` timestamps added in v0.9.4. The docs effort scopes to the new v0.10.0 cache features plus the first case studies (not a comprehensive rewrite of all existing docs). This is the project's coming-of-age release: where `hf-fetch-model` graduates from "useful tool with `--help`" to "documented, mature tool with narrative onboarding".
+
+The two ✓ items above are early increments toward v0.10.0 — UX bugs surfaced during v0.9.8 dogfooding, fixed on `main` immediately rather than waiting for a v0.9.9 patch release. They establish a small precedent: post-release dogfooding gaps land on the next-minor's branch, not the current-patch's.
 
 ### v0.10.1 — GGUF inspect (cached)
 

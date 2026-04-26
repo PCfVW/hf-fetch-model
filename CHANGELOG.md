@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hf-fm <repo>` no longer reports `Cached at:` when filtered files are missing on disk** — `download_all_files_map` previously called `try_resolve_repo_from_cache` *before* the network listing, which scanned the snapshot directory and applied the user's include/exclude filter to whatever happened to be on disk. A snapshot containing only `config.json` + `tokenizer.json` (both matching `--preset safetensors`'s `*.json` clause) was therefore reported as fully cached even with `model.safetensors` absent. The fast-path now runs *after* the remote file listing and verifies every filtered remote file resolves to a real path under the snapshot dir; any single missing file declines the fast-path, falling back to the regular dispatch pipeline. Cost: one cheap HTTP listing per `hf-fm <repo>` invocation when the cache happens to be complete (vs zero before). Discovered while dogfooding v0.9.8 against the gemma-4-E2B-it download.
+
+### Added
+
+- **FAQ entry: "Why didn't my pipeline catch a download failure?"** — `hf-fm download-file ... 2>&1 | tail -20` masks hf-fm's exit code with `tail`'s, hiding failures behind a successful pipeline result. The new FAQ entry under *Errors and unexpected output* explains the mechanic and gives copy-paste recipes for recovering the real exit code via `${PIPESTATUS[0]}` (bash/zsh) and `$LASTEXITCODE` after the producer (PowerShell). Not specific to hf-fm — but worth naming because long downloads invite the `| tail` reflex.
+
 ## [0.9.8] — Download durability
 
 ### Added
