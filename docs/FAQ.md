@@ -157,10 +157,11 @@ The presets bundle the weight extension plus the common config files (`*.json`, 
 
 ### How do I see what is already cached locally?
 
-Three views, in order of detail:
+Four views, in order of detail:
 
 - `hf-fm list-families` — grouped by model architecture (`gemma2`, `llama`, `qwen2`, …), one repo per line under each family. Shows which cache directory you are looking at on the first line.
 - `hf-fm du` — one row per repo with disk usage and a partial-download marker, sorted largest first. Type `hf-fm du <N>` to drill into the Nth repo and see its files.
+- `hf-fm du --tree` — hierarchical view of every cached repo and its files in a single box-drawing tree, with sizes right-aligned across all rows. Composes with `--age` to add a last-modified column on each repo branch.
 - `hf-fm status <repo>` — per-file completeness status for one repo.
 
 ---

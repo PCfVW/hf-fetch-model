@@ -11,7 +11,9 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{
+    ArgAction, ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
+};
 use tracing_subscriber::EnvFilter;
 
 use hf_fetch_model::cache;
@@ -299,6 +301,13 @@ enum Commands {
         /// Show a last-modified age column (e.g., `"2 days ago"`, `"3 months ago"`).
         #[arg(long)]
         age: bool,
+        /// Show a hierarchical tree view of every cached repo and its files.
+        ///
+        /// Reuses the box-drawing connectors (`├──`, `└──`, `│   `) and
+        /// dynamic-column alignment of `inspect --tree`. Composes with
+        /// `--age`, which adds a last-modified column on each repo branch.
+        #[arg(long, conflicts_with = "repo_id")]
+        tree: bool,
     },
     /// Inspect `.safetensors` file headers (tensor names, shapes, dtypes).
     ///
@@ -413,6 +422,45 @@ enum CacheCommands {
         #[arg(long)]
         yes: bool,
     },
+    /// Garbage-collect cached models by age and/or size budget.
+    ///
+    /// Requires at least one of `--older-than` or `--max-size`. When both
+    /// are given, age eviction runs first; if the cache is still over the
+    /// size budget, oldest non-protected repos are evicted next. Repos
+    /// listed in `--except` are never evicted, and active partial
+    /// downloads (`has_partial == true` with mtime in the last 60 minutes)
+    /// are skipped to avoid racing with `hf-fm download`.
+    #[command(group(
+        ArgGroup::new("gc_criteria")
+            .args(["older_than", "max_size"])
+            .required(true)
+            .multiple(true)
+    ))]
+    Gc {
+        /// Evict repos with mtime older than this many days.
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u64>,
+
+        /// Hard cap on total cache size (e.g., `5GiB`, `500MiB`). Binary units only.
+        #[arg(long, value_name = "SIZE", value_parser = parse_size_arg)]
+        max_size: Option<u64>,
+
+        /// Repository identifier to protect from eviction (repeatable).
+        #[arg(long = "except", value_name = "REPO_ID", action = ArgAction::Append)]
+        except: Vec<String>,
+
+        /// Preview the eviction plan without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip the confirmation prompt before deleting.
+        #[arg(long)]
+        yes: bool,
+
+        /// List every kept repo in the preview (default: hidden for terseness).
+        #[arg(long)]
+        list_kept: bool,
+    },
     /// Print the snapshot directory path for a cached model.
     ///
     /// Output is a bare path (no labels), suitable for shell substitution:
@@ -498,7 +546,11 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(FetchError::PartialDownload { path, failures }) => {
             eprintln!();
-            eprintln!("error: {} file(s) failed to download:", failures.len());
+            eprintln!(
+                "error: {} {} failed to download:",
+                failures.len(),
+                pluralize(failures.len(), "file", "files")
+            );
             for f in &failures {
                 eprintln!("  - {}: {}", f.filename, f.reason);
             }
@@ -632,12 +684,22 @@ fn run(cli: Cli) -> Result<(), FetchError> {
         Some(Commands::Du {
             repo_id: Some(repo_id),
             age: _,
+            tree: _, // EXPLICIT: clap conflicts_with rejects --tree alongside repo_id
         }) => {
             // BORROW: explicit .as_str() instead of Deref coercion
             let resolved = resolve_du_arg(repo_id.as_str())?;
             run_du_repo(resolved.as_str())
         }
-        Some(Commands::Du { repo_id: None, age }) => run_du(age),
+        Some(Commands::Du {
+            repo_id: None,
+            age,
+            tree: true,
+        }) => run_du_tree(age),
+        Some(Commands::Du {
+            repo_id: None,
+            age,
+            tree: false,
+        }) => run_du(age),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::Inspect {
             repo_id,
@@ -702,6 +764,14 @@ fn run(cli: Cli) -> Result<(), FetchError> {
                 // BORROW: explicit .as_str() instead of Deref coercion
                 run_cache_delete(resolved.as_str(), yes)
             }
+            CacheCommands::Gc {
+                older_than,
+                max_size,
+                except,
+                dry_run,
+                yes,
+                list_kept,
+            } => run_cache_gc(older_than, max_size, except, dry_run, yes, list_kept),
             // BORROW: explicit .as_str() for String → &str conversion
             CacheCommands::Path { repo_id } => {
                 let resolved = resolve_du_arg(repo_id.as_str())?;
@@ -901,8 +971,9 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
         let flat_paths = flatten_files(file_map, &target_dir)?;
 
         println!(
-            "{} file(s) copied to {}:",
+            "{} {} copied to {}:",
             flat_paths.len(),
+            pluralize(flat_paths.len(), "file", "files"),
             target_dir.display()
         );
         for p in &flat_paths {
@@ -1021,9 +1092,10 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
     let cached_count = plan.files.len() - plan.files_to_download();
     let to_dl = plan.files_to_download();
     println!(
-        "  Total: {} ({} files, {} cached, {} to download)",
+        "  Total: {} ({} {}, {} cached, {} to download)",
         format_size(plan.total_bytes),
         plan.files.len(),
+        pluralize(plan.files.len(), "file", "files"),
         cached_count,
         to_dl
     );
@@ -1264,15 +1336,20 @@ fn run_download_file_glob(params: DownloadFileParams<'_>) -> Result<(), FetchErr
         let target_dir = resolve_flat_target(flat_target.as_deref())?;
         let flat_paths = flatten_files(file_map, &target_dir)?;
         println!(
-            "{} file(s) copied to {}:",
+            "{} {} copied to {}:",
             flat_paths.len(),
+            pluralize(flat_paths.len(), "file", "files"),
             target_dir.display()
         );
         for p in &flat_paths {
             println!("  {}", p.display());
         }
     } else {
-        println!("{} file(s) matched pattern \"{pattern}\":", file_map.len());
+        println!(
+            "{} {} matched pattern \"{pattern}\":",
+            file_map.len(),
+            pluralize(file_map.len(), "file", "files")
+        );
         for (name, path) in file_map {
             println!("  {name}: {}", path.display());
         }
@@ -1499,8 +1576,16 @@ fn print_search_result(result: &discover::SearchResult, name_width: usize) {
         (None, Some(pipe)) => format!("  [{pipe}]"),
         (None, None) => String::new(),
     };
+    // EXPLICIT: inline u64 == 1 check instead of pluralize(usize, …) — a
+    // u64 → usize cast on 32-bit platforms could turn a value like 2^32+1
+    // into 1 and produce the wrong word for a popular model.
+    let downloads_label = if result.downloads == 1 {
+        "download"
+    } else {
+        "downloads"
+    };
     println!(
-        "  hf-fm {:<nw$} ({} downloads){suffix}",
+        "  hf-fm {:<nw$} ({} {downloads_label}){suffix}",
         result.model_id,
         format_downloads(result.downloads),
         nw = name_width,
@@ -1720,7 +1805,11 @@ fn run_status_all() -> Result<(), FetchError> {
         );
     }
 
-    println!("\n{} model(s) cached", summaries.len());
+    println!(
+        "\n{} {} cached",
+        summaries.len(),
+        pluralize(summaries.len(), "model", "models")
+    );
 
     Ok(())
 }
@@ -1749,8 +1838,9 @@ fn resolve_du_arg(arg: &str) -> Result<String, FetchError> {
 
         if n == 0 || n > summaries.len() {
             return Err(FetchError::InvalidArgument(format!(
-                "index {n} is out of range (cache has {} repos — use 1..{})",
+                "index {n} is out of range (cache has {} {} — use 1..{})",
                 summaries.len(),
+                pluralize(summaries.len(), "repo", "repos"),
                 summaries.len()
             )));
         }
@@ -1849,10 +1939,12 @@ fn run_du(age: bool) -> Result<(), FetchError> {
     };
     println!("  {}", "\u{2500}".repeat(rule_width));
     println!(
-        "  {:>10}  total ({} repos, {} files)",
+        "  {:>10}  total ({} {}, {} {})",
         format_size(total_size),
         summaries.len(),
+        pluralize(summaries.len(), "repo", "repos"),
         total_files,
+        pluralize(total_files, "file", "files"),
     );
     if any_partial {
         println!("  \u{25cf} = partial downloads");
@@ -1897,15 +1989,392 @@ fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
 
     println!("  {}", "\u{2500}".repeat(row_width));
     println!(
-        "  {:>10}  total ({} files)",
+        "  {:>10}  total ({} {})",
         format_size(total_size),
         files.len(),
+        pluralize(files.len(), "file", "files"),
     );
 
     // Check if this repo has partial downloads and hint the user
     // (targeted scan, not full cache).
     if cache::repo_has_partial(repo_id)? {
         println!("\n  \u{25cf} partial downloads — run `hf-fm status {repo_id}` for details");
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// du --tree: hierarchical cache view (repos as branches, files as leaves)
+// ============================================================================
+
+/// Returns `singular` when `n == 1`, otherwise `plural`.
+///
+/// Grammar helper for runtime-counted nouns:
+/// `pluralize(n, "file", "files")`.
+const fn pluralize<'a>(n: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if n == 1 {
+        singular
+    } else {
+        plural
+    }
+}
+
+/// Formats a file-count parenthetical with correct singular/plural form.
+///
+/// Returns `"(1 file)"` for `n == 1` and `"(N files)"` otherwise.
+fn format_file_count(n: usize) -> String {
+    format!("({n} {})", pluralize(n, "file", "files"))
+}
+
+/// Builds a table-of-contents-style dotted filler of the exact requested `width`.
+///
+/// Pattern: `"  .  .  .  .  ."` — two leading spaces, dots separated by
+/// two spaces, and the rightmost dot flush against the trailing edge.
+/// When `width` isn't a clean multiple of the 3-char period, the slack
+/// is absorbed as extra leading spaces.
+fn dot_filler(width: usize) -> String {
+    if width < 3 {
+        return " ".repeat(width);
+    }
+    let dots = width / 3;
+    let pad = width - 3 * dots;
+    let mut s = String::with_capacity(width);
+    for _ in 0..(pad + 2) {
+        s.push(' ');
+    }
+    for i in 0..dots {
+        if i > 0 {
+            s.push_str("  ");
+        }
+        s.push('.');
+    }
+    s
+}
+
+/// Repo branch in the `du --tree` view.
+///
+/// Carries the per-repo aggregates already computed by
+/// [`cache::cache_summary`] plus the per-file leaves produced by
+/// [`cache::cache_repo_usage`]. The tree has a fixed two-level shape
+/// (repo → file), so a flat pair of structs is sufficient — no recursive
+/// node enum is needed (cf. `inspect --tree`'s `TreeNode`, which is
+/// arbitrarily deep).
+struct CacheTreeRepo {
+    /// Repository identifier (e.g., `"google/gemma-2-2b-it"`).
+    repo_id: String,
+    /// Total size on disk across all snapshot files, in bytes.
+    total_size: u64,
+    /// Number of files counted in the snapshot directory.
+    file_count: usize,
+    /// Whether the repo has any `.chunked.part` partial downloads.
+    has_partial: bool,
+    /// Most recent file modification time, if available.
+    last_modified: Option<std::time::SystemTime>,
+    /// Per-file leaves, sorted by size descending.
+    files: Vec<CacheTreeFile>,
+}
+
+/// File leaf in the `du --tree` view.
+struct CacheTreeFile {
+    /// Filename relative to the snapshot root (e.g., `"tokenizer/vocab.json"`).
+    filename: String,
+    /// File size in bytes.
+    size: u64,
+}
+
+/// Builds a `du --tree` forest from the local cache, sorted by total size descending.
+///
+/// One [`CacheTreeRepo`] per cached `models--*` directory; its [`CacheTreeFile`]
+/// leaves come pre-sorted by size descending from [`cache::cache_repo_usage`].
+fn build_cache_tree() -> Result<Vec<CacheTreeRepo>, FetchError> {
+    let mut summaries = cache::cache_summary()?;
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.total_size));
+
+    let mut repos: Vec<CacheTreeRepo> = Vec::with_capacity(summaries.len());
+    for s in summaries {
+        // BORROW: explicit .as_str() instead of Deref coercion
+        let usage = cache::cache_repo_usage(s.repo_id.as_str())?;
+        let files: Vec<CacheTreeFile> = usage
+            .into_iter()
+            .map(|f| CacheTreeFile {
+                filename: f.filename,
+                size: f.size,
+            })
+            .collect();
+        repos.push(CacheTreeRepo {
+            repo_id: s.repo_id,
+            total_size: s.total_size,
+            file_count: s.file_count,
+            has_partial: s.has_partial,
+            last_modified: s.last_modified,
+            files,
+        });
+    }
+
+    Ok(repos)
+}
+
+/// Cap on the file-leaf name column, in characters.
+///
+/// Names ≤ this width are padded to it so the file-leaf size column lines
+/// up vertically across every repo in the tree. Names longer than the cap
+/// overflow into the size column locally — preserving full info on outlier
+/// paths (e.g. the deeply-nested `gemma_2b_blocks.0.…/sae_weights.safetensors`
+/// SAE filenames) without dragging every other repo's column to that width.
+const FILE_NAME_WIDTH_CAP: usize = 60;
+
+/// Column widths for the cache tree, derived from the actual data.
+///
+/// Computed once in [`run_du_tree`] and reused by [`render_cache_tree`],
+/// [`render_file_leaves`], and the footer rule via
+/// [`CacheTreeWidths::rule_width`] — keeping the repo-total size column
+/// (on branch lines) and the file size column (on leaf lines) sharing a
+/// single vertical column so all sizes right-align across the whole tree,
+/// and the rule visually flush with the widest repo branch line.
+struct CacheTreeWidths {
+    /// Repo-id column on the repo branch line. Padded up beyond the
+    /// natural max repo-id length when needed so the size column on the
+    /// branch line lines up with the size column on leaf lines.
+    repo: usize,
+    /// Shared size column width — used by both the repo-total on branch
+    /// lines and the file size on leaf lines. Right-aligned in both, so
+    /// every size string in the tree shares a common right edge.
+    size: usize,
+    /// `(N files)` column on the repo branch line.
+    files: usize,
+    /// Age column on the repo branch line (zero when `--age` is off).
+    age: usize,
+    /// File-leaf name column. Naturally capped at [`FILE_NAME_WIDTH_CAP`],
+    /// but padded up beyond that cap when needed so the leaf size column
+    /// lines up with the branch size column.
+    file_name: usize,
+    /// File-leaf size column. Equal to [`Self::size`] — kept as a separate
+    /// field so the renderer reads the right intent at the leaf call site.
+    file_size: usize,
+}
+
+impl CacheTreeWidths {
+    /// Computes column widths from a slice of repo branches.
+    ///
+    /// `age` toggles whether the age column is sized; when off, the field
+    /// is left at zero so the footer-rule formula can ignore it without a
+    /// branch. File-leaf widths are computed *globally* across every file
+    /// in every repo (so a leaf's size column lines up with all other
+    /// leaves in the tree, regardless of which repo it belongs to).
+    ///
+    /// To align the repo-total size column (on branch lines) with the file
+    /// size column (on leaf lines), the repo-id column and file-name
+    /// column are padded up so both size columns share the same start
+    /// position — with branch lines, the size column starts at
+    /// `2 + 4 + repo + 2` and on leaf lines at `2 + 4 + 4 + file_name + 2`,
+    /// so `repo = file_name + 4` keeps them flush.
+    fn compute(repos: &[CacheTreeRepo], age: bool) -> Self {
+        // Floors are tuned to match the visual minimums used by the flat
+        // `du` view, so the eye picks up the same shape across both.
+        let natural_repo = repos
+            .iter()
+            .map(|r| r.repo_id.len())
+            .max()
+            .unwrap_or(0)
+            .max(10); // floor: "Repository".len()
+
+        let natural_size = repos
+            .iter()
+            .map(|r| format_size(r.total_size).len())
+            .max()
+            .unwrap_or(0)
+            .max(8); // floor: typical "x.xx GiB" length
+
+        let files = repos
+            .iter()
+            .map(|r| format_file_count(r.file_count).len())
+            .max()
+            .unwrap_or(0);
+
+        let age = if age {
+            repos
+                .iter()
+                // `1` is the em-dash fallback width, used when a repo's
+                // mtime cannot be read.
+                .map(|r| r.last_modified.map_or(1, |t| format_age(t).len()))
+                .max()
+                .unwrap_or(0)
+                .max(15) // floor: matches `du --age` AGE column
+        } else {
+            0
+        };
+
+        let natural_file_name = repos
+            .iter()
+            .flat_map(|r| r.files.iter())
+            .map(|f| f.filename.len())
+            .max()
+            .unwrap_or(0)
+            .min(FILE_NAME_WIDTH_CAP);
+
+        let natural_file_size = repos
+            .iter()
+            .flat_map(|r| r.files.iter())
+            .map(|f| format_size(f.size).len())
+            .max()
+            .unwrap_or(0);
+
+        // Align the size column across branch lines and leaf lines.
+        // Branch size starts at: 2 + 4 + repo + 2          = repo + 8
+        // Leaf   size starts at: 2 + 4 + 4 + file_name + 2 = file_name + 12
+        // Pad the shorter side so both columns share the same start, then
+        // use a single width for the size column so right-edges also align.
+        let size_start = (natural_repo + 8).max(natural_file_name + 12);
+        let repo = size_start - 8;
+        let file_name = size_start - 12;
+        let size = natural_size.max(natural_file_size);
+
+        Self {
+            repo,
+            size,
+            files,
+            age,
+            file_name,
+            file_size: size,
+        }
+    }
+
+    /// Width of the visual rule under the tree, sized to the widest repo branch.
+    ///
+    /// Counts the leading 4-char connector (`├── ` or `└── `) plus each
+    /// rendered column and the 2-char gaps between them. When `--age` is
+    /// off the age column contributes zero.
+    fn rule_width(&self) -> usize {
+        // 4 (connector) + repo + 2 + size + 2 + files + (2 + age, when active).
+        let mut w = 4 + self.repo + 2 + self.size + 2 + self.files;
+        if self.age > 0 {
+            w += 2 + self.age;
+        }
+        w
+    }
+}
+
+/// Renders the cache tree to stdout using Unicode box-drawing connectors.
+///
+/// `age` controls the optional last-modified column on repo branch lines.
+/// File leaves never show age (mirroring `du --age`'s repo-only column).
+fn render_cache_tree(repos: &[CacheTreeRepo], widths: &CacheTreeWidths, age: bool) {
+    for (i, repo) in repos.iter().enumerate() {
+        let is_last = i + 1 == repos.len();
+        render_repo_node(repo, is_last, widths, age);
+    }
+}
+
+/// Renders a single repo branch and its file leaves.
+///
+/// The gap between the repo id and the size column is rendered as a
+/// dotted filler ([`dot_filler`]) — `"  .  .  .  ."` — so the eye can
+/// travel from a short repo name to the (possibly far) shared size
+/// column. The filler width is `widths.repo + 2 - repo_id.len()`, sized
+/// so the size column lands at the column [`CacheTreeWidths::compute`]
+/// reserved for it on both branch and leaf lines.
+fn render_repo_node(repo: &CacheTreeRepo, is_last: bool, widths: &CacheTreeWidths, age: bool) {
+    let connector = if is_last { "└── " } else { "├── " };
+    let indent = if is_last { "    " } else { "│   " };
+
+    let size_str = format_size(repo.total_size);
+    let files_str = format_file_count(repo.file_count);
+    let partial_marker = if repo.has_partial { "  \u{25cf}" } else { "" };
+
+    // Width of the gap between end of repo_id and start of size column.
+    // `widths.repo >= repo_id.len()` by construction, so the +2 keeps
+    // the saturating_sub a defensive no-op rather than load-bearing.
+    let filler = dot_filler((widths.repo + 2).saturating_sub(repo.repo_id.len()));
+
+    if age {
+        let age_str = repo
+            .last_modified
+            .map_or_else(|| "\u{2014}".to_owned(), format_age);
+        println!(
+            "  {connector}{repo}{filler}{size:>sw$}  {files:<fw$}  {age_str:<aw$}{partial_marker}",
+            repo = repo.repo_id,
+            size = size_str,
+            files = files_str,
+            sw = widths.size,
+            fw = widths.files,
+            aw = widths.age,
+        );
+    } else {
+        println!(
+            "  {connector}{repo}{filler}{size:>sw$}  {files}{partial_marker}",
+            repo = repo.repo_id,
+            size = size_str,
+            files = files_str,
+            sw = widths.size,
+        );
+    }
+
+    render_file_leaves(&repo.files, indent, widths);
+}
+
+/// Renders the file leaves under a repo branch using the tree-wide name/size widths.
+///
+/// `widths.file_name` is the global, capped name column (see
+/// [`FILE_NAME_WIDTH_CAP`]) — names shorter than it are padded so size
+/// columns line up vertically across every repo; names longer than it
+/// overflow locally without dragging the other repos' columns out.
+fn render_file_leaves(files: &[CacheTreeFile], indent: &str, widths: &CacheTreeWidths) {
+    if files.is_empty() {
+        return;
+    }
+
+    for (i, file) in files.iter().enumerate() {
+        let is_last = i + 1 == files.len();
+        let connector = if is_last { "└── " } else { "├── " };
+        println!(
+            "  {indent}{connector}{name:<nw$}  {size:>sw$}",
+            name = file.filename,
+            size = format_size(file.size),
+            nw = widths.file_name,
+            sw = widths.file_size,
+        );
+    }
+}
+
+/// Hierarchical cache view: every cached repo and its files in one box-drawing tree.
+///
+/// Composes with `--age` (adds a last-modified column on repo branches).
+fn run_du_tree(age: bool) -> Result<(), FetchError> {
+    let cache_dir = cache::hf_cache_dir()?;
+    println!("Cache: {}\n", cache_dir.display());
+
+    let repos = build_cache_tree()?;
+
+    if repos.is_empty() {
+        println!("No models found in local cache.");
+        return Ok(());
+    }
+
+    let widths = CacheTreeWidths::compute(&repos, age);
+    render_cache_tree(&repos, &widths, age);
+
+    let total_size: u64 = repos
+        .iter()
+        .map(|r| r.total_size)
+        .fold(0_u64, u64::saturating_add);
+    let total_files: usize = repos
+        .iter()
+        .map(|r| r.file_count)
+        .fold(0_usize, usize::saturating_add);
+    let any_partial = repos.iter().any(|r| r.has_partial);
+
+    println!("\n  {}", "\u{2500}".repeat(widths.rule_width()));
+    println!(
+        "  {:>10}  total ({} {}, {} {})",
+        format_size(total_size),
+        repos.len(),
+        pluralize(repos.len(), "repo", "repos"),
+        total_files,
+        pluralize(total_files, "file", "files"),
+    );
+    if any_partial {
+        println!("  \u{25cf} = partial downloads");
     }
 
     Ok(())
@@ -1941,8 +2410,9 @@ fn run_cache_clean_partial(
 
     if dry_run {
         println!(
-            "Would remove {} file(s) ({}):",
+            "Would remove {} {} ({}):",
             partials.len(),
+            pluralize(partials.len(), "file", "files"),
             format_size(total_size)
         );
         for p in &partials {
@@ -1951,15 +2421,20 @@ fn run_cache_clean_partial(
         return Ok(());
     }
 
-    println!("Found {} partial download(s):", partials.len());
+    println!(
+        "Found {} partial {}:",
+        partials.len(),
+        pluralize(partials.len(), "download", "downloads")
+    );
     for p in &partials {
         println!("  {}: {}  ({})", p.repo_id, p.filename, format_size(p.size));
     }
 
     if !yes {
         let prompt = format!(
-            "Clean {} file(s) ({})? [y/N]",
+            "Clean {} {} ({})? [y/N]",
             partials.len(),
+            pluralize(partials.len(), "file", "files"),
             format_size(total_size)
         );
         // BORROW: explicit .as_str() instead of Deref coercion
@@ -1986,8 +2461,9 @@ fn run_cache_clean_partial(
     }
 
     println!(
-        "Removed {} file(s). Freed {}.",
+        "Removed {} {}. Freed {}.",
         partials.len(),
+        pluralize(partials.len(), "file", "files"),
         format_size(total_size)
     );
     Ok(())
@@ -1996,6 +2472,50 @@ fn run_cache_clean_partial(
 /// Deletes a cached model by removing its `models--org--name/` directory.
 ///
 /// Shows a size preview and prompts for confirmation unless `--yes` is passed.
+/// Removes the `models--org--name/` directory for `repo_id`.
+///
+/// Low-level helper shared by `run_cache_delete` and `run_cache_gc`. Caller
+/// owns any preview/prompt rendering. The function refuses to follow
+/// symlinks (HF cache repos are always real directories) so a malicious or
+/// accidental symlink can't redirect deletion outside the cache.
+///
+/// # Errors
+///
+/// Returns [`FetchError::InvalidArgument`] when `repo_id` is not cached or
+/// when its `models--…` entry is a symlink. Returns [`FetchError::Io`] on
+/// filesystem failure during removal.
+fn delete_repo_dir(repo_id: &str) -> Result<(), FetchError> {
+    let cache_dir = cache::hf_cache_dir()?;
+    let repo_dir = hf_fetch_model::cache_layout::repo_dir(&cache_dir, repo_id);
+
+    if !repo_dir.exists() {
+        return Err(FetchError::InvalidArgument(format!(
+            "{repo_id} is not cached"
+        )));
+    }
+
+    // Defensive: refuse to follow symlinks. `remove_dir_all` on Unix follows
+    // symlinks and would delete the target, not the link — dangerous if the
+    // cache dir was tampered with.
+    let meta = std::fs::symlink_metadata(&repo_dir).map_err(|e| FetchError::Io {
+        // BORROW: explicit .clone() for owned PathBuf
+        path: repo_dir.clone(),
+        source: e,
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(FetchError::InvalidArgument(format!(
+            "{repo_id} cache entry is a symlink; refusing to delete"
+        )));
+    }
+
+    std::fs::remove_dir_all(&repo_dir).map_err(|e| FetchError::Io {
+        // BORROW: explicit .clone() for owned PathBuf
+        path: repo_dir.clone(),
+        source: e,
+    })?;
+    Ok(())
+}
+
 fn run_cache_delete(repo_id: &str, yes: bool) -> Result<(), FetchError> {
     let cache_dir = cache::hf_cache_dir()?;
 
@@ -2015,19 +2535,19 @@ fn run_cache_delete(repo_id: &str, yes: bool) -> Result<(), FetchError> {
     // Get size and file count for the preview (targeted scan, not full cache).
     let (file_count, size) = cache::repo_disk_usage(repo_id)?;
 
-    println!("  {repo_id}  ({}, {} files)", format_size(size), file_count);
+    println!(
+        "  {repo_id}  ({}, {} {})",
+        format_size(size),
+        file_count,
+        pluralize(file_count, "file", "files")
+    );
 
     if !yes && !confirm_prompt("  Delete? [y/N]") {
         println!("  Aborted.");
         return Ok(());
     }
 
-    std::fs::remove_dir_all(&repo_dir).map_err(|e| FetchError::Io {
-        // BORROW: explicit .clone() for owned PathBuf
-        path: repo_dir.clone(),
-        source: e,
-    })?;
-
+    delete_repo_dir(repo_id)?;
     println!("  Deleted. Freed {}.", format_size(size));
     Ok(())
 }
@@ -2062,6 +2582,409 @@ fn run_cache_path(repo_id: &str) -> Result<(), FetchError> {
 
     // Print bare path (no labels) for shell substitution.
     println!("{}", snapshot_dir.display());
+    Ok(())
+}
+
+// ============================================================================
+// cache gc: age- and budget-based eviction
+// ============================================================================
+
+/// A cached repo `has_partial == true` whose mtime falls within this window
+/// is treated as actively downloading and skipped from gc to avoid racing
+/// with `hf-fm download`. Stale partials (older than the window) remain
+/// eligible — `cache clean-partial` is the right tool for those.
+const FRESH_PARTIAL_WINDOW_SECS: u64 = 60 * 60;
+
+/// Snapshot of a single cached repo for gc planning and preview rendering.
+#[derive(Debug, Clone)]
+struct EvictionEntry {
+    /// Repository identifier (e.g., `"google/gemma-2-2b-it"`).
+    repo_id: String,
+    /// Total size on disk in bytes.
+    size: u64,
+    /// Most recent file mtime in the snapshot dir, if available.
+    last_modified: Option<std::time::SystemTime>,
+}
+
+impl From<&cache::CachedModelSummary> for EvictionEntry {
+    fn from(s: &cache::CachedModelSummary) -> Self {
+        Self {
+            // BORROW: explicit .clone() for owned String
+            repo_id: s.repo_id.clone(),
+            size: s.total_size,
+            last_modified: s.last_modified,
+        }
+    }
+}
+
+/// User-supplied gc criteria, normalised from CLI flags.
+struct GcCriteria {
+    /// Maximum allowed age in seconds; repos older than this are eligible.
+    /// `None` disables age eviction.
+    older_than_secs: Option<u64>,
+    /// Hard cap on total cache size in bytes after gc. `None` disables
+    /// budget eviction.
+    max_size: Option<u64>,
+    /// Repository identifiers that must never be evicted (deduped).
+    except: HashSet<String>,
+}
+
+/// Outcome of [`compute_gc_plan`] — what would be deleted, kept, skipped,
+/// and the cache-size delta.
+struct GcPlan {
+    /// Repos selected for deletion, sorted by mtime ascending (oldest
+    /// first), `repo_id` ascending as a deterministic tiebreaker.
+    evict: Vec<EvictionEntry>,
+    /// Repos protected by `--except` (only populated when `--except` was passed).
+    protected: Vec<EvictionEntry>,
+    /// Eligible repos kept by gc (only populated when `list_kept == true`).
+    kept: Vec<EvictionEntry>,
+    /// Repos skipped because of an active partial download (see
+    /// [`FRESH_PARTIAL_WINDOW_SECS`]).
+    skipped_partials: Vec<EvictionEntry>,
+    /// Total cache size before gc, in bytes.
+    size_before: u64,
+    /// Total cache size after gc, in bytes (computed).
+    size_after: u64,
+    /// `true` when `--max-size` was requested but the budget can't be met
+    /// because protected repos exceed it.
+    budget_shortfall: bool,
+}
+
+/// Returns the set of repo IDs from `summaries` that are older than
+/// `threshold_secs` relative to `now`.
+///
+/// Repos with `last_modified == None` are not selected (we don't age-evict
+/// repos whose age we can't determine). Repos with a future-dated mtime
+/// (clock skew, NFS) are also not selected — `now.duration_since(mtime)`
+/// returns `Err` and we treat them as age 0.
+#[must_use]
+fn select_age_evictions(
+    summaries: &[cache::CachedModelSummary],
+    threshold_secs: u64,
+    now: std::time::SystemTime,
+) -> HashSet<&str> {
+    // BORROW: explicit .as_str() to expose owned `repo_id: String` as the borrowed key.
+    summaries
+        .iter()
+        .filter_map(|s| {
+            let mtime = s.last_modified?;
+            let elapsed = now.duration_since(mtime).ok()?;
+            (elapsed.as_secs() >= threshold_secs).then_some(s.repo_id.as_str())
+        })
+        .collect()
+}
+
+/// Builds a [`GcPlan`] from cache state and user criteria.
+///
+/// Algorithm:
+/// 1. Partition `summaries` into `protected` (in `criteria.except`),
+///    `skipped_partials` (active in-flight downloads), and `eligible`.
+/// 2. Apply age eviction over `eligible` → preliminary evict set.
+/// 3. If `criteria.max_size` is set and the post-step-2 cache is still
+///    over budget, sort the remaining eligible by `(last_modified,
+///    repo_id)` ascending and greedily add until under budget.
+/// 4. `budget_shortfall` is set when step 3 ran but the final size still
+///    exceeds the budget (protected repos pinned more than `max_size`).
+///
+/// `last_modified == None` sorts before any `Some(_)` (so unknown-age
+/// repos are evicted first by the budget step), and `repo_id` ascending
+/// is a deterministic tiebreaker so the preview is stable across runs.
+#[must_use]
+fn compute_gc_plan(
+    summaries: &[cache::CachedModelSummary],
+    criteria: &GcCriteria,
+    now: std::time::SystemTime,
+    list_kept: bool,
+) -> GcPlan {
+    let size_before: u64 = summaries
+        .iter()
+        .map(|s| s.total_size)
+        .fold(0_u64, u64::saturating_add);
+
+    // BORROW: this function uses .as_str() throughout for HashSet lookups
+    // and tuple sort keys — all owned `repo_id: String` → `&str` borrows
+    // valid for the duration of the call.
+
+    // Step 1: partition.
+    let mut protected: Vec<EvictionEntry> = Vec::new();
+    let mut skipped_partials: Vec<EvictionEntry> = Vec::new();
+    let mut eligible: Vec<&cache::CachedModelSummary> = Vec::new();
+    for s in summaries {
+        if criteria.except.contains(s.repo_id.as_str()) {
+            protected.push(EvictionEntry::from(s));
+            continue;
+        }
+        let is_fresh_partial = s.has_partial
+            && s.last_modified.is_some_and(|m| {
+                now.duration_since(m)
+                    .is_ok_and(|d| d.as_secs() < FRESH_PARTIAL_WINDOW_SECS)
+            });
+        if is_fresh_partial {
+            skipped_partials.push(EvictionEntry::from(s));
+        } else {
+            eligible.push(s);
+        }
+    }
+
+    // Step 2: age eviction. Compute the global age set across all summaries,
+    // then partition `eligible` against it — protected and skipped_partials
+    // repos are not in `eligible`, so they're already excluded.
+    let age_set: HashSet<&str> = match criteria.older_than_secs {
+        Some(threshold) => select_age_evictions(summaries, threshold, now),
+        None => HashSet::new(),
+    };
+    let (mut to_evict, mut still_eligible): (
+        Vec<&cache::CachedModelSummary>,
+        Vec<&cache::CachedModelSummary>,
+    ) = eligible
+        .into_iter()
+        .partition(|s| age_set.contains(s.repo_id.as_str()));
+
+    // Step 3: budget eviction.
+    let mut budget_shortfall = false;
+    if let Some(max_size) = criteria.max_size {
+        let already_evicting: u64 = to_evict
+            .iter()
+            .map(|s| s.total_size)
+            .fold(0_u64, u64::saturating_add);
+        let mut remaining_after = size_before.saturating_sub(already_evicting);
+        if remaining_after > max_size {
+            // Sort by (mtime, repo_id) ascending. `Option<SystemTime>`
+            // orders `None` before any `Some(_)`, so unknown-age repos
+            // are picked first — they're the riskiest to keep.
+            still_eligible.sort_by(|a, b| {
+                (a.last_modified, a.repo_id.as_str()).cmp(&(b.last_modified, b.repo_id.as_str()))
+            });
+            let mut split_idx = 0_usize;
+            for s in &still_eligible {
+                if remaining_after <= max_size {
+                    break;
+                }
+                to_evict.push(s);
+                remaining_after = remaining_after.saturating_sub(s.total_size);
+                split_idx = split_idx.saturating_add(1);
+            }
+            budget_shortfall = remaining_after > max_size;
+            still_eligible.drain(0..split_idx);
+        }
+    }
+
+    // Final: sort the eviction list deterministically, materialise entries.
+    to_evict.sort_by(|a, b| {
+        (a.last_modified, a.repo_id.as_str()).cmp(&(b.last_modified, b.repo_id.as_str()))
+    });
+    let evict: Vec<EvictionEntry> = to_evict.iter().map(|s| EvictionEntry::from(*s)).collect();
+    let evicted_size: u64 = evict
+        .iter()
+        .map(|e| e.size)
+        .fold(0_u64, u64::saturating_add);
+    let size_after = size_before.saturating_sub(evicted_size);
+
+    let kept = if list_kept {
+        still_eligible
+            .iter()
+            .map(|s| EvictionEntry::from(*s))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    GcPlan {
+        evict,
+        protected,
+        kept,
+        skipped_partials,
+        size_before,
+        size_after,
+        budget_shortfall,
+    }
+}
+
+/// Renders an [`EvictionEntry`] table (repo / size / age) to stdout.
+///
+/// Used by the gc preview for the `Will remove` and (with `--list-kept`)
+/// `Keep` sections so they share the same alignment.
+fn render_eviction_table(entries: &[EvictionEntry]) {
+    let name_width = entries.iter().map(|e| e.repo_id.len()).max().unwrap_or(0);
+    let size_width = entries
+        .iter()
+        .map(|e| format_size(e.size).len())
+        .max()
+        .unwrap_or(0);
+    for entry in entries {
+        let age_str = entry
+            .last_modified
+            .map_or_else(|| "\u{2014}".to_owned(), format_age);
+        println!(
+            "  {:<nw$}  {:>sw$}  {age_str}",
+            entry.repo_id,
+            format_size(entry.size),
+            nw = name_width,
+            sw = size_width,
+        );
+    }
+}
+
+/// Renders the human-readable gc preview to stdout, in this order:
+/// `Will remove`, `Skipped (active partial downloads)`, `Protected by --except`,
+/// optional `Keep`, then a summary line `Cache: X → Y (free Z)`.
+fn render_gc_plan_preview(plan: &GcPlan) {
+    if !plan.evict.is_empty() {
+        println!("Will remove:");
+        render_eviction_table(&plan.evict);
+        println!();
+    }
+
+    if !plan.skipped_partials.is_empty() {
+        println!("Skipped (active partial downloads):");
+        for entry in &plan.skipped_partials {
+            println!("  {}", entry.repo_id);
+        }
+        println!();
+    }
+
+    if !plan.protected.is_empty() {
+        println!("Protected by --except:");
+        for entry in &plan.protected {
+            println!("  {}", entry.repo_id);
+        }
+        println!();
+    }
+
+    if !plan.kept.is_empty() {
+        println!("Keep:");
+        render_eviction_table(&plan.kept);
+        println!();
+    }
+
+    let freed = plan.size_before.saturating_sub(plan.size_after);
+    println!(
+        "Cache: {} \u{2192} {} (free {})",
+        format_size(plan.size_before),
+        format_size(plan.size_after),
+        format_size(freed)
+    );
+
+    if plan.budget_shortfall {
+        eprintln!("warning: --max-size budget cannot be reached; protected repos exceed the cap");
+    }
+}
+
+/// Garbage-collects cached models per the supplied criteria.
+///
+/// Wires the CLI flags through `compute_gc_plan`, renders a preview, and
+/// (unless `dry_run` is set) prompts for confirmation before deleting via
+/// [`delete_repo_dir`]. Deletion failures are collected per-repo so a
+/// single permission error doesn't abort the whole run; the function
+/// exits with an error if any deletion failed.
+///
+/// `older_than_days` is converted to seconds (1 day = `86_400` s);
+/// `max_size` is already in bytes (parsed by [`parse_size_arg`]).
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] when reading the cache directory fails, or
+/// [`FetchError::InvalidArgument`] when one or more repo deletions fail.
+fn run_cache_gc(
+    older_than_days: Option<u64>,
+    max_size: Option<u64>,
+    except: Vec<String>,
+    dry_run: bool,
+    yes: bool,
+    list_kept: bool,
+) -> Result<(), FetchError> {
+    let cache_dir = cache::hf_cache_dir()?;
+    if !cache_dir.exists() {
+        println!("No HuggingFace cache found at {}", cache_dir.display());
+        return Ok(());
+    }
+
+    println!("Cache: {}\n", cache_dir.display());
+
+    let summaries = cache::cache_summary()?;
+    if summaries.is_empty() {
+        println!("No models in cache.");
+        return Ok(());
+    }
+
+    // BORROW: explicit .as_str() to expose owned `repo_id: String` and the
+    // `--except` `String` argument as borrowed keys for the lookup set.
+    let known_ids: HashSet<&str> = summaries.iter().map(|s| s.repo_id.as_str()).collect();
+    // Validate --except against known repos; warn (don't error) on misses.
+    for repo in &except {
+        if !known_ids.contains(repo.as_str()) {
+            eprintln!("warning: --except {repo:?} is not a cached repo; ignoring");
+        }
+    }
+
+    let criteria = GcCriteria {
+        older_than_secs: older_than_days.map(|d| d.saturating_mul(86_400)),
+        max_size,
+        except: except.into_iter().collect(),
+    };
+
+    let plan = compute_gc_plan(
+        &summaries,
+        &criteria,
+        std::time::SystemTime::now(),
+        list_kept,
+    );
+
+    if !plan.skipped_partials.is_empty() {
+        let n = plan.skipped_partials.len();
+        eprintln!(
+            "note: {n} {} skipped (active partial {}); run `hf-fm cache clean-partial` first",
+            pluralize(n, "repo", "repos"),
+            pluralize(n, "download", "downloads")
+        );
+    }
+
+    if plan.evict.is_empty() {
+        println!("No repos matched eviction criteria.");
+        return Ok(());
+    }
+
+    render_gc_plan_preview(&plan);
+
+    if dry_run {
+        return Ok(());
+    }
+
+    if !yes && !confirm_prompt("\nProceed? [y/N]") {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    let mut failures: Vec<(String, FetchError)> = Vec::new();
+    let mut freed: u64 = 0;
+    for entry in &plan.evict {
+        // BORROW: explicit .as_str() for owned String → &str argument.
+        match delete_repo_dir(entry.repo_id.as_str()) {
+            Ok(()) => freed = freed.saturating_add(entry.size),
+            Err(e) => {
+                eprintln!("error: failed to delete {}: {e}", entry.repo_id);
+                // BORROW: explicit .clone() for owned String
+                failures.push((entry.repo_id.clone(), e));
+            }
+        }
+    }
+
+    let success_count = plan.evict.len().saturating_sub(failures.len());
+    println!(
+        "Removed {success_count} {}. Freed {}.",
+        pluralize(success_count, "repo", "repos"),
+        format_size(freed)
+    );
+
+    if !failures.is_empty() {
+        let n = failures.len();
+        return Err(FetchError::InvalidArgument(format!(
+            "{n} {} failed to delete during gc",
+            pluralize(n, "repo", "repos")
+        )));
+    }
+
     Ok(())
 }
 
@@ -2289,9 +3212,11 @@ fn run_diff(
     // Summary line.
     println!("  {}", "\u{2500}".repeat(70));
     print!(
-        "  A: {} tensors | B: {} tensors | only-A: {} | only-B: {} | differ: {} | match: {}",
+        "  A: {} {} | B: {} {} | only-A: {} | only-B: {} | differ: {} | match: {}",
         total_a,
+        pluralize(total_a, "tensor", "tensors"),
         total_b,
+        pluralize(total_b, "tensor", "tensors"),
         only_a.len(),
         only_b.len(),
         differ.len(),
@@ -2615,7 +3540,11 @@ fn run_inspect_list(
         total = total.saturating_add(*size);
     }
     println!();
-    println!("{count} file(s), {} total", format_size(total));
+    println!(
+        "{count} {}, {} total",
+        pluralize(count, "file", "files"),
+        format_size(total)
+    );
 
     // Reproducibility hints: only show when the user did not pin a revision.
     if revision.is_none() {
@@ -4187,6 +5116,107 @@ fn run_list_files(
     Ok(())
 }
 
+/// Parses a size string with binary suffix into a byte count.
+///
+/// Accepted forms (case-insensitive):
+/// - Plain integer: `"1024"` → 1024 bytes.
+/// - Integer with suffix: `"5GiB"`, `"500MiB"`, `"100KiB"`, `"2tib"`.
+/// - Decimal with suffix: `"1.5GiB"`, `"0.5MiB"`.
+///
+/// Suffixes recognized: `B`, `KiB`, `MiB`, `GiB`, `TiB`. Decimal-prefixed
+/// suffixes (`KB`, `MB`, `GB`, `TB`) are rejected with an error pointing at
+/// the binary spelling — the rest of `hf-fm` formats sizes in binary units
+/// and silent reinterpretation would mislead users. Used by the
+/// `cache gc --max-size` clap value parser.
+///
+/// # Errors
+///
+/// Returns a clap-compatible error string when:
+/// - the input is empty or has no digits,
+/// - the numeric portion fails to parse as a non-negative finite number,
+/// - the suffix is unrecognized or a decimal alias (`KB`/`MB`/`GB`/`TB`),
+/// - the resulting byte count overflows [`u64`].
+fn parse_size_arg(s: &str) -> Result<u64, String> {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const TIB: u64 = 1024 * GIB;
+
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("empty size value".to_owned());
+    }
+
+    // Split numeric prefix from optional suffix at the first non-digit, non-dot char.
+    let split_at = trimmed
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(trimmed.len());
+    let (number_part, suffix_part) = trimmed.split_at(split_at);
+
+    if number_part.is_empty() {
+        return Err(format!("missing number in size value {s:?}"));
+    }
+
+    let suffix = suffix_part.trim();
+    // BORROW: explicit .as_str() on the lowercased temporary String for match scrutinee.
+    let unit: u64 = match suffix.to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "kib" => KIB,
+        "mib" => MIB,
+        "gib" => GIB,
+        "tib" => TIB,
+        "kb" | "mb" | "gb" | "tb" => {
+            return Err(format!(
+                "decimal size unit {suffix:?} not supported (use binary units: KiB, MiB, GiB, TiB)"
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "unrecognized size unit {suffix:?} (expected B, KiB, MiB, GiB, TiB)"
+            ));
+        }
+    };
+
+    // Integer fast path — avoids any float casts.
+    if !number_part.contains('.') {
+        let n: u64 = number_part
+            .parse()
+            .map_err(|e| format!("invalid number in size value {s:?}: {e}"))?;
+        return n
+            .checked_mul(unit)
+            .ok_or_else(|| format!("size value {s:?} overflows u64"));
+    }
+
+    // Fractional path: parse as f64, multiply, narrow to u64.
+    let n: f64 = number_part
+        .parse()
+        .map_err(|e| format!("invalid number in size value {s:?}: {e}"))?;
+    if !n.is_finite() || n < 0.0 {
+        return Err(format!("invalid number in size value {s:?}"));
+    }
+    // CAST: u64 → f64. The `KIB`..`TIB` constants are powers of 2 ≤ 2^40,
+    // exactly representable in an f64 mantissa (53 bits).
+    #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+    let unit_f = unit as f64;
+    let bytes_f = n * unit_f;
+    // CAST: u64 → f64 for the upper bound. `u64::MAX` rounds up to ≈1.8e19;
+    // the comparison is conservative — values up to that f64 boundary pass.
+    #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+    let max_f = u64::MAX as f64;
+    if !bytes_f.is_finite() || bytes_f < 0.0 || bytes_f > max_f {
+        return Err(format!("size value {s:?} overflows u64"));
+    }
+    // CAST: f64 → u64. Range checked above; truncation toward zero is the
+    // intended rounding mode for fractional bytes (`"0.5KiB"` → 512).
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::as_conversions
+    )]
+    let bytes = bytes_f as u64;
+    Ok(bytes)
+}
+
 /// Formats a byte size with human-readable suffixes (B, KiB, MiB, GiB).
 fn format_size(bytes: u64) -> String {
     const KIB: u64 = 1024;
@@ -4423,4 +5453,482 @@ fn format_downloads(n: u64) -> String {
         result.push(ch);
     }
     result
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+
+    // ---------- parse_size_arg ----------
+
+    #[test]
+    fn parse_size_arg_plain_integer() {
+        assert_eq!(parse_size_arg("1024").unwrap(), 1024);
+        assert_eq!(parse_size_arg("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_size_arg_bytes_suffix() {
+        assert_eq!(parse_size_arg("512B").unwrap(), 512);
+        assert_eq!(parse_size_arg("512b").unwrap(), 512);
+    }
+
+    #[test]
+    fn parse_size_arg_binary_suffixes() {
+        assert_eq!(parse_size_arg("1KiB").unwrap(), 1024);
+        assert_eq!(parse_size_arg("1MiB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size_arg("1GiB").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size_arg("1TiB").unwrap(), 1024_u64.pow(4));
+    }
+
+    #[test]
+    fn parse_size_arg_case_insensitive() {
+        assert_eq!(parse_size_arg("5gib").unwrap(), 5 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size_arg("5GIB").unwrap(), 5 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size_arg("5GiB").unwrap(), 5 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_size_arg_whitespace_tolerant() {
+        assert_eq!(parse_size_arg("  5GiB  ").unwrap(), 5 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size_arg("5  GiB").unwrap(), 5 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_size_arg_fractional() {
+        assert_eq!(
+            parse_size_arg("1.5GiB").unwrap(),
+            1024 * 1024 * 1024 * 3 / 2
+        );
+        assert_eq!(parse_size_arg("0.5KiB").unwrap(), 512);
+        assert_eq!(parse_size_arg(".5MiB").unwrap(), 512 * 1024);
+    }
+
+    #[test]
+    fn parse_size_arg_rejects_decimal_suffix() {
+        for input in ["5KB", "5MB", "5GB", "5TB", "5gb"] {
+            let err = parse_size_arg(input).unwrap_err();
+            assert!(
+                err.contains("decimal size unit") && err.contains("binary units"),
+                "input {input:?} should be rejected as decimal, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_size_arg_rejects_unknown_suffix() {
+        let err = parse_size_arg("5xyz").unwrap_err();
+        assert!(err.contains("unrecognized size unit"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_size_arg_rejects_empty() {
+        assert!(parse_size_arg("").unwrap_err().contains("empty"));
+        assert!(parse_size_arg("   ").unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn parse_size_arg_rejects_missing_digits() {
+        assert!(parse_size_arg("GiB")
+            .unwrap_err()
+            .contains("missing number"));
+        assert!(parse_size_arg("-5GiB")
+            .unwrap_err()
+            .contains("missing number"));
+    }
+
+    #[test]
+    fn parse_size_arg_rejects_malformed_number() {
+        assert!(parse_size_arg("1.2.3GiB").is_err());
+    }
+
+    #[test]
+    fn parse_size_arg_overflow() {
+        // Integer overflow path: 2^54 KiB > u64::MAX.
+        let huge = format!("{}KiB", u64::MAX);
+        assert!(parse_size_arg(huge.as_str())
+            .unwrap_err()
+            .contains("overflow"));
+    }
+
+    // ---------- gc fixtures ----------
+
+    use std::time::{Duration, SystemTime};
+
+    fn make_summary(
+        repo_id: &str,
+        size: u64,
+        mtime: Option<SystemTime>,
+        has_partial: bool,
+    ) -> cache::CachedModelSummary {
+        cache::CachedModelSummary {
+            repo_id: repo_id.to_owned(),
+            file_count: 1,
+            total_size: size,
+            has_partial,
+            last_modified: mtime,
+        }
+    }
+
+    /// Returns a fixed reference point so tests aren't sensitive to wall clock.
+    fn fixed_now() -> SystemTime {
+        // SystemTime::UNIX_EPOCH + 1_700_000_000 secs ≈ Nov 2023.
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    }
+
+    // ---------- select_age_evictions ----------
+
+    #[test]
+    fn select_age_evictions_skips_none_mtime() {
+        let summaries = [make_summary("a/b", 100, None, false)];
+        let set = select_age_evictions(&summaries, 86_400, fixed_now());
+        assert!(set.is_empty(), "None mtime must not be age-evicted");
+    }
+
+    #[test]
+    fn select_age_evictions_skips_future_mtime() {
+        let now = fixed_now();
+        let future = now + Duration::from_secs(86_400);
+        let summaries = [make_summary("a/b", 100, Some(future), false)];
+        let set = select_age_evictions(&summaries, 0, now);
+        assert!(
+            set.is_empty(),
+            "future-dated mtime should be treated as age 0, not selected"
+        );
+    }
+
+    #[test]
+    fn select_age_evictions_includes_older_excludes_recent() {
+        let now = fixed_now();
+        let old = now - Duration::from_secs(86_400 * 31);
+        let recent = now - Duration::from_secs(86_400 * 5);
+        let summaries = [
+            make_summary("old/repo", 100, Some(old), false),
+            make_summary("recent/repo", 100, Some(recent), false),
+        ];
+        let set = select_age_evictions(&summaries, 86_400 * 30, now);
+        assert!(set.contains("old/repo"));
+        assert!(!set.contains("recent/repo"));
+    }
+
+    #[test]
+    fn select_age_evictions_zero_threshold_evicts_everything_with_known_mtime() {
+        let now = fixed_now();
+        let summaries = [
+            make_summary("a/b", 100, Some(now - Duration::from_secs(1)), false),
+            make_summary("c/d", 100, None, false),
+        ];
+        let set = select_age_evictions(&summaries, 0, now);
+        assert!(set.contains("a/b"));
+        assert!(
+            !set.contains("c/d"),
+            "None mtime still skipped at threshold 0"
+        );
+    }
+
+    // ---------- compute_gc_plan ----------
+
+    fn empty_criteria() -> GcCriteria {
+        GcCriteria {
+            older_than_secs: None,
+            max_size: None,
+            except: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn compute_gc_plan_age_only() {
+        let now = fixed_now();
+        let summaries = [
+            make_summary(
+                "old/a",
+                1_000,
+                Some(now - Duration::from_secs(86_400 * 60)),
+                false,
+            ),
+            make_summary(
+                "new/b",
+                2_000,
+                Some(now - Duration::from_secs(86_400 * 5)),
+                false,
+            ),
+        ];
+        let mut crit = empty_criteria();
+        crit.older_than_secs = Some(86_400 * 30);
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        assert_eq!(plan.evict.len(), 1);
+        assert_eq!(plan.evict[0].repo_id, "old/a");
+        assert_eq!(plan.size_before, 3_000);
+        assert_eq!(plan.size_after, 2_000);
+        assert!(!plan.budget_shortfall);
+    }
+
+    #[test]
+    fn compute_gc_plan_size_only_oldest_first() {
+        let now = fixed_now();
+        let summaries = [
+            make_summary(
+                "newest/c",
+                500,
+                Some(now - Duration::from_secs(86_400)),
+                false,
+            ),
+            make_summary(
+                "oldest/a",
+                400,
+                Some(now - Duration::from_secs(86_400 * 30)),
+                false,
+            ),
+            make_summary(
+                "middle/b",
+                300,
+                Some(now - Duration::from_secs(86_400 * 10)),
+                false,
+            ),
+        ];
+        let mut crit = empty_criteria();
+        crit.max_size = Some(700); // total 1200, must drop ≥ 500.
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        // Oldest evicted first, then middle (300+400=700 freed; 1200-700=500 ≤ 700).
+        assert_eq!(plan.evict.len(), 2);
+        assert_eq!(plan.evict[0].repo_id, "oldest/a");
+        assert_eq!(plan.evict[1].repo_id, "middle/b");
+        assert_eq!(plan.size_after, 500);
+        assert!(!plan.budget_shortfall);
+    }
+
+    #[test]
+    fn compute_gc_plan_combined_age_first_then_budget() {
+        let now = fixed_now();
+        let summaries = [
+            make_summary(
+                "ancient/a",
+                100,
+                Some(now - Duration::from_secs(86_400 * 90)),
+                false,
+            ),
+            make_summary(
+                "old/b",
+                100,
+                Some(now - Duration::from_secs(86_400 * 60)),
+                false,
+            ),
+            make_summary(
+                "midage/c",
+                400,
+                Some(now - Duration::from_secs(86_400 * 20)),
+                false,
+            ),
+            make_summary(
+                "fresh/d",
+                400,
+                Some(now - Duration::from_secs(86_400)),
+                false,
+            ),
+        ];
+        let mut crit = empty_criteria();
+        crit.older_than_secs = Some(86_400 * 30); // catches ancient + old.
+        crit.max_size = Some(500); // after age: total 1000-200=800; need 800-500=300 more.
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        // Age step removes ancient + old (200 freed). Budget step adds midage (400)
+        // → cache_after = 1000-200-400 = 400 ≤ 500.
+        let evicted_ids: Vec<&str> = plan.evict.iter().map(|e| e.repo_id.as_str()).collect();
+        assert_eq!(evicted_ids, vec!["ancient/a", "old/b", "midage/c"]);
+        assert_eq!(plan.size_after, 400);
+        assert!(!plan.budget_shortfall);
+    }
+
+    #[test]
+    fn compute_gc_plan_except_protects_repo() {
+        let now = fixed_now();
+        let summaries = [
+            make_summary(
+                "old/a",
+                500,
+                Some(now - Duration::from_secs(86_400 * 60)),
+                false,
+            ),
+            make_summary(
+                "old/b",
+                500,
+                Some(now - Duration::from_secs(86_400 * 60)),
+                false,
+            ),
+        ];
+        let mut crit = empty_criteria();
+        crit.older_than_secs = Some(86_400 * 30);
+        crit.except = HashSet::from(["old/a".to_owned()]);
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        assert_eq!(plan.evict.len(), 1);
+        assert_eq!(plan.evict[0].repo_id, "old/b");
+        assert_eq!(plan.protected.len(), 1);
+        assert_eq!(plan.protected[0].repo_id, "old/a");
+    }
+
+    #[test]
+    fn compute_gc_plan_except_causes_budget_shortfall() {
+        let now = fixed_now();
+        let summaries = [
+            make_summary(
+                "huge/a",
+                1_000,
+                Some(now - Duration::from_secs(86_400)),
+                false,
+            ),
+            make_summary(
+                "tiny/b",
+                10,
+                Some(now - Duration::from_secs(86_400 * 60)),
+                false,
+            ),
+        ];
+        let mut crit = empty_criteria();
+        crit.max_size = Some(500); // unreachable while huge/a is protected.
+        crit.except = HashSet::from(["huge/a".to_owned()]);
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        // tiny/b gets evicted; huge/a stays → cache = 1000 > 500.
+        assert_eq!(plan.evict.len(), 1);
+        assert!(plan.budget_shortfall);
+    }
+
+    #[test]
+    fn compute_gc_plan_skips_fresh_partial() {
+        let now = fixed_now();
+        let summaries = [make_summary(
+            "active/repo",
+            1_000,
+            Some(now - Duration::from_secs(60 * 30)), // 30 min ago
+            true,
+        )];
+        let mut crit = empty_criteria();
+        crit.max_size = Some(0);
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        assert!(plan.evict.is_empty());
+        assert_eq!(plan.skipped_partials.len(), 1);
+        assert!(plan.budget_shortfall);
+    }
+
+    #[test]
+    fn compute_gc_plan_evicts_stale_partial() {
+        let now = fixed_now();
+        let summaries = [make_summary(
+            "stale/repo",
+            1_000,
+            Some(now - Duration::from_secs(86_400 * 60)),
+            true, // partial, but 60 days old → stale.
+        )];
+        let mut crit = empty_criteria();
+        crit.older_than_secs = Some(86_400 * 30);
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        assert_eq!(plan.evict.len(), 1);
+        assert!(plan.skipped_partials.is_empty());
+    }
+
+    #[test]
+    fn compute_gc_plan_deterministic_order_on_tied_mtime() {
+        let now = fixed_now();
+        let mtime = Some(now - Duration::from_secs(86_400 * 60));
+        // Insertion order is reversed alphabetically; expect output sorted ascending.
+        let summaries = [
+            make_summary("zzz/last", 100, mtime, false),
+            make_summary("aaa/first", 100, mtime, false),
+            make_summary("mmm/middle", 100, mtime, false),
+        ];
+        let mut crit = empty_criteria();
+        crit.older_than_secs = Some(86_400 * 30);
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        let order: Vec<&str> = plan.evict.iter().map(|e| e.repo_id.as_str()).collect();
+        assert_eq!(order, vec!["aaa/first", "mmm/middle", "zzz/last"]);
+    }
+
+    #[test]
+    fn compute_gc_plan_lists_kept_when_flag_set() {
+        let now = fixed_now();
+        let summaries = [
+            make_summary(
+                "old/a",
+                100,
+                Some(now - Duration::from_secs(86_400 * 60)),
+                false,
+            ),
+            make_summary("new/b", 100, Some(now - Duration::from_secs(86_400)), false),
+        ];
+        let mut crit = empty_criteria();
+        crit.older_than_secs = Some(86_400 * 30);
+        let plan = compute_gc_plan(&summaries, &crit, now, true);
+        assert_eq!(plan.kept.len(), 1);
+        assert_eq!(plan.kept[0].repo_id, "new/b");
+    }
+
+    #[test]
+    fn compute_gc_plan_omits_kept_by_default() {
+        let now = fixed_now();
+        let summaries = [
+            make_summary(
+                "old/a",
+                100,
+                Some(now - Duration::from_secs(86_400 * 60)),
+                false,
+            ),
+            make_summary("new/b", 100, Some(now - Duration::from_secs(86_400)), false),
+        ];
+        let mut crit = empty_criteria();
+        crit.older_than_secs = Some(86_400 * 30);
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        assert!(
+            plan.kept.is_empty(),
+            "kept list should be empty when list_kept=false"
+        );
+    }
+
+    #[test]
+    fn compute_gc_plan_zero_byte_repo_handled() {
+        let now = fixed_now();
+        let summaries = [
+            make_summary(
+                "empty/a",
+                0,
+                Some(now - Duration::from_secs(86_400 * 60)),
+                false,
+            ),
+            make_summary(
+                "real/b",
+                100,
+                Some(now - Duration::from_secs(86_400 * 60)),
+                false,
+            ),
+        ];
+        let mut crit = empty_criteria();
+        crit.older_than_secs = Some(86_400 * 30);
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        assert_eq!(plan.evict.len(), 2);
+        assert_eq!(plan.size_before, 100);
+        assert_eq!(plan.size_after, 0);
+    }
+
+    #[test]
+    fn compute_gc_plan_unknown_mtime_sorted_first_for_budget() {
+        let now = fixed_now();
+        let summaries = [
+            make_summary(
+                "known/a",
+                400,
+                Some(now - Duration::from_secs(86_400 * 30)),
+                false,
+            ),
+            make_summary("unknown/b", 400, None, false),
+        ];
+        let mut crit = empty_criteria();
+        crit.max_size = Some(500); // total 800, drop ≥ 300.
+        let plan = compute_gc_plan(&summaries, &crit, now, false);
+        // unknown/b evicted first (None < Some).
+        assert_eq!(plan.evict.len(), 1);
+        assert_eq!(plan.evict[0].repo_id, "unknown/b");
+    }
 }

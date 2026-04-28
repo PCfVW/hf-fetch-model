@@ -460,6 +460,70 @@ fn cache_clean_partial_no_partials() {
 }
 
 #[test]
+fn cache_gc_help_shows_flags() {
+    let (stdout, stderr, success) = run(hf_fm().args(["cache", "gc", "--help"]));
+    assert!(success, "cache gc --help failed: {stderr}");
+    for flag in [
+        "--older-than",
+        "--max-size",
+        "--except",
+        "--dry-run",
+        "--yes",
+        "--list-kept",
+    ] {
+        assert!(
+            stdout.contains(flag),
+            "cache gc help should contain {flag}, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn help_shows_cache_gc() {
+    let (stdout, stderr, success) = run(hf_fm().args(["cache", "--help"]));
+    assert!(success, "cache --help failed: {stderr}");
+    assert!(
+        stdout.contains("gc"),
+        "cache help should mention gc subcommand, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn cache_gc_requires_strategy() {
+    let (_, stderr, success) = run(hf_fm().args(["cache", "gc"]));
+    assert!(!success, "bare `cache gc` should be rejected by clap");
+    // clap's ArgGroup error mentions both required-arg names.
+    assert!(
+        stderr.contains("--older-than") && stderr.contains("--max-size"),
+        "cache gc with no flags should mention --older-than and --max-size, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn cache_gc_rejects_decimal_size() {
+    let (_, stderr, success) = run(hf_fm().args(["cache", "gc", "--max-size", "5GB", "--dry-run"]));
+    assert!(!success, "--max-size 5GB should be rejected");
+    assert!(
+        stderr.contains("decimal size unit") && stderr.contains("binary units"),
+        "cache gc should reject decimal units with helpful error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn cache_gc_dry_run_no_matches() {
+    // 99999 days ≈ 273 years — older than any plausible cache entry.
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["cache", "gc", "--older-than", "99999", "--dry-run"]));
+    assert!(success, "cache gc --dry-run should succeed: {stderr}");
+    assert!(
+        stdout.contains("No repos matched eviction criteria")
+            || stdout.contains("No models in cache")
+            || stdout.contains("No HuggingFace cache found"),
+        "cache gc --older-than 99999 should report no matches, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn help_shows_du_subcommand() {
     let (stdout, _stderr, success) = run(hf_fm().arg("--help"));
     assert!(success, "help should succeed");
@@ -556,6 +620,54 @@ fn du_nonexistent_repo_shows_empty() {
     assert!(
         stdout.contains("No cached files found"),
         "du for missing repo should say no files found, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn du_tree_succeeds() {
+    // Ensure julien-c/dummy-unknown is cached so the tree has at least one branch.
+    let (_, _, dl_success) = run(hf_fm().args(["julien-c/dummy-unknown"]));
+    assert!(dl_success, "download for du-tree fixture should succeed");
+
+    let (stdout, stderr, success) = run(hf_fm().args(["du", "--tree"]));
+    assert!(success, "du --tree should succeed: {stderr}");
+    assert!(
+        stdout.starts_with("Cache: "),
+        "du --tree should announce the cache path, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\u{251c}\u{2500}\u{2500} ")
+            || stdout.contains("\u{2514}\u{2500}\u{2500} "),
+        "du --tree should render box-drawing connectors, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("total ("),
+        "du --tree should print a totals line, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn du_tree_with_age_succeeds() {
+    let (_, _, dl_success) = run(hf_fm().args(["julien-c/dummy-unknown"]));
+    assert!(dl_success, "download for du-tree fixture should succeed");
+
+    let (stdout, stderr, success) = run(hf_fm().args(["du", "--tree", "--age"]));
+    assert!(success, "du --tree --age should succeed: {stderr}");
+    // `julien-c/dummy-unknown` was just downloaded, so an age string must
+    // appear somewhere on the repo branch line.
+    assert!(
+        stdout.contains("hour") || stdout.contains("day") || stdout.contains("month"),
+        "du --tree --age should include a relative age, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn du_tree_conflicts_with_repo_arg() {
+    let (_, stderr, success) = run(hf_fm().args(["du", "--tree", "julien-c/dummy-unknown"]));
+    assert!(!success, "du --tree <REPO> should be rejected by clap");
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("conflict"),
+        "du --tree <REPO> should report a clap conflict, got:\n{stderr}"
     );
 }
 

@@ -252,6 +252,12 @@ hf-fm du google/gemma-2-2b-it
 
 # Show last-modified age column
 hf-fm du --age
+
+# Hierarchical tree of every cached repo + its files
+hf-fm du --tree
+
+# Tree view with last-modified column on each repo branch
+hf-fm du --tree --age
 ```
 
 ## Du flags
@@ -259,6 +265,7 @@ hf-fm du --age
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--age` | Show a last-modified age column (e.g., `2 days ago`, `3 months ago`) | off |
+| `--tree` | Hierarchical tree view: repos as branches, files as leaves, using box-drawing connectors. Composes with `--age`; conflicts with the positional repo argument (the per-repo view is already covered by `du <REPO_ID>`). | off |
 
 ## Other commands
 
@@ -314,6 +321,41 @@ hf-fm cache delete 3 --yes
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--yes` | Skip confirmation prompt | off |
+
+```sh
+# Evict every repo last touched more than 30 days ago
+hf-fm cache gc --older-than 30
+
+# Trim the cache to fit under a budget (oldest-first)
+hf-fm cache gc --max-size 20GiB
+
+# Combined: age first, then trim further if still over budget
+hf-fm cache gc --older-than 30 --max-size 20GiB
+
+# Protect specific repos from eviction (repeatable)
+hf-fm cache gc --max-size 20GiB --except google/gemma-2-2b-it
+
+# Preview without deleting; show every kept repo for transparency
+hf-fm cache gc --older-than 30 --dry-run --list-kept
+
+# Skip the confirmation prompt
+hf-fm cache gc --older-than 30 --yes
+```
+
+## Cache gc flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--older-than DAYS` | Evict repos with mtime older than this many days | unset |
+| `--max-size SIZE` | Hard cap on total cache size (`B`, `KiB`, `MiB`, `GiB`, `TiB`) | unset |
+| `--except REPO_ID` | Repository to protect from eviction (repeatable) | none |
+| `--dry-run` | Preview the eviction plan without deleting anything | off |
+| `--yes` | Skip the confirmation prompt | off |
+| `--list-kept` | List every kept repo in the preview (default: hidden for terseness) | off |
+
+At least one of `--older-than` or `--max-size` is required. When both are set, age eviction runs first; if the cache is still over budget, oldest non-protected repos are evicted next, oldest first. Repos with active partial downloads (mtime within the last hour) are skipped to avoid racing with `hf-fm download`; run `cache clean-partial` first to clear stale partials.
+
+Decimal-prefixed size suffixes (`KB`, `MB`, `GB`, `TB`) are rejected — `hf-fm` reports sizes in binary units everywhere else and silent reinterpretation would mislead. Use `KiB`, `MiB`, `GiB`, `TiB`.
 
 ```sh
 # Print snapshot path for shell substitution

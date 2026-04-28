@@ -34,6 +34,7 @@ cargo install hf-fetch-model --features cli
 | `hf-fm <REPO_ID>` *(default)* | Download a model (multi-connection, auto-tuned) |
 | `hf-fm cache clean-partial` | Remove `.chunked.part` files from interrupted downloads |
 | `hf-fm cache delete <REPO_ID\|N>` | Delete a cached model |
+| `hf-fm cache gc --older-than/--max-size` | Garbage-collect cached models by age and/or size budget |
 | `hf-fm cache path <REPO_ID\|N>` | Print snapshot directory path (for scripting) |
 | `hf-fm diff <REPO_A> <REPO_B>` | Compare tensor layouts between two models |
 | `hf-fm discover` | Find new model families on the Hub |
@@ -179,6 +180,19 @@ $ hf-fm du --age
    2    2.80 GiB  EleutherAI/pythia-1.4b                              12  45 days ago     ●
    3    1.20 GiB  google/gemma-scope-2b-pt-res                         3  3 months ago
   ─────────────────────────────────────────────────────────────────────────────────────────
+   9.10 GiB  total (3 repos, 23 files)
+  ● = partial downloads
+
+$ hf-fm du --tree
+  ├── google/gemma-2-2b-it          5.10 GiB  (8 files)
+  │   ├── model-00001-of-00002.safetensors  2.50 GiB
+  │   ├── model-00002-of-00002.safetensors  2.60 GiB
+  │   └── config.json                          856 B
+  ├── EleutherAI/pythia-1.4b        2.80 GiB  (12 files)  ●
+  │   └── ...
+  └── google/gemma-scope-2b-pt-res  1.20 GiB  (3 files)
+      └── ...
+  ─────────────────────────────────────────────────────────
    9.10 GiB  total (3 repos, 23 files)
   ● = partial downloads
 
