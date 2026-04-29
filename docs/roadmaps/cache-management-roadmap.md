@@ -285,7 +285,32 @@ These are more complex than prior releases: verify needs network + checksum comp
 
 The two ✓ items above are early increments toward v0.10.0 — UX bugs surfaced during v0.9.8 dogfooding, fixed on `main` immediately rather than waiting for a v0.9.9 patch release. They establish a small precedent: post-release dogfooding gaps land on the next-minor's branch, not the current-patch's.
 
-### v0.10.1 — GGUF inspect (cached)
+### v0.10.1 — `inspect --check-gpu` (hypomnesis adoption)
+
+| Feature | Scope |
+|---------|-------|
+| `inspect <repo> [FILE] --check-gpu [N]` | Add a GPU-fit verdict to `inspect`: model weight size compared against free VRAM on device `N` (default 0). |
+| `hypomnesis = "0.1"` dependency | First external consumer of the standalone GPU-memory crate ([crates.io/crates/hypomnesis](https://crates.io/crates/hypomnesis)) — uses `device_info` + `device_count`, ≈10 % of the surface. |
+
+Sample output:
+
+```
+$ hf-fm inspect google/gemma-4-E2B-it model.safetensors --check-gpu
+
+  Model weights:  9.54 GiB  (BF16, 5.12B params)
+  GPU 0:          NVIDIA GeForce RTX 5060 Ti — 16.0 GiB VRAM
+                  free: 14.2 GiB, used: 1.8 GiB
+  Fit:            ✓ 4.66 GiB headroom for weights + KV cache + runtime
+
+  Note: reports weights only. Large-context inference typically needs ~1.3–1.5×
+  weight size for KV cache and activations.
+```
+
+Validates the `hypomnesis` API surface against a real consumer before `candle-mi` migrates in `hypomnesis` Phase 3 (candle-mi v0.2). Implementation-light on the hf-fm side: read the device info, format the verdict alongside the existing inspect output. The hard work — Windows DXGI per-process VRAM, NVML `u64::MAX` sentinel handling, `nvidia-smi` fallback — lives in `hypomnesis` and is already battle-tested code ported from candle-mi.
+
+**Status:** unblocked — `hypomnesis 0.1.0` is on crates.io (Phase 1 Wave 2 complete). hf-fm is the proof-of-concept consumer named in the [hypomnesis brief](https://github.com/PCfVW/hypomnesis/blob/main/docs/hypomnesis-brief.md) under *First consumer*.
+
+### v0.10.2 — GGUF inspect (cached)
 
 | Feature | Scope |
 |---------|-------|
