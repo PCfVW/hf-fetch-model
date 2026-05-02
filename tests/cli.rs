@@ -1070,6 +1070,103 @@ fn inspect_cached_sharded_model() {
 }
 
 #[test]
+fn inspect_cached_sharded_dtypes_aggregates() {
+    let Some(repo_id) = find_cached_sharded_repo() else {
+        eprintln!("SKIP: no cached sharded safetensors model found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, "--cached", "--dtypes"]));
+    assert!(
+        success,
+        "inspect --cached --dtypes sharded model should succeed: {stderr}"
+    );
+    // Bypassing the shard-index fast path replaces "Source: shard index" with
+    // the aggregator's "Source: aggregated across N shards".
+    assert!(
+        stdout.contains("aggregated across"),
+        "sharded --dtypes should report aggregated source, got:\n{stdout}"
+    );
+    // The dtype histogram header is the marker that the renderer ran.
+    assert!(
+        stdout.contains("Dtype") && stdout.contains("Tensors") && stdout.contains("Params"),
+        "sharded --dtypes should show histogram columns, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Hint: use `hf-fm inspect"),
+        "aggregated --dtypes should NOT print the per-file hint, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_sharded_tree_aggregates() {
+    let Some(repo_id) = find_cached_sharded_repo() else {
+        eprintln!("SKIP: no cached sharded safetensors model found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args(["inspect", &repo_id, "--cached", "--tree"]));
+    assert!(
+        success,
+        "inspect --cached --tree sharded model should succeed: {stderr}"
+    );
+    assert!(
+        stdout.contains("aggregated across"),
+        "sharded --tree should report aggregated source, got:\n{stdout}"
+    );
+    // Tree connectors are the unambiguous marker that the renderer ran.
+    assert!(
+        stdout.contains("├──") || stdout.contains("└──"),
+        "sharded --tree should render box-drawing connectors, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_sharded_dtypes_json_aggregates() {
+    let Some(repo_id) = find_cached_sharded_repo() else {
+        eprintln!("SKIP: no cached sharded safetensors model found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, "--cached", "--dtypes", "--json"]));
+    assert!(
+        success,
+        "inspect --cached --dtypes --json sharded model should succeed: {stderr}"
+    );
+    assert!(
+        stdout.contains("\"dtypes\"") && stdout.contains("\"total_tensors\""),
+        "JSON should contain dtypes + total_tensors fields, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_sharded_limit_shows_shard_column() {
+    let Some(repo_id) = find_cached_sharded_repo() else {
+        eprintln!("SKIP: no cached sharded safetensors model found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, "--cached", "--limit", "3"]));
+    assert!(
+        success,
+        "inspect --cached --limit sharded model should succeed: {stderr}"
+    );
+    assert!(
+        stdout.contains("aggregated across"),
+        "sharded --limit should report aggregated source, got:\n{stdout}"
+    );
+    // The Shard column is the marker that distinguishes the multi-shard
+    // table from the single-file inspect table.
+    assert!(
+        stdout.contains("Shard"),
+        "sharded --limit table should include a Shard column, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("limit: 3"),
+        "footer should mention the active limit, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn inspect_cached_filter() {
     let Some((repo_id, filename)) = find_cached_safetensors_repo() else {
         eprintln!("SKIP: no cached safetensors repo found");

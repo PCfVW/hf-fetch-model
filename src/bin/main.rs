@@ -3538,7 +3538,9 @@ fn run_inspect(
                 tree,
             )
         }
-        None => run_inspect_repo(repo_id, revision, token, cached, json, filter),
+        None => run_inspect_repo(
+            repo_id, revision, token, cached, json, filter, dtypes, limit, tree,
+        ),
     }
 }
 
@@ -4525,7 +4527,16 @@ fn run_inspect_single(
 }
 
 /// Inspects all `.safetensors` files in a repository (summary or per-file).
-#[allow(clippy::too_many_arguments)]
+///
+/// When any of `dtypes`, `limit`, or `tree` is set, the shard-index fast path
+/// is bypassed and every shard's header is fetched so the per-tensor data
+/// can be flattened across shards and rolled up by the existing
+/// `--dtypes` / `--tree` / per-tensor renderers — see
+/// [`run_inspect_repo_aggregated`].
+// EXPLICIT: linear cache-vs-network branching and shard-index fast path,
+// followed by a flatten-and-render fallthrough. Splitting hides the
+// aggregation gate.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn run_inspect_repo(
     repo_id: &str,
     revision: Option<&str>,
@@ -4533,19 +4544,34 @@ fn run_inspect_repo(
     cached: bool,
     json: bool,
     filter: Option<&str>,
+    dtypes: bool,
+    limit: Option<usize>,
+    tree: bool,
 ) -> Result<(), FetchError> {
+    // When the user asked for tensor-level aggregation, every shard's header
+    // must be read; the shard-index file alone has no dtype or shape data.
+    let needs_aggregation = dtypes || tree || limit.is_some();
+
     if cached {
         // Cache-only: try shard index first, then walk snapshot.
-        if let Some(index) = inspect::fetch_shard_index_cached(repo_id, revision)? {
-            print_shard_index_summary(repo_id, &index, filter);
-            print_adapter_config_if_present(repo_id, revision, None, true, json);
-            return Ok(());
+        if !needs_aggregation {
+            if let Some(index) = inspect::fetch_shard_index_cached(repo_id, revision)? {
+                print_shard_index_summary(repo_id, &index, filter);
+                print_adapter_config_if_present(repo_id, revision, None, true, json);
+                return Ok(());
+            }
         }
 
         let results = inspect::inspect_repo_safetensors_cached(repo_id, revision)?;
         if results.is_empty() {
             println!("No cached .safetensors files found for {repo_id}.");
             println!("Hint: use `hf-fm list-files {repo_id}` to see available file types");
+            return Ok(());
+        }
+
+        if needs_aggregation {
+            run_inspect_repo_aggregated(repo_id, &results, json, filter, dtypes, limit, tree)?;
+            print_adapter_config_if_present(repo_id, revision, None, true, json);
             return Ok(());
         }
 
@@ -4571,17 +4597,19 @@ fn run_inspect_repo(
         source: e,
     })?;
 
-    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
-    let shard_index = rt.block_on(inspect::fetch_shard_index(
-        repo_id,
-        token.as_deref(),
-        revision,
-    ))?;
+    if !needs_aggregation {
+        // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+        let shard_index = rt.block_on(inspect::fetch_shard_index(
+            repo_id,
+            token.as_deref(),
+            revision,
+        ))?;
 
-    if let Some(index) = shard_index {
-        print_shard_index_summary(repo_id, &index, filter);
-        print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, json);
-        return Ok(());
+        if let Some(index) = shard_index {
+            print_shard_index_summary(repo_id, &index, filter);
+            print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, json);
+            return Ok(());
+        }
     }
 
     // BORROW: explicit .as_deref() for Option<String> → Option<&str>
@@ -4597,23 +4625,233 @@ fn run_inspect_repo(
         return Ok(());
     }
 
+    let mapped: Vec<(String, inspect::SafetensorsHeaderInfo)> = results
+        .into_iter()
+        .map(|(name, info, _source)| (name, info))
+        .collect();
+
+    if needs_aggregation {
+        run_inspect_repo_aggregated(repo_id, &mapped, json, filter, dtypes, limit, tree)?;
+        print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, json);
+        return Ok(());
+    }
+
     if json {
-        let mapped: Vec<(String, inspect::SafetensorsHeaderInfo)> = results
-            .into_iter()
-            .map(|(name, info, _source)| (name, info))
-            .collect();
         print_multi_file_json(&mapped, filter)?;
         print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, true);
         return Ok(());
     }
 
-    let mapped: Vec<(String, inspect::SafetensorsHeaderInfo)> = results
-        .into_iter()
-        .map(|(name, info, _source)| (name, info))
-        .collect();
     print_multi_file_summary(repo_id, "mixed", &mapped, filter);
     print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, false);
     Ok(())
+}
+
+/// Flattens tensors across every shard of a sharded repo and dispatches to
+/// the existing `--dtypes` / `--tree` / per-tensor renderers.
+///
+/// Reused by both the cached and the network paths in [`run_inspect_repo`].
+/// `--filter` is applied first (per-tensor name match), then `--limit`
+/// truncates the resulting flat list. `total_*` counters reflect the
+/// pre-filter, pre-limit totals so footers can show
+/// `shown/total` ratios consistent with the single-file inspect.
+// EXPLICIT: branches mirror `run_inspect_single`'s mode matrix
+// (`tree+json`, `dtypes+json`, plain `--json`, `tree`, `dtypes`,
+// per-tensor table). Splitting would obscure the parity.
+#[allow(
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
+fn run_inspect_repo_aggregated(
+    repo_id: &str,
+    results: &[(String, inspect::SafetensorsHeaderInfo)],
+    json: bool,
+    filter: Option<&str>,
+    dtypes: bool,
+    limit: Option<usize>,
+    tree: bool,
+) -> Result<(), FetchError> {
+    // Flatten tensors across all shards. `(filename, &TensorInfo)` lets the
+    // table renderer attribute each tensor to its source shard.
+    let mut flat: Vec<(&str, &inspect::TensorInfo)> = Vec::new();
+    for (file, info) in results {
+        for t in &info.tensors {
+            // BORROW: explicit .as_str() for owned String → &str
+            flat.push((file.as_str(), t));
+        }
+    }
+
+    let total_tensor_count = flat.len();
+    let total_params: u64 = flat
+        .iter()
+        .map(|(_, t)| t.num_elements())
+        .fold(0u64, u64::saturating_add);
+
+    if let Some(pattern) = filter {
+        // BORROW: explicit .as_str() instead of Deref coercion
+        flat.retain(|(_, t)| t.name.as_str().contains(pattern));
+    }
+
+    let matched_count = flat.len();
+    let matched_params: u64 = flat
+        .iter()
+        .map(|(_, t)| t.num_elements())
+        .fold(0u64, u64::saturating_add);
+
+    let truncated_by_limit = limit.is_some_and(|n| matched_count > n);
+    if let Some(n) = limit {
+        flat.truncate(n);
+    }
+
+    // BORROW: explicit .clone() to materialize owned TensorInfo for
+    // renderers that take `&[TensorInfo]` rather than `&[&TensorInfo]`.
+    let tensors_owned: Vec<inspect::TensorInfo> = flat.iter().map(|(_, t)| (*t).clone()).collect();
+
+    // `--tree --json`: tagged-enum tree schema (matches run_inspect_single).
+    if tree && json {
+        return print_tree_json(
+            repo_id,
+            "<all shards>",
+            &tensors_owned,
+            total_tensor_count,
+            total_params,
+        );
+    }
+
+    // `--dtypes --json`: compact dtype breakdown.
+    if dtypes && json {
+        return print_dtype_summary_json(&tensors_owned, total_tensor_count, total_params);
+    }
+
+    // Header — same shape as the per-file inspect.
+    println!("  Repo:   {repo_id}");
+    let n_shards = results.len();
+    let shard_label = if n_shards == 1 { "shard" } else { "shards" };
+    println!("  Source: aggregated across {n_shards} {shard_label}");
+
+    // `--tree`: hierarchical view, aggregated across shards.
+    if tree {
+        print_tree_summary(&tensors_owned, filter, total_tensor_count, total_params);
+        return Ok(());
+    }
+
+    // `--dtypes`: per-dtype histogram, aggregated across shards.
+    if dtypes {
+        print_dtype_summary(&tensors_owned, filter, total_tensor_count, total_params);
+        return Ok(());
+    }
+
+    // Bare `--limit` (and any combination of `--filter` + `--limit`):
+    // flat tensor table with a `Shard` column so the user knows which
+    // file each tensor came from.
+    print_multi_shard_table(
+        &flat,
+        filter,
+        limit,
+        truncated_by_limit,
+        total_tensor_count,
+        matched_count,
+        total_params,
+        matched_params,
+    );
+
+    Ok(())
+}
+
+/// Prints a flat tensor table for multi-shard inspect when `--limit` is set
+/// (and neither `--dtypes` nor `--tree` was selected). Adds a `Shard` column
+/// vs. the single-file table so the user can see provenance.
+#[allow(clippy::too_many_arguments)]
+fn print_multi_shard_table(
+    flat: &[(&str, &inspect::TensorInfo)],
+    filter: Option<&str>,
+    limit: Option<usize>,
+    truncated_by_limit: bool,
+    total_tensor_count: usize,
+    matched_count: usize,
+    total_params: u64,
+    matched_params: u64,
+) {
+    // Dynamic column widths.
+    let nw = flat
+        .iter()
+        .map(|(_, t)| t.name.len())
+        .max()
+        .unwrap_or(6)
+        .max(6); // BORROW: "Tensor".len()
+    let shape_strs: Vec<String> = flat.iter().map(|(_, t)| format!("{:?}", t.shape)).collect();
+    let sw = shape_strs.iter().map(String::len).max().unwrap_or(5).max(5); // BORROW: "Shape".len()
+    let fw = flat
+        .iter()
+        .map(|(file, _)| file.len())
+        .max()
+        .unwrap_or(5)
+        .max(5); // BORROW: "Shard".len()
+    let row_width = nw + 2 + 8 + 2 + sw + 2 + 10 + 2 + 10 + 2 + fw;
+
+    println!();
+    println!(
+        "  {:<nw$} {:<8} {:<sw$} {:>10} {:>10}  {:<fw$}",
+        "Tensor", "Dtype", "Shape", "Size", "Params", "Shard",
+    );
+
+    for ((file, t), shape_str) in flat.iter().zip(shape_strs.iter()) {
+        let size_str = format_size(t.byte_len());
+        let params_str = inspect::format_params(t.num_elements());
+        println!(
+            "  {:<nw$} {:<8} {:<sw$} {:>10} {:>10}  {:<fw$}",
+            t.name, t.dtype, shape_str, size_str, params_str, file,
+        );
+    }
+
+    println!("  {}", "\u{2500}".repeat(row_width));
+
+    let shown_count = flat.len();
+    let shown_params: u64 = flat
+        .iter()
+        .map(|(_, t)| t.num_elements())
+        .fold(0u64, u64::saturating_add);
+    let tensor_label = if shown_count == 1 {
+        "tensor"
+    } else {
+        "tensors"
+    };
+
+    match (filter.is_some(), truncated_by_limit) {
+        (false, false) => {
+            println!(
+                "  {shown_count} {tensor_label}, {} params",
+                inspect::format_params(shown_params)
+            );
+        }
+        (true, false) => {
+            println!(
+                "  {shown_count}/{total_tensor_count} {tensor_label}, {}/{} params (filter: {:?})",
+                inspect::format_params(shown_params),
+                inspect::format_params(total_params),
+                filter.unwrap_or_default(),
+            );
+        }
+        (false, true) => {
+            println!(
+                "  {shown_count}/{total_tensor_count} {tensor_label} shown, {}/{} params (limit: {})",
+                inspect::format_params(shown_params),
+                inspect::format_params(total_params),
+                limit.unwrap_or(0),
+            );
+        }
+        (true, true) => {
+            println!(
+                "  {shown_count}/{matched_count}/{total_tensor_count} {tensor_label} shown, {}/{}/{} params (filter: {:?}, limit: {})",
+                inspect::format_params(shown_params),
+                inspect::format_params(matched_params),
+                inspect::format_params(total_params),
+                filter.unwrap_or_default(),
+                limit.unwrap_or(0),
+            );
+        }
+    }
 }
 
 /// Prints adapter configuration if `adapter_config.json` is found in the repository.
