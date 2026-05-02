@@ -524,6 +524,61 @@ fn cache_gc_dry_run_no_matches() {
 }
 
 #[test]
+fn cache_verify_help_shows_flags() {
+    let (stdout, stderr, success) = run(hf_fm().args(["cache", "verify", "--help"]));
+    assert!(success, "cache verify --help failed: {stderr}");
+    for flag in ["--revision", "--token"] {
+        assert!(
+            stdout.contains(flag),
+            "cache verify help should contain {flag}, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn help_shows_cache_verify() {
+    let (stdout, stderr, success) = run(hf_fm().args(["cache", "--help"]));
+    assert!(success, "cache --help failed: {stderr}");
+    assert!(
+        stdout.contains("verify"),
+        "cache help should mention verify subcommand, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn cache_verify_nonexistent_repo() {
+    let (_, stderr, success) =
+        run(hf_fm().args(["cache", "verify", "nonexistent-org/nonexistent-model-xyz"]));
+    assert!(!success, "cache verify of missing repo should fail");
+    assert!(
+        stderr.contains("not cached"),
+        "cache verify should report not cached, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn cache_verify_against_dummy_unknown() {
+    // Pre-cache the test repo so verify has files to look at.
+    let (_, _, dl_success) = run(hf_fm().args(["julien-c/dummy-unknown"]));
+    assert!(dl_success, "download should succeed to populate cache");
+
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["cache", "verify", "julien-c/dummy-unknown"]));
+    assert!(success, "cache verify should succeed: {stderr}\n{stdout}");
+    // The dummy repo's small JSON files have no LFS metadata, so every file
+    // is reported as `no LFS hash`. Either marker satisfies the test.
+    assert!(
+        stdout.contains("SHA256 OK") || stdout.contains("no LFS hash"),
+        "cache verify should show OK or no-LFS-hash markers, got:\n{stdout}"
+    );
+    // Footer must always be present.
+    assert!(
+        stdout.contains("SHA256 OK") && stdout.contains("skipped"),
+        "cache verify footer should mention OK and skipped counts, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn help_shows_du_subcommand() {
     let (stdout, _stderr, success) = run(hf_fm().arg("--help"));
     assert!(success, "help should succeed");

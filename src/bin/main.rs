@@ -472,6 +472,24 @@ enum CacheCommands {
         /// Repository identifier or numeric index from `du` output.
         repo_id: String,
     },
+    /// Re-verify `SHA256` digests of cached files against `HuggingFace` LFS metadata.
+    ///
+    /// Requires network access to fetch the expected digests. Files without
+    /// LFS metadata (small git-stored files such as `config.json`) are
+    /// skipped. The command exits non-zero if any file fails verification,
+    /// so it composes cleanly into CI / cron checks.
+    Verify {
+        /// Repository identifier or numeric index from `du` output.
+        repo_id: String,
+
+        /// Git revision (branch, tag, or commit SHA).
+        #[arg(long)]
+        revision: Option<String>,
+
+        /// Authentication token (or set `HF_TOKEN` env var).
+        #[arg(long)]
+        token: Option<String>,
+    },
 }
 
 // EXHAUSTIVE: internal CLI dispatch enum; crate owns all variants
@@ -777,6 +795,15 @@ fn run(cli: Cli) -> Result<(), FetchError> {
                 let resolved = resolve_du_arg(repo_id.as_str())?;
                 // BORROW: explicit .as_str() instead of Deref coercion
                 run_cache_path(resolved.as_str())
+            }
+            // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
+            CacheCommands::Verify {
+                repo_id,
+                revision,
+                token,
+            } => {
+                let resolved = resolve_du_arg(repo_id.as_str())?;
+                run_cache_verify(resolved.as_str(), revision.as_deref(), token.as_deref())
             }
         },
         None => run_download(cli.download),
@@ -2582,6 +2609,142 @@ fn run_cache_path(repo_id: &str) -> Result<(), FetchError> {
 
     // Print bare path (no labels) for shell substitution.
     println!("{}", snapshot_dir.display());
+    Ok(())
+}
+
+/// Re-verifies SHA256 digests of cached files against `HuggingFace` LFS metadata.
+///
+/// Composes [`cache::verify_cache`] with the project's standard table layout
+/// (`Repo:` / `Cache:` header, dynamic filename column, footer with counts).
+/// Files without LFS metadata (small git-stored files) are reported as
+/// `no LFS hash` — non-failure. Mismatches print `SHA256 MISMATCH` and the
+/// expected/actual digests, and the function returns
+/// [`FetchError::InvalidArgument`] so the process exits non-zero.
+// EXPLICIT: linear pipeline of token resolution, runtime construction,
+// metadata fetch, header rendering, per-file table, and footer counts.
+// Splitting would obscure the verification flow.
+#[allow(clippy::too_many_lines)]
+fn run_cache_verify(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+) -> Result<(), FetchError> {
+    let cache_dir = cache::hf_cache_dir()?;
+    let repo_dir = hf_fetch_model::cache_layout::repo_dir(&cache_dir, repo_id);
+
+    if !repo_dir.exists() {
+        return Err(FetchError::InvalidArgument(format!(
+            "{repo_id} is not cached"
+        )));
+    }
+
+    // Resolve token from arg or HF_TOKEN env (mirrors run_status / run_list_files).
+    // BORROW: explicit String::from for Option<&str> → Option<String>
+    let resolved_token = token
+        .map(String::from)
+        .or_else(|| std::env::var("HF_TOKEN").ok());
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+
+    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+    let results = rt.block_on(cache::verify_cache(
+        repo_id,
+        resolved_token.as_deref(),
+        revision,
+    ))?;
+
+    // Header — same shape as run_status.
+    let rev_display = revision.unwrap_or("main");
+    let commit_hash = cache::read_ref(&repo_dir, rev_display);
+    match commit_hash.as_deref() {
+        Some(hash) => println!("{repo_id} ({rev_display} @ {hash})"),
+        None => println!("{repo_id} ({rev_display}, ref not resolved)"),
+    }
+    println!("Cache: {}\n", cache_dir.display());
+
+    if results.is_empty() {
+        println!("  (no files found in remote repository)");
+        return Ok(());
+    }
+
+    // Filename column: widen to longest filename, minimum 4 ("File".len()).
+    let fw = results
+        .iter()
+        .map(|r| r.filename.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+
+    let mut ok_count: usize = 0;
+    let mut mismatch_count: usize = 0;
+    let mut skipped_count: usize = 0;
+    let mut missing_count: usize = 0;
+
+    for r in &results {
+        match &r.status {
+            cache::VerifyStatus::Ok => {
+                ok_count += 1;
+                println!(
+                    "  \u{2713} {:<fw$} {:>10}  SHA256 OK",
+                    r.filename,
+                    format_size(r.size)
+                );
+            }
+            cache::VerifyStatus::Mismatch { expected, actual } => {
+                mismatch_count += 1;
+                println!(
+                    "  \u{2717} {:<fw$} {:>10}  SHA256 MISMATCH",
+                    r.filename,
+                    format_size(r.size)
+                );
+                println!("      expected {expected}");
+                println!("      actual   {actual}");
+            }
+            cache::VerifyStatus::Skipped => {
+                skipped_count += 1;
+                println!(
+                    "  \u{2014} {:<fw$} {:>10}  no LFS hash",
+                    r.filename,
+                    format_size(r.size)
+                );
+            }
+            cache::VerifyStatus::Missing => {
+                missing_count += 1;
+                println!(
+                    "  ! {:<fw$} {:>10}  MISSING",
+                    r.filename,
+                    format_size(r.size)
+                );
+            }
+            // EXPLICIT: future VerifyStatus variants display as UNKNOWN
+            _ => {
+                println!(
+                    "  ? {:<fw$} {:>10}  UNKNOWN",
+                    r.filename,
+                    format_size(r.size)
+                );
+            }
+        }
+    }
+
+    let total = results.len();
+    println!();
+    println!(
+        "{total} {}: {ok_count} SHA256 OK, {mismatch_count} mismatch, \
+         {skipped_count} skipped, {missing_count} missing",
+        pluralize(total, "file", "files")
+    );
+
+    if mismatch_count > 0 {
+        return Err(FetchError::InvalidArgument(format!(
+            "{mismatch_count} {} failed SHA256 verification",
+            pluralize(mismatch_count, "file", "files")
+        )));
+    }
+
     Ok(())
 }
 

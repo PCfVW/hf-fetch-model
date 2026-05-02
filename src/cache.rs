@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! `HuggingFace` cache directory resolution, model family scanning, and disk usage.
+//! `HuggingFace` cache directory resolution, model family scanning, disk usage,
+//! and integrity verification.
 //!
 //! [`hf_cache_dir()`] locates the local HF cache. [`list_cached_families()`]
 //! scans downloaded models and groups them by `model_type`.
-//! [`cache_summary()`] provides per-repo size totals, and
-//! [`cache_repo_usage()`] returns per-file disk usage for a single repo.
+//! [`cache_summary()`] provides per-repo size totals,
+//! [`cache_repo_usage()`] returns per-file disk usage for a single repo, and
+//! [`verify_cache()`] re-checks `SHA256` digests of cached files against
+//! `HuggingFace` LFS metadata.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -703,6 +706,123 @@ fn collect_snapshot_files(dir: &Path, prefix: &str, files: &mut Vec<CacheFileUsa
             files.push(CacheFileUsage { filename, size });
         }
     }
+}
+
+/// Verification status for a single cached file.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum VerifyStatus {
+    /// Local `SHA256` matches the expected hash from `HuggingFace` LFS metadata.
+    Ok,
+    /// Local `SHA256` does not match the expected hash — the cached file is
+    /// corrupted (bit rot, interrupted write, or upstream blob changed).
+    Mismatch {
+        /// Expected `SHA256` hex digest from `HuggingFace` LFS metadata.
+        expected: String,
+        /// Actual `SHA256` hex digest computed from the local file.
+        actual: String,
+    },
+    /// File has no LFS metadata (small git-stored file); verification skipped.
+    Skipped,
+    /// File is absent from the local snapshot directory.
+    Missing,
+}
+
+/// Result of verifying a single cached file against `HuggingFace` LFS metadata.
+#[derive(Debug, Clone)]
+pub struct FileVerification {
+    /// Filename within the repository.
+    pub filename: String,
+    /// File size in bytes — local size when the file is present, otherwise
+    /// the expected size from the API (or `0` when neither is known).
+    pub size: u64,
+    /// Verification result.
+    pub status: VerifyStatus,
+}
+
+/// Verifies `SHA256` digests of cached files against `HuggingFace` LFS metadata.
+///
+/// Fetches the expected hashes from the `HuggingFace` API and, for each file
+/// that has an LFS `SHA256`, reads the local cached file and compares.
+///
+/// Files without LFS metadata (small git-stored files such as `config.json`)
+/// are reported as [`VerifyStatus::Skipped`]; files absent from the snapshot
+/// directory are reported as [`VerifyStatus::Missing`]. Both are
+/// non-failures — only [`VerifyStatus::Mismatch`] indicates a corrupted file.
+///
+/// `revision` defaults to `"main"` when `None`. Requires network access for
+/// the metadata fetch; the per-file digest computation is local-only.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`](crate::FetchError::Http) if the
+/// `HuggingFace` API request fails.
+/// Returns [`FetchError::Io`](crate::FetchError::Io) when a local cached
+/// file is present but cannot be read.
+pub async fn verify_cache(
+    repo_id: &str,
+    token: Option<&str>,
+    revision: Option<&str>,
+) -> Result<Vec<FileVerification>, FetchError> {
+    let revision = revision.unwrap_or("main");
+    let cache_dir = hf_cache_dir()?;
+    let repo_dir = crate::cache_layout::repo_dir(&cache_dir, repo_id);
+
+    let commit_hash = read_ref(&repo_dir, revision);
+
+    let client = crate::chunked::build_client(token)?;
+    let remote_files =
+        crate::repo::list_repo_files_with_metadata(repo_id, token, Some(revision), &client).await?;
+
+    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+    let snapshot_dir = commit_hash
+        .as_deref()
+        .map(|hash| crate::cache_layout::snapshot_dir(&repo_dir, hash));
+
+    let mut results: Vec<FileVerification> = Vec::with_capacity(remote_files.len());
+
+    for remote in &remote_files {
+        let local_path = snapshot_dir
+            .as_ref()
+            // BORROW: explicit .as_str() for path construction
+            .map(|dir| dir.join(remote.filename.as_str()));
+
+        let exists = local_path.as_ref().is_some_and(|p| p.exists());
+        let local_size = local_path
+            .as_ref()
+            .filter(|_| exists)
+            .and_then(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+            .unwrap_or(0);
+        let expected_size = remote.size.unwrap_or(0);
+        let display_size = if exists { local_size } else { expected_size };
+
+        let status = match (remote.sha256.as_deref(), local_path.as_deref(), exists) {
+            (None, _, _) => VerifyStatus::Skipped,
+            (Some(_), None, _) | (Some(_), Some(_), false) => VerifyStatus::Missing,
+            (Some(expected), Some(path), true) => {
+                // BORROW: explicit .as_str() for &String → &str argument
+                match crate::checksum::verify_sha256(path, remote.filename.as_str(), expected).await
+                {
+                    Ok(()) => VerifyStatus::Ok,
+                    Err(FetchError::Checksum {
+                        expected, actual, ..
+                    }) => VerifyStatus::Mismatch { expected, actual },
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+
+        results.push(FileVerification {
+            // BORROW: explicit .clone() for owned String
+            filename: remote.filename.clone(),
+            size: display_size,
+            status,
+        });
+    }
+
+    results.sort_by(|a, b| a.filename.cmp(&b.filename));
+
+    Ok(results)
 }
 
 #[cfg(test)]

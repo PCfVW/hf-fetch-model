@@ -22,6 +22,7 @@ cargo install hf-fetch-model --features cli
 - [Cache commands](#cache-commands)
 - [Cache clean-partial flags](#cache-clean-partial-flags)
 - [Cache delete flags](#cache-delete-flags)
+- [Cache verify flags](#cache-verify-flags)
 - [Diff flags](#diff-flags)
 - [Download flags](#download-flags)
 - [Info flags](#info-flags)
@@ -43,6 +44,7 @@ cargo install hf-fetch-model --features cli
 | `cache clean-partial [REPO_ID\|N]` | Remove `.chunked.part` files from interrupted downloads |
 | `cache delete <REPO_ID\|N>` | Delete a cached model (entire `models--org--name/` directory) |
 | `cache path <REPO_ID\|N>` | Print the snapshot directory path for scripting |
+| `cache verify <REPO_ID\|N>` | Re-verify SHA256 digests of cached files against HuggingFace LFS metadata |
 | `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes); auto-detects PEFT adapter config |
 | `list-families` | List model families (`model_type`) in local cache |
 | `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
@@ -367,6 +369,33 @@ hf-fm cache path 2
 # Use in shell scripts
 cd $(hf-fm cache path google/gemma-2-2b-it)
 ```
+
+```sh
+# Re-verify SHA256 digests of cached files (requires network)
+hf-fm cache verify google/gemma-2-2b-it
+
+# By numeric index from du output
+hf-fm cache verify 2
+
+# Verify a specific revision
+hf-fm cache verify google/gemma-2-2b-it --revision v1.0
+```
+
+## Cache verify flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--revision` | Git revision (branch, tag, SHA) | main |
+| `--token` | Auth token (or set `HF_TOKEN` env var) | — |
+
+`cache verify` fetches the expected SHA256 digests from the HuggingFace API and recomputes each cached file's digest locally. Per-file outcomes:
+
+- `SHA256 OK` — the cached file matches the expected digest.
+- `SHA256 MISMATCH` — the cached file's digest differs (corruption); both expected and actual hashes are printed for forensics.
+- `no LFS hash` — the file has no LFS metadata (small git-stored files such as `config.json`); verification is skipped.
+- `MISSING` — the file is listed remotely but not present in the local snapshot.
+
+Exit code is non-zero only when at least one file mismatched; `skipped` and `missing` alone are non-failures (a partial cache is a legitimate state). This makes the command safe to compose into CI / cron-style integrity checks.
 
 ## Diff flags
 
