@@ -274,8 +274,8 @@ Critical for answering candle ecosystem issues ([#3448](https://github.com/huggi
 
 | Feature | Scope |
 |---------|-------|
-| `cache verify` | SHA256 re-verification against HF LFS metadata (requires network). Detailed design in [v0.10.0 roadmap](v0.10.0-roadmap.md). |
-| `cache gc` | Age-based (`--older-than`) and budget-based (`--max-size`) eviction, with `--except`, `--dry-run`. Requires the "last accessed" heuristic. |
+| `cache verify` ✓ | SHA256 re-verification against HF LFS metadata (requires network). Detailed design in [v0.10.0 roadmap](v0.10.0-roadmap.md). Streaming spinner progress per file (rotating `\| / - \\` ASCII bar via `indicatif`) so multi-GiB safetensors hashes give continuous liveness feedback rather than a long blank pause. |
+| `cache gc` ✓ | Age-based (`--older-than`) and budget-based (`--max-size`) eviction, with `--except`, `--dry-run`, `--list-kept`. Active partial downloads (mtime within the last hour) are skipped to avoid racing with `hf-fm download`. |
 | `du --tree` ✓ | Tree-view of cache directory structure with box-drawing characters. Reuses the visual style established by `inspect --tree` in v0.9.6 (same `├──`, `└──`, `│   ` connectors and dynamic column-width approach). Each cached repo renders as a branch (size + file count, optional `--age` column, partial-download marker) with its files as leaves sorted by size descending. Composes with `--age`; conflicts at clap parse-time with the positional `du <REPO>` form (the per-repo view is already covered there). |
 | Cache fast-path correctness ✓ | `download_all_files_map` previously short-circuited to `Cached` whenever the snapshot directory contained any include-filter-matching file, leading to a misleading "Cached at:" message when only the small config files were on disk and `model.safetensors` was absent. The fast-path now runs *after* the remote file listing and verifies every filtered remote file resolves to a real path under the snapshot dir. Cost: one cheap HTTP listing per `hf-fm <repo>` call when the cache happens to be complete. Discovered while dogfooding v0.9.8; landed on `main` immediately so future `hf-fm <repo>` invocations are correct. |
 | Pipe-eats-exit-code FAQ entry ✓ | Wrapping `hf-fm download-file ... 2>&1 \| tail -20` masks hf-fm's exit code with `tail`'s, hiding download failures. New FAQ entry under "Errors and unexpected output" explains the mechanic and gives copy-paste recipes for `${PIPESTATUS[0]}` (bash/zsh) and `$LASTEXITCODE` (PowerShell). Not a code bug — pure documentation — but worth naming because long downloads invite the `\| tail` reflex. |
@@ -283,7 +283,7 @@ Critical for answering candle ecosystem issues ([#3448](https://github.com/huggi
 
 These are more complex than prior releases: verify needs network + checksum comparison, gc needs the last-accessed heuristic and interactive prompt safety, `du --tree` is a display feature that benefits from the `du --age` timestamps added in v0.9.4. The docs effort scopes to the new v0.10.0 cache features plus the first case studies (not a comprehensive rewrite of all existing docs). This is the project's coming-of-age release: where `hf-fetch-model` graduates from "useful tool with `--help`" to "documented, mature tool with narrative onboarding".
 
-The two ✓ items above are early increments toward v0.10.0 — UX bugs surfaced during v0.9.8 dogfooding, fixed on `main` immediately rather than waiting for a v0.9.9 patch release. They establish a small precedent: post-release dogfooding gaps land on the next-minor's branch, not the current-patch's.
+The cache fast-path correctness and pipe-FAQ ✓ items above are early increments toward v0.10.0 — UX bugs surfaced during v0.9.8 dogfooding, fixed on `main` immediately rather than waiting for a v0.9.9 patch release. They establish a small precedent: post-release dogfooding gaps land on the next-minor's branch, not the current-patch's. With `cache verify`, `cache gc`, and `du --tree` all marked ✓, the v0.10.0 feature work is complete; only the **First docs effort** remains before the version bump.
 
 ### v0.10.1 — `inspect --check-gpu` (hypomnesis adoption)
 
@@ -310,20 +310,70 @@ Validates the `hypomnesis` API surface against a real consumer before `candle-mi
 
 **Status:** unblocked — `hypomnesis 0.1.0` is on crates.io (Phase 1 Wave 2 complete). hf-fm is the proof-of-concept consumer named in the [hypomnesis brief](https://github.com/PCfVW/hypomnesis/blob/main/docs/hypomnesis-brief.md) under *First consumer*.
 
-### v0.10.2 — GGUF inspect (cached)
+### v0.10.2 — GGUF inspect (cached) + anamnesis dependency
 
 | Feature | Scope |
 |---------|-------|
-| `inspect <repo> file.gguf --cached` | Parse GGUF metadata block from locally-cached files. |
+| `inspect <repo> file.gguf --cached` | Parse GGUF metadata block from locally-cached files. Implementation delegates to `anamnesis::parse_gguf(path).inspect()` — anamnesis is the format-knowledge crate; hf-fm is the HTTP/cache substrate. |
 | `--tree` for GGUF | Same hierarchical view, applied to GGUF tensor names. |
 | `--dtypes` for GGUF | Same per-dtype summary, applied to GGUF tensors (which use a different dtype encoding than safetensors — needs a small mapping layer). |
+| `anamnesis = "0.4.3"` dependency | First adoption of [anamnesis](https://crates.io/crates/anamnesis) — a framework-agnostic Rust crate for parsing tensor formats and dequantising quantised weights. Pulled in here because anamnesis already has a battle-tested GGUF parser; v0.10.3 then extends the dep across the other formats with no further library work. |
 
 Closes the format-coverage gap with `safetensors_explorer` for cached files. Lower lift than full remote support — local file reading only, leverages existing tree/dtypes infrastructure from v0.9.6. The dominant audience here is `llama.cpp` users who already have GGUF files in their HF cache.
 
-### v0.11.0 — GGUF remote inspect
+**The dep enters here, not in v0.10.3.** v0.10.2 *needs* a GGUF parser to ship the cached-inspect feature; anamnesis already has one. Bringing it in at v0.10.2 gates v0.10.3's three-format extension on a single, focused dependency commit.
+
+### v0.10.3 — Cached-file format coverage via anamnesis
 
 | Feature | Scope |
 |---------|-------|
-| GGUF metadata fetch via HTTP Range | Custom binary parser for GGUF's variable-length metadata header. Allows `inspect <repo> file.gguf --tree` *without* `--cached`. |
+| `inspect <repo> file.npz --cached` | Parse `.npz` archive metadata via `anamnesis::inspect_npz(path)`. Tensor list, dtypes, shapes — uniform with the other three formats. |
+| `inspect <repo> file.pth --cached` | Parse `.pth` (PyTorch state_dict) metadata via `anamnesis::parse_pth(path).inspect()`. Tensor list, dtypes, shapes. |
+| Safetensors parser dedup | Replace hf-fm's in-tree JSON header parser with `anamnesis::parse_safetensors_header(&bytes)` on the cache-hit path. hf-fm continues to fetch the bytes; anamnesis owns the format knowledge. |
+| Format-aware error message | Lift the `FetchError::UnsupportedInspectFormat` rejection introduced in v0.9.7: `inspect` now dispatches by extension across all four formats (`.safetensors` / `.npz` / `.pth` / `.gguf`) for cached files. |
+| Quant-scheme display | `inspect` output gains a `Format: <QuantScheme>` line (FP8 / GPTQ INT4 g=128 / AWQ / BnB-NF4 / etc.) and a "Dequantised: X GB" line, both pulled from `anamnesis::InspectInfo`. |
 
-Brings the "no weight data downloaded" advantage to GGUF — a 2 GiB quantized LLM inspectable in one HTTP request. Requires understanding GGUF's binary layout (magic + version + tensor count + key-value metadata, then tensor info table). More involved than safetensors (which has a self-describing JSON header), warranting the minor-version bump.
+**Theme: cashing in the anamnesis dep.** v0.10.2 introduced `anamnesis 0.4.3` as a dependency (it's the GGUF parser); v0.10.3 extends that adoption to the other three formats and retires hf-fm's duplicated safetensors header parser. **No new HTTP work, no new library work in anamnesis** — pure dispatch wiring on a dep that's already there. ~115 LOC + tests, low-risk patch release.
+
+After v0.10.3, `hf-fm inspect <repo> <any-tensor-file> --cached` works uniformly across all four tensor formats anamnesis supports. Sets the stage for v0.11, where the same four formats become inspectable *remotely* via HTTP Range.
+
+---
+
+The v0.11 minor is dedicated to **remote inspection**. v0.11.0 builds an `HttpRangeReader: Read + Seek` adapter once over `reqwest` Range requests; each subsequent patch wires one more tensor format through the same adapter. anamnesis owns format knowledge; hf-fm owns HTTP plumbing. Format order is risk-ascending: NPZ (anamnesis primitive already shipped in v0.4.3) → safetensors (small library work, retires the bespoke parser) → GGUF (medium library work, the originally-promised v0.11.0 feature) → PTH (largest library work, lowest demand).
+
+### v0.11.0 — Remote inspect framework + NPZ remote
+
+| Feature | Scope |
+|---------|-------|
+| `HttpRangeReader: Read + Seek` adapter | New module on top of `reqwest` Range requests. ~150 LOC including: prefetch + cache the EOCD region (last 64 KiB) on first seek-to-end; cache the central directory on first probe; small read-ahead buffer (4 KiB) for sequential-read patterns; translate `reqwest` errors into `std::io::Error`. The reusable substrate for every subsequent remote-inspect format. |
+| `inspect <repo> file.npz` (no `--cached`) | Wire the NPZ dispatch path to `anamnesis::inspect_npz_from_reader(HttpRangeReader::new(url))`. ~7 small range requests fetch the ZIP central directory + per-entry NPY headers; total transfer well under 100 KiB on a typical Gemma Scope `params.npz` (vs the 288 MiB full download). **No new library work in anamnesis** — uses the v0.4.3 primitive directly. |
+| Bespoke `fetch_header_bytes` retained | hf-fm's existing safetensors remote-inspect path stays on its bespoke two-Range-request implementation. v0.11.1 retires it. |
+
+**Why NPZ first.** The anamnesis primitive is the only one already shipped — v0.11.0's risk concentrates on the new adapter (the genuinely new piece). NPZ also closes the original candle-mi GemmaScope dogfooding loop that motivated anamnesis's v0.4.3 work: the v0.11.0 ship makes that real end-to-end.
+
+### v0.11.1 — Remote safetensors via anamnesis
+
+| Feature | Scope |
+|---------|-------|
+| `parse_safetensors_header_from_reader<R: Read>` (anamnesis library work) | New ~30 LOC primitive in anamnesis. **No `Seek` needed** — the safetensors header is sequential at the start of the file. Reads the 8-byte length prefix, then the JSON header, then parses it. |
+| Retire hf-fm's bespoke `fetch_header_bytes` | Replace with a small wrapper that issues two HTTP Range requests (length prefix + header bytes) and feeds them as a `Read` to the new anamnesis primitive. |
+
+**User-facing:** no behavioural change — `hf-fm inspect <repo> file.safetensors` works identically. **Architecturally:** single source of truth for safetensors layout. The duplicated parser is gone.
+
+### v0.11.2 — Remote GGUF inspect
+
+| Feature | Scope |
+|---------|-------|
+| `inspect_gguf_from_reader<R: Read + Seek>` (anamnesis library work) | Refactor the existing `parse_gguf` cursor pattern off `memmap2::Mmap` and onto a `Read + Seek` cursor. Adversarial-input guards from the existing parser (caps on tensor count, KV count, string length, array length, nesting depth, dimension count, element product) carry over unchanged. |
+| `inspect <repo> file.gguf` (no `--cached`) | Wire the GGUF dispatch path through `HttpRangeReader`. |
+
+**The originally-promised v0.11.0 feature, now landing on a battle-tested adapter.** A 2 GiB quantised GGUF inspectable in a few range requests fetching the front-loaded metadata block + tensor info table — no weight data downloaded.
+
+### v0.11.3 — Remote PTH inspect
+
+| Feature | Scope |
+|---------|-------|
+| `inspect_pth_from_reader<R: Read + Seek>` (anamnesis library work) | Largest of the four library lifts. PTH's metadata lives in `data.pkl` mid-archive; the existing pickle VM zero-copies from `memmap2::Mmap`. Reader-based path materialises `data.pkl` (typically <100 KiB) via the ZIP central directory, then runs the existing pickle interpreter on that buffer — no zero-copy contract change for the local-file path. |
+| `inspect <repo> file.pth` (no `--cached`) | Wire the PTH dispatch path through `HttpRangeReader`. |
+
+**Closes the matrix.** Every tensor format anamnesis supports is now remotely inspectable via the same `HttpRangeReader` substrate. After v0.11.3, `hf-fm inspect <repo> <any-tensor-file>` works uniformly — cached or remote, regardless of format.
