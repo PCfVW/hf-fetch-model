@@ -740,6 +740,61 @@ pub struct FileVerification {
     pub status: VerifyStatus,
 }
 
+/// Streaming progress event emitted by [`verify_cache_with_progress`] so
+/// callers can render per-file feedback during a long verification.
+///
+/// Events fire in this order:
+/// 1. [`VerifyEvent::Started`] — once, after the metadata fetch completes,
+///    before any per-file work begins. Carries the total file count and a
+///    pre-computed maximum filename length so callers can size display
+///    columns up-front.
+/// 2. For each file in alphabetical order:
+///    - [`VerifyEvent::FileStart`] — before the per-file `SHA256`
+///      computation kicks in.
+///    - [`VerifyEvent::FileComplete`] — when the per-file result is known,
+///      carrying the [`VerifyStatus`] outcome.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum VerifyEvent<'a> {
+    /// Fired once at the start of the run with summary stats useful for
+    /// laying out a streamed table or progress display.
+    Started {
+        /// Total number of files that will be verified.
+        total: usize,
+        /// Maximum filename length across the verification list.
+        max_filename_len: usize,
+    },
+    /// A file is about to be verified.
+    FileStart {
+        /// 1-based index of this file in the verification list.
+        index: usize,
+        /// Total number of files in the verification list.
+        total: usize,
+        /// Filename within the repository.
+        filename: &'a str,
+        /// File size in bytes (local size when present, else expected size).
+        size: u64,
+        /// `true` when the file has LFS metadata (a real `SHA256` computation
+        /// is about to run); `false` when the file is git-stored and will be
+        /// skipped near-instantly.
+        has_lfs: bool,
+    },
+    /// A file's verification has completed.
+    FileComplete {
+        /// 1-based index of this file in the verification list.
+        index: usize,
+        /// Total number of files in the verification list.
+        total: usize,
+        /// Filename within the repository.
+        filename: &'a str,
+        /// File size in bytes (matches the `size` from the corresponding
+        /// [`VerifyEvent::FileStart`]).
+        size: u64,
+        /// The per-file verification result.
+        status: &'a VerifyStatus,
+    },
+}
+
 /// Verifies `SHA256` digests of cached files against `HuggingFace` LFS metadata.
 ///
 /// Fetches the expected hashes from the `HuggingFace` API and, for each file
@@ -753,6 +808,10 @@ pub struct FileVerification {
 /// `revision` defaults to `"main"` when `None`. Requires network access for
 /// the metadata fetch; the per-file digest computation is local-only.
 ///
+/// For long verifications (multi-GiB safetensors files), prefer
+/// [`verify_cache_with_progress`] so a CLI / GUI can render a spinner or
+/// progress bar while each file is hashed.
+///
 /// # Errors
 ///
 /// Returns [`FetchError::Http`] if the `HuggingFace` API request fails.
@@ -763,6 +822,33 @@ pub async fn verify_cache(
     token: Option<&str>,
     revision: Option<&str>,
 ) -> Result<Vec<FileVerification>, FetchError> {
+    verify_cache_with_progress(repo_id, token, revision, |_| {}).await
+}
+
+/// Same as [`verify_cache`] but emits [`VerifyEvent`]s through `on_event`
+/// so callers can render streaming progress (e.g. a spinner per file).
+///
+/// The callback runs on the same task as the verification — keep it short.
+/// Use interior mutability ([`std::cell::Cell`], [`std::cell::RefCell`]) if
+/// you need to track state across events; the closure may capture by shared
+/// reference because the API requires only [`Fn`].
+///
+/// Files are processed in alphabetical order by filename so that streamed
+/// output remains stable across runs and matches the sort order of the
+/// returned [`Vec<FileVerification>`].
+///
+/// # Errors
+///
+/// Same error conditions as [`verify_cache`].
+pub async fn verify_cache_with_progress<F>(
+    repo_id: &str,
+    token: Option<&str>,
+    revision: Option<&str>,
+    on_event: F,
+) -> Result<Vec<FileVerification>, FetchError>
+where
+    F: Fn(VerifyEvent<'_>),
+{
     let revision = revision.unwrap_or("main");
     let cache_dir = hf_cache_dir()?;
     let repo_dir = crate::cache_layout::repo_dir(&cache_dir, repo_id);
@@ -770,17 +856,34 @@ pub async fn verify_cache(
     let commit_hash = read_ref(&repo_dir, revision);
 
     let client = crate::chunked::build_client(token)?;
-    let remote_files =
+    let mut remote_files =
         crate::repo::list_repo_files_with_metadata(repo_id, token, Some(revision), &client).await?;
+
+    // Sort up-front so streamed output is stable across runs and matches the
+    // returned `Vec<FileVerification>`'s order.
+    remote_files.sort_by(|a, b| a.filename.cmp(&b.filename));
 
     // BORROW: explicit .as_deref() for Option<String> → Option<&str>
     let snapshot_dir = commit_hash
         .as_deref()
         .map(|hash| crate::cache_layout::snapshot_dir(&repo_dir, hash));
 
-    let mut results: Vec<FileVerification> = Vec::with_capacity(remote_files.len());
+    let total = remote_files.len();
+    let max_filename_len = remote_files
+        .iter()
+        .map(|f| f.filename.len())
+        .max()
+        .unwrap_or(0);
 
-    for remote in &remote_files {
+    on_event(VerifyEvent::Started {
+        total,
+        max_filename_len,
+    });
+
+    let mut results: Vec<FileVerification> = Vec::with_capacity(total);
+
+    for (i, remote) in remote_files.iter().enumerate() {
+        let index = i + 1;
         let local_path = snapshot_dir
             .as_ref()
             // BORROW: explicit .as_str() for path construction
@@ -794,6 +897,16 @@ pub async fn verify_cache(
             .unwrap_or(0);
         let expected_size = remote.size.unwrap_or(0);
         let display_size = if exists { local_size } else { expected_size };
+
+        let has_lfs = remote.sha256.is_some();
+        on_event(VerifyEvent::FileStart {
+            index,
+            total,
+            // BORROW: explicit .as_str() for &String → &str argument
+            filename: remote.filename.as_str(),
+            size: display_size,
+            has_lfs,
+        });
 
         let status = match (remote.sha256.as_deref(), local_path.as_deref(), exists) {
             (None, _, _) => VerifyStatus::Skipped,
@@ -811,6 +924,15 @@ pub async fn verify_cache(
             }
         };
 
+        on_event(VerifyEvent::FileComplete {
+            index,
+            total,
+            // BORROW: explicit .as_str() for &String → &str argument
+            filename: remote.filename.as_str(),
+            size: display_size,
+            status: &status,
+        });
+
         results.push(FileVerification {
             // BORROW: explicit .clone() for owned String
             filename: remote.filename.clone(),
@@ -818,8 +940,6 @@ pub async fn verify_cache(
             status,
         });
     }
-
-    results.sort_by(|a, b| a.filename.cmp(&b.filename));
 
     Ok(results)
 }

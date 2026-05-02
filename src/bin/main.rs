@@ -2612,23 +2612,64 @@ fn run_cache_path(repo_id: &str) -> Result<(), FetchError> {
     Ok(())
 }
 
+/// Renders one streamed result line for [`run_cache_verify`].
+///
+/// Returns the formatted line(s) for a [`cache::VerifyStatus`], padded to
+/// the global filename column width `fw` so the size column lines up.
+/// Mismatches expand to three lines (status + expected + actual digests).
+fn format_verify_line(
+    filename: &str,
+    size: u64,
+    status: &cache::VerifyStatus,
+    fw: usize,
+) -> String {
+    match status {
+        cache::VerifyStatus::Ok => format!(
+            "  \u{2713} {filename:<fw$} {:>10}  SHA256 OK",
+            format_size(size)
+        ),
+        cache::VerifyStatus::Mismatch { expected, actual } => format!(
+            "  \u{2717} {filename:<fw$} {:>10}  SHA256 MISMATCH\n      expected {expected}\n      actual   {actual}",
+            format_size(size)
+        ),
+        cache::VerifyStatus::Skipped => format!(
+            "  \u{2014} {filename:<fw$} {:>10}  no LFS hash",
+            format_size(size)
+        ),
+        cache::VerifyStatus::Missing => format!(
+            "  ! {filename:<fw$} {:>10}  MISSING",
+            format_size(size)
+        ),
+        // EXPLICIT: future VerifyStatus variants display as UNKNOWN
+        _ => format!(
+            "  ? {filename:<fw$} {:>10}  UNKNOWN",
+            format_size(size)
+        ),
+    }
+}
+
 /// Re-verifies SHA256 digests of cached files against `HuggingFace` LFS metadata.
 ///
-/// Composes [`cache::verify_cache`] with the project's standard table layout
-/// (`Repo:` / `Cache:` header, dynamic filename column, footer with counts).
-/// Files without LFS metadata (small git-stored files) are reported as
-/// `no LFS hash` — non-failure. Mismatches print `SHA256 MISMATCH` and the
-/// expected/actual digests, and the function returns
+/// Drives [`cache::verify_cache_with_progress`] with an `indicatif` spinner
+/// per file so the user sees liveness even when a single SHA256 takes 30+
+/// seconds on a multi-GiB safetensors. Result lines are streamed (printed
+/// above the spinner via `bar.println`) as each file completes — the user
+/// gets progressive output rather than a wall of text at the end.
+///
+/// Mismatches print expected/actual digests inline; the function returns
 /// [`FetchError::InvalidArgument`] so the process exits non-zero.
 // EXPLICIT: linear pipeline of token resolution, runtime construction,
-// metadata fetch, header rendering, per-file table, and footer counts.
-// Splitting would obscure the verification flow.
+// header rendering, streamed verification with spinner, and footer counts.
+// Splitting would obscure the streamed-output flow.
 #[allow(clippy::too_many_lines)]
 fn run_cache_verify(
     repo_id: &str,
     revision: Option<&str>,
     token: Option<&str>,
 ) -> Result<(), FetchError> {
+    use indicatif::{ProgressBar, ProgressStyle};
+    use std::cell::Cell;
+
     let cache_dir = cache::hf_cache_dir()?;
     let repo_dir = hf_fetch_model::cache_layout::repo_dir(&cache_dir, repo_id);
 
@@ -2649,14 +2690,7 @@ fn run_cache_verify(
         source: e,
     })?;
 
-    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
-    let results = rt.block_on(cache::verify_cache(
-        repo_id,
-        resolved_token.as_deref(),
-        revision,
-    ))?;
-
-    // Header — same shape as run_status.
+    // Header — printed BEFORE the spinner so the user sees what's being verified.
     let rev_display = revision.unwrap_or("main");
     let commit_hash = cache::read_ref(&repo_dir, rev_display);
     match commit_hash.as_deref() {
@@ -2665,68 +2699,96 @@ fn run_cache_verify(
     }
     println!("Cache: {}\n", cache_dir.display());
 
+    // One spinner for the whole run. `set_message` updates per file;
+    // `println` emits result lines above the spinner without disturbing
+    // its position. `tick_chars("|/-\\ ")` gives the classic ASCII
+    // rotating-bar animation the user asked for.
+    let bar = ProgressBar::new_spinner();
+    let style = ProgressStyle::with_template("  {spinner} {msg}")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner())
+        .tick_chars("|/-\\ ");
+    bar.set_style(style);
+    bar.enable_steady_tick(Duration::from_millis(100));
+
+    // Filename column width is computed from `Started` and reused for every
+    // streamed line so they stay aligned. `Cell` keeps the closure `Fn`.
+    let fw_cell: Cell<usize> = Cell::new(4);
+
+    let bar_ref = &bar;
+    let on_event = |event: cache::VerifyEvent<'_>| match event {
+        cache::VerifyEvent::Started {
+            total: _,
+            max_filename_len,
+        } => {
+            // Minimum 4 ("File".len()), grow to fit the longest name.
+            fw_cell.set(max_filename_len.max(4));
+        }
+        cache::VerifyEvent::FileStart {
+            index,
+            total,
+            filename,
+            size,
+            has_lfs,
+        } => {
+            // "Verifying" for LFS files (real SHA256 work); "Reading" for
+            // git-stored files (instant skip — the spinner barely shows).
+            let label = if has_lfs { "Verifying" } else { "Reading" };
+            bar_ref.set_message(format!(
+                "[{index}/{total}] {label} {filename} ({})",
+                format_size(size)
+            ));
+        }
+        cache::VerifyEvent::FileComplete {
+            index: _,
+            total: _,
+            filename,
+            size,
+            status,
+        } => {
+            // `bar.suspend` clears the spinner, runs the closure, then
+            // redraws — works in TTY (no visual interference with the
+            // spinner) and in non-TTY (the closure just prints normally
+            // because the bar's draw target is hidden anyway). This is
+            // robust where `bar.println` would silently drop the line in
+            // non-TTY contexts (CI, redirected stderr).
+            let line = format_verify_line(filename, size, status, fw_cell.get());
+            bar_ref.suspend(|| println!("{line}"));
+        }
+        // EXPLICIT: future VerifyEvent variants are silently ignored —
+        // the spinner keeps ticking, the streamed table keeps printing.
+        _ => {}
+    };
+
+    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+    let results = rt.block_on(cache::verify_cache_with_progress(
+        repo_id,
+        resolved_token.as_deref(),
+        revision,
+        on_event,
+    ))?;
+
+    bar.finish_and_clear();
+
     if results.is_empty() {
         println!("  (no files found in remote repository)");
         return Ok(());
     }
 
-    // Filename column: widen to longest filename, minimum 4 ("File".len()).
-    let fw = results
-        .iter()
-        .map(|r| r.filename.len())
-        .max()
-        .unwrap_or(4)
-        .max(4);
-
+    // Footer counts, derived from the final results so we don't carry
+    // mutable state through the closure.
     let mut ok_count: usize = 0;
     let mut mismatch_count: usize = 0;
     let mut skipped_count: usize = 0;
     let mut missing_count: usize = 0;
-
     for r in &results {
         match &r.status {
-            cache::VerifyStatus::Ok => {
-                ok_count += 1;
-                println!(
-                    "  \u{2713} {:<fw$} {:>10}  SHA256 OK",
-                    r.filename,
-                    format_size(r.size)
-                );
-            }
-            cache::VerifyStatus::Mismatch { expected, actual } => {
-                mismatch_count += 1;
-                println!(
-                    "  \u{2717} {:<fw$} {:>10}  SHA256 MISMATCH",
-                    r.filename,
-                    format_size(r.size)
-                );
-                println!("      expected {expected}");
-                println!("      actual   {actual}");
-            }
-            cache::VerifyStatus::Skipped => {
-                skipped_count += 1;
-                println!(
-                    "  \u{2014} {:<fw$} {:>10}  no LFS hash",
-                    r.filename,
-                    format_size(r.size)
-                );
-            }
-            cache::VerifyStatus::Missing => {
-                missing_count += 1;
-                println!(
-                    "  ! {:<fw$} {:>10}  MISSING",
-                    r.filename,
-                    format_size(r.size)
-                );
-            }
-            // EXPLICIT: future VerifyStatus variants display as UNKNOWN
-            _ => {
-                println!(
-                    "  ? {:<fw$} {:>10}  UNKNOWN",
-                    r.filename,
-                    format_size(r.size)
-                );
-            }
+            cache::VerifyStatus::Ok => ok_count += 1,
+            cache::VerifyStatus::Mismatch { .. } => mismatch_count += 1,
+            cache::VerifyStatus::Skipped => skipped_count += 1,
+            cache::VerifyStatus::Missing => missing_count += 1,
+            // EXPLICIT: future VerifyStatus variants do not contribute to
+            // any counted bucket; the per-file `?` line already reflected them.
+            _ => {}
         }
     }
 
