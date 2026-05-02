@@ -755,10 +755,9 @@ pub struct FileVerification {
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Http`](crate::FetchError::Http) if the
-/// `HuggingFace` API request fails.
-/// Returns [`FetchError::Io`](crate::FetchError::Io) when a local cached
-/// file is present but cannot be read.
+/// Returns [`FetchError::Http`] if the `HuggingFace` API request fails.
+/// Returns [`FetchError::Io`] when a local cached file is present but
+/// cannot be read.
 pub async fn verify_cache(
     repo_id: &str,
     token: Option<&str>,
