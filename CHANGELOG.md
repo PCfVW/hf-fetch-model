@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] — Cache maturity & first docs
+
 ### Fixed
 
 - **`hf-fm inspect <repo> --dtypes` / `--tree` / `--limit` now work on sharded repos** — previously, when the user asked for tensor-level aggregation on a multi-shard repo (one with `model.safetensors.index.json`), the shard-index fast path silently swallowed the flag and printed only the per-shard tensor counts (e.g. `4 shards, 291 tensors`) — same output as the bare `inspect <repo>`. The `dtypes`, `limit`, and `tree` flags weren't even plumbed through to `run_inspect_repo`'s signature, so they had no chance of taking effect. Now: when any of the three flags is set, the fast path is bypassed; every shard's header is read (the existing `inspect_repo_safetensors`/`_cached` path, ~tens of KiB per shard via HTTP Range), tensors are flattened across shards, then the same renderers used by single-file `inspect` (`print_dtype_summary`, `print_tree_summary`, plus their `--json` variants) take over. Tree mode shows one consolidated tree with `[0..N]` collapsing across the whole model — confirms architecture, layer count, and tied-vs-untied `lm_head` at a glance. `--limit` on multi-shard adds a `Shard` column so the user can see which file each tensor came from. `--filter` continues to work as before, including its existing fast-path-internal filtering when no aggregation flag is set. Discovered while inspecting `zed-industries/zeta-2` (4 shards, 291 tensors, 8.25B BF16 params).

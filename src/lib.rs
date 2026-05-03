@@ -44,8 +44,14 @@
 //! ## Inspect Before Downloading
 //!
 //! Read tensor metadata from `.safetensors` headers via HTTP Range requests —
-//! no weight data downloaded. See [`examples/candle_inspect.rs`](https://github.com/PCfVW/hf-fetch-model/blob/main/examples/candle_inspect.rs)
-//! for a runnable example.
+//! no weight data downloaded. Sharded repos (those with
+//! `model.safetensors.index.json`) work transparently —
+//! [`inspect::inspect_repo_safetensors`] reads every shard's header in parallel
+//! and returns a flat per-file result list. See
+//! [`examples/candle_inspect.rs`](https://github.com/PCfVW/hf-fetch-model/blob/main/examples/candle_inspect.rs)
+//! for a runnable example, or the
+//! [Inspect tutorial](https://github.com/PCfVW/hf-fetch-model/blob/main/docs/tutorials/inspect-before-downloading.md)
+//! for a narrative walkthrough.
 //!
 //! ```rust,no_run
 //! # async fn example() -> Result<(), hf_fetch_model::FetchError> {
@@ -64,6 +70,39 @@
 //!
 //! Downloaded files are stored in the standard `HuggingFace` cache directory
 //! (`~/.cache/huggingface/hub/`), ensuring compatibility with Python tooling.
+//!
+//! ## Cache Management
+//!
+//! v0.10.0 adds library APIs for inspecting, verifying, and pruning the local
+//! cache. [`cache::cache_summary`] enumerates every cached repo with size and
+//! file counts; [`cache::repo_status`] gives a per-file `Complete` / `Partial` /
+//! `Missing` breakdown for one repo; [`cache::verify_cache`] re-checks `SHA256`
+//! digests of cached files against `HuggingFace` LFS metadata; and
+//! [`cache::find_partial_files`] locates `.chunked.part` orphans from
+//! interrupted downloads.
+//!
+//! For long verifications (multi-GiB safetensors files), drive
+//! [`cache::verify_cache_with_progress`] with an [`Fn`] callback that receives
+//! [`cache::VerifyEvent`]s so a CLI or GUI can render a spinner or progress
+//! bar without polling.
+//!
+//! ```rust,no_run
+//! # async fn example() -> Result<(), hf_fetch_model::FetchError> {
+//! use hf_fetch_model::cache::{self, VerifyStatus};
+//!
+//! let results = cache::verify_cache("google/gemma-2-2b-it", None, None).await?;
+//! let ok = results
+//!     .iter()
+//!     .filter(|r| matches!(r.status, VerifyStatus::Ok))
+//!     .count();
+//! let mismatch = results
+//!     .iter()
+//!     .filter(|r| matches!(r.status, VerifyStatus::Mismatch { .. }))
+//!     .count();
+//! println!("{}/{} files verified, {} mismatches", ok, results.len(), mismatch);
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! ## Download Durability
 //!
