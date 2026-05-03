@@ -1,6 +1,6 @@
 # Frequently Asked Questions
 
-<!-- Last updated: 2026-04-26, hf-fm v0.9.8 (post-release docs polish) -->
+<!-- Last updated: 2026-05-04, hf-fm v0.10.0 (link to inspect tutorial) -->
 
 <!--
 STYLE CONVENTIONS for editing this FAQ — keep growth consistent.
@@ -142,7 +142,7 @@ Indices are stable for as long as the repository does not change remotely — fo
 
 ### How do I see a model's tensor names without downloading it?
 
-Run `hf-fm inspect <repo>` with no filename and it will inspect every `.safetensors` file in the repository. For one specific file, add the filename (or an index from `--list`). Internally, hf-fm fetches only the JSON header via an HTTP Range request — for a typical 2 GiB safetensors file, you transfer maybe 70 KiB of metadata. Add `--tree` for the hierarchical view that groups numeric layers (`layers.[0..27]   (×28)`), or `--dtypes` for a dtype-and-parameter summary.
+Run `hf-fm inspect <repo>` with no filename and it will inspect every `.safetensors` file in the repository. For one specific file, add the filename (or an index from `--list`). Internally, hf-fm fetches only the JSON header via an HTTP Range request — for a typical 2 GiB safetensors file, you transfer maybe 70 KiB of metadata. Add `--tree` for the hierarchical view that groups numeric layers (`layers.[0..27]   (×28)`), or `--dtypes` for a dtype-and-parameter summary. For a complete walkthrough on a real 4-shard model, see [Inspect before you download](tutorials/inspect-before-downloading.md).
 
 ### How do I list only the weight files in a repo, not the tokenizer and README?
 
