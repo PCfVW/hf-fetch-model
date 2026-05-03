@@ -2,7 +2,7 @@
 
 *Read tensor metadata over HTTP Range — no weight data downloaded — and decide whether the model is worth the bandwidth.*
 
-*~1,470 words · about 6 min read*
+*~1,490 words · about 6 min read*
 
 <!-- Last updated: 2026-05-04, hf-fm v0.10.0 -->
 
@@ -47,7 +47,7 @@ A new tutorial in the v0.10.0 docs effort. If you find a step confusing or an ou
 
 A modern code-completion model can be 15 GiB on disk. On a 50 Mbps connection that's 40 minutes. If at the end of those 40 minutes you discover the model has a vocab too big to fit your tokenizer, an architecture that doesn't match the inference framework you planned to use, or a weight precision your GPU can't run — you have just spent 40 minutes to learn nothing useful.
 
-`hf-fm inspect` reads a model's tensor metadata over HTTP Range requests. The header bytes are typically tens of kilobytes; the weight bytes are not fetched. In five minutes you will know more about the model than the model card tells you, and you will have downloaded under a megabyte to do it.
+`hf-fm inspect` reads a model's tensor metadata over HTTP Range requests. The header bytes are typically tens of kilobytes; the weight bytes are not fetched. You will know more about the model than the model card tells you, and you will have downloaded under a megabyte to do it.
 
 The running example throughout is [`zed-industries/zeta-2`](https://huggingface.co/zed-industries/zeta-2) — Zed Industries' code-completion model, a real 4-shard Llama-class repo at the time of writing.
 
@@ -88,7 +88,7 @@ Output:
 
 In one screen you can see the model has 32 transformer layers, an unusually large 155,136-token vocabulary, GQA at a 32:8 ratio (visible from `q_proj` being 4096-wide and `k_proj` being 1024-wide), an untied `lm_head` (separate 1.18 GiB tensor), and 8.25 billion parameters in BF16.
 
-The rest of this tutorial unpacks how each piece of that picture is produced. Six commands, eight minutes, no weight bytes.
+The rest of this tutorial unpacks how each piece of that picture is produced. Seven commands, no weight bytes.
 
 ## Discovery: `--list`
 
@@ -237,6 +237,7 @@ Models matching "zeta-2" (by downloads):
   hf-fm bartowski/zed-industries_zeta-2-GGUF                                         (5,963 downloads)  [transformers, text-generation]
   hf-fm bluevoid-pl/zeta2-GUFF                                                       (3,155 downloads)  [transformers]
   hf-fm zetasepic/Qwen2.5-72B-Instruct-abliterated-GGUF                              (736 downloads)  [text-generation]
+  …
   hf-fm mradermacher/Zeta-2-i1-GGUF                                                  (103 downloads)  [transformers]
   hf-fm mradermacher/Zeta-2-GGUF                                                     (92 downloads)  [transformers]
   …
@@ -244,7 +245,7 @@ Models matching "zeta-2" (by downloads):
 
 Bartowski tops the list with ~6× the runner-up's downloads — a known quantization specialist on HF, the canonical pick when bartowski has done a model.
 
-Note: search by tag returns prefix-matches too — confirm the upstream org before downloading a community quant. The `zetasepic` and `Zetaphor` rows in the output are unrelated to `zed-industries`.
+Note: search by tag returns prefix-matches too — confirm the upstream org before downloading a community quant. The `zetasepic` row above is an abliterated Qwen 72B, unrelated to `zed-industries` — a typical false-positive pattern, and the elided rows between it and `mradermacher` are more of the same.
 
 List the quant ladder bartowski published:
 
