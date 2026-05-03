@@ -177,6 +177,8 @@ hf-fm info mistralai/Ministral-3-3B-Instruct-2512 --revision v1.0
 
 ## Inspect examples
 
+For a narrative walkthrough using a real 4-shard model, see the [Inspect tutorial](tutorials/inspect-before-downloading.md).
+
 ```sh
 # Inspect a single safetensors file (cache-first, falls back to HTTP Range requests)
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors

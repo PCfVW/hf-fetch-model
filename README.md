@@ -21,6 +21,8 @@ A Rust library and CLI for downloading and inspecting HuggingFace models. Multi-
 - [License](#license)
 - [Development](#development)
 
+> **New to hf-fm?** Walk through [Inspect before you download](docs/tutorials/inspect-before-downloading.md) — a 6-minute tour of what the tool does without downloading a single weight byte. Common questions live in the [FAQ](docs/FAQ.md); every flag is in the [CLI Reference](docs/cli-reference.md).
+
 ## Install
 
 ```sh
@@ -36,6 +38,7 @@ cargo install hf-fetch-model --features cli
 | `hf-fm cache delete <REPO_ID\|N>` | Delete a cached model |
 | `hf-fm cache gc --older-than/--max-size` | Garbage-collect cached models by age and/or size budget |
 | `hf-fm cache path <REPO_ID\|N>` | Print snapshot directory path (for scripting) |
+| `hf-fm cache verify <REPO_ID\|N>` | Re-verify SHA256 digests of cached files against HF LFS metadata |
 | `hf-fm diff <REPO_A> <REPO_B>` | Compare tensor layouts between two models |
 | `hf-fm discover` | Find new model families on the Hub |
 | `hf-fm download-file <REPO_ID> <FILE>` | Download a single file (or glob pattern) |

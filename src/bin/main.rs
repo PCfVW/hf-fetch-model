@@ -320,7 +320,9 @@ enum Commands {
         hf-fm inspect <repo> model.safetensors --tree    # hierarchical view of one file\n\n\
         Indices returned by --list are stable as long as the repo has not\n\
         changed remotely between invocations. Pass --revision <sha> on both\n\
-        --list and the follow-up run to lock the view end-to-end.")]
+        --list and the follow-up run to lock the view end-to-end.\n\n\
+        For a walkthrough on a real 4-shard model, see\n\
+        docs/tutorials/inspect-before-downloading.md")]
     Inspect {
         /// The repository identifier (e.g., `"google/gemma-2-2b-it"`).
         repo_id: String,
