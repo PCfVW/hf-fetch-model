@@ -352,6 +352,40 @@ After v0.10.3, `hf-fm inspect <repo> <any-tensor-file> --cached` works uniformly
 
 **Out of scope for v0.10.4 (still deferred):** AMD ROCm support (waits on hypomnesis's `rocm-smi` backend, planned in hypomnesis 0.3); Apple Metal (likewise, future hypomnesis backend); multi-context "fit profile" sweep (e.g., printing fit at 4 K / 16 K / 64 K context in a table). All three are reasonable v0.11+ extensions.
 
+### v0.10.5 — `inspect --pick` (interactive file selection)
+
+| Feature | Scope |
+|---------|-------|
+| `inspect <repo> [FILE] --pick` | Interactive numbered picker for `inspect`'s file argument. With no positional, lists every supported tensor file in the repo (`.safetensors` / `.gguf` / `.npz` / `.pth` — multi-format from day one, inheriting v0.10.3's dispatcher). With a positional substring, narrows the listing first: if exactly one file matches, auto-runs against that file (printing `Resolving to: <name>` on stderr for transparency); if several match, prints a numbered table and prompts for selection. Composes with every existing rendering flag (`--dtypes`, `--tree`, `--filter`, `--limit`, `--check-gpu`, `--json`). Conflicts with `--list` at clap parse time — `--list` is the non-interactive form of the same listing, combining them is incoherent. |
+| TTY safety + cancellation | Pre-flight check on `stdin.is_terminal() && stderr.is_terminal()` (stdout intentionally not checked — the prompt goes to stderr, so `hf-fm inspect ... --pick > out.json` works correctly with the picker on the terminal and JSON to the file). Non-interactive contexts (CI logs, piped stdin, captured stderr) get a clear error pointing at the existing `--list` + numeric-index workflow. Ctrl-C exits with the standard interrupt code; Ctrl-D / empty input bails with `cancelled — no file picked` and a non-zero exit code. Invalid input (`"foo"`, out-of-range integer, zero) loops the prompt without crashing. |
+| FAQ entry | The *Discovery — finding what to inspect or download* section in [`docs/FAQ.md`](../FAQ.md) gains a third sub-question on file selection: *"A repo has many `.safetensors` files — can I pick one interactively?"* — pointing at `--pick` alongside the v0.9.7 `--list` + numeric-index path. The two coexist: power users continue running `inspect <repo> --list` then `inspect <repo> 3`; impatient users (and the maintainer) reach for `--pick`. |
+
+Sample interactive session:
+
+```
+$ hf-fm inspect little-lake-studios/demoncore-flux demonCORE --pick --dtypes
+Multiple .safetensors files match "demonCORE" in little-lake-studios/demoncore-flux:
+  1  transformer/demonCORESFWNSFW_fluxV12.safetensors  15.40 GiB
+  2  transformer/demonCORESFWNSFW_fluxV13.safetensors  15.40 GiB
+  3  transformer/demonCORENSFW_fluxV11.safetensors     15.40 GiB
+Pick [1..3]: 2
+Resolving to transformer/demonCORESFWNSFW_fluxV13.safetensors
+
+  Dtype    Tensors       Params       Size
+  F8_E4M3      948       16.53B  15.40 GiB
+  ...
+```
+
+**Theme: discovery UX for the long-filename case.** v0.9.7 added `--list` + numeric-index resolution for the same problem, but at the cost of a two-step workflow. `--pick` collapses that to one keystroke for unique matches and one numeric choice for ambiguous ones — and inherits format coverage from v0.10.3's multi-format dispatcher, so the picker works uniformly across `.safetensors`, `.gguf`, `.npz`, and `.pth` from its first release. No new library API, no new dependencies — `std::io::IsTerminal` is already in scope from other CLI paths, and the candidate-narrowing logic reuses the listing helper introduced in v0.9.7. ~80 LOC in `src/bin/main.rs`; candidate-narrowing is pure and unit-testable; the prompt loop itself gets a manual smoke test per shell.
+
+**Concrete dogfooding origin.** Surfaced from the typed-the-full-filename pain documented in candle [#3448](https://github.com/huggingface/candle/issues/3448) (gemma-4-E2B-it's `model.safetensors` typed in full to inspect `--filter embed`) and candle [#2875](https://github.com/huggingface/candle/issues/2875) (demoncore-flux's `transformer/demonCORESFWNSFW_fluxV13.safetensors` — 50 characters of exact filename to get the dtype histogram). The fix is mechanical once you've felt the pain twice.
+
+**Out of scope for v0.10.5 (deferred):**
+
+- **Shell tab completion** (clap_complete-generated bash / zsh / fish / PowerShell scripts with a dynamic callback into `hf-fm inspect <repo> --list`). Native TAB behavior would be nicer than typing a substring, but each shell needs its own integration, dynamic completions on TAB feel slow when they trigger an HTTP listing, and the cross-shell maintenance burden is minor-release scope, not patch. Revisit for v0.11 if user demand surfaces.
+- **Multi-selection.** One file per `inspect` invocation, same as today. Users who want all files run `inspect <repo>` (aggregated); users who want a subset can run the command twice. Multi-selection would force the rendering pipeline to handle a `Vec<picked>` instead of a single filename — a deeper refactor that exceeds the patch's UX-only ambition.
+- **Fuzzy matching beyond substring** (Levenshtein, prefix-completion via lookahead, etc.). Substring is the cheapest contract that says what the user means: *"the filename contains these characters"*. Stronger matchers expand the surface for "did you mean" confusion that the explicit picker already solves.
+
 ---
 
 The v0.11 minor is dedicated to **remote inspection**. v0.11.0 builds an `HttpRangeReader: Read + Seek` adapter once over `reqwest` Range requests; each subsequent patch wires one more tensor format through the same adapter. anamnesis owns format knowledge; hf-fm owns HTTP plumbing. Format order is risk-ascending: NPZ (anamnesis primitive already shipped in v0.4.3) → safetensors (small library work, retires the bespoke parser) → GGUF (medium library work, the originally-promised v0.11.0 feature) → PTH (largest library work, lowest demand).
