@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **README and FAQ install pages now document the `--force` requirement when upgrading** — without it, `cargo install hf-fetch-model --features cli` short-circuits whenever any prior version of the binary is in `~/.cargo/bin/` (cargo exits `0` with a low-priority "already installed" notice on stderr, leaving the binary on `PATH` unchanged). The README's [Install](README.md#install) section gains an [Upgrading from a previous version](README.md#upgrading-from-a-previous-version) subsection covering `cargo install … --force` plus a `hf-fm --version` verification step; the FAQ's [Installation and authentication](docs/FAQ.md#installation-and-authentication) section gains a matching Q — [*How do I upgrade hf-fm? Why does `cargo install` silently keep the old version?*](docs/FAQ.md#how-do-i-upgrade-hf-fm-why-does-cargo-install-silently-keep-the-old-version). Companion note at [`docs/dogfooding-feedbacks/cargo-install-silent-skip.md`](docs/dogfooding-feedbacks/cargo-install-silent-skip.md) captures the failure mode in full (reproduction, mis-diagnosis cost, and proposed `hf-fm --check-update` flag + `cargo-binstall` support as future patch-release candidates).
+
 ## [0.10.1] — inspect --check-gpu (hypomnesis adoption)
 
 ### Added

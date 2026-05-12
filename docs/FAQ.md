@@ -42,6 +42,7 @@ A living list of the questions we and our early users have actually run into. If
   - [Is it stable? What does a `0.9.x` version number mean?](#is-it-stable-what-does-a-09x-version-number-mean)
 - [Installation and authentication](#installation-and-authentication)
   - [How do I install it? What is the Minimum Rust Version?](#how-do-i-install-it-what-is-the-minimum-rust-version)
+  - [How do I upgrade hf-fm? Why does `cargo install` silently keep the old version?](#how-do-i-upgrade-hf-fm-why-does-cargo-install-silently-keep-the-old-version)
   - [What is the `cli` feature and do I need it?](#what-is-the-cli-feature-and-do-i-need-it)
   - [How do I pass a HuggingFace token? Why does a gated model fail?](#how-do-i-pass-a-huggingface-token-why-does-a-gated-model-fail)
 - [Discovery — finding what to inspect or download](#discovery--finding-what-to-inspect-or-download)
@@ -106,6 +107,17 @@ cargo install hf-fetch-model --features cli
 ```
 
 That installs both `hf-fetch-model` and `hf-fm` into `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin\` on Windows). The Minimum Rust Version (MSRV) is **1.88**, declared via the `rust-version` field in `Cargo.toml` — Cargo warns if your active toolchain is older. If `cargo install` fails complaining about the Rust version, run `rustup update stable`.
+
+### How do I upgrade hf-fm? Why does `cargo install` silently keep the old version?
+
+Pass `--force` to `cargo install` and then re-check the version that actually landed:
+
+```
+cargo install hf-fetch-model --features cli --force
+hf-fm --version
+```
+
+Without `--force`, `cargo install` short-circuits whenever **any** version of the binary is already in `~/.cargo/bin/` — even when crates.io has a newer release. The "already installed" notice is logged to stderr at low priority and is easy to miss in a busy terminal: the install command exits `0`, looks like it succeeded, but the binary on `PATH` is unchanged. `--force` bypasses the short-circuit and always builds the latest. The companion note at [`docs/dogfooding-feedbacks/cargo-install-silent-skip.md`](dogfooding-feedbacks/cargo-install-silent-skip.md) captures the failure mode in full — including a reproduction recipe and the proposed `hf-fm --check-update` flag tracked as a future patch-release candidate.
 
 ### What is the `cli` feature and do I need it?
 

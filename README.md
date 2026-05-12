@@ -29,6 +29,23 @@ A Rust library and CLI for downloading and inspecting HuggingFace models. Multi-
 cargo install hf-fetch-model --features cli
 ```
 
+Verify the install:
+
+```sh
+hf-fm --version
+```
+
+### Upgrading from a previous version
+
+`cargo install` skips the build when any version of the binary is already on disk, even if crates.io has a newer release. Use `--force` to upgrade:
+
+```sh
+cargo install hf-fetch-model --features cli --force
+hf-fm --version
+```
+
+Without `--force`, a stale local registry index can cause `cargo install` to exit `0` silently — the install command appears to succeed but the binary on `PATH` is unchanged. See [FAQ → *How do I upgrade hf-fm?*](docs/FAQ.md#how-do-i-upgrade-hf-fm-why-does-cargo-install-silently-keep-the-old-version) for more.
+
 ## Commands
 
 | Command | Description |
