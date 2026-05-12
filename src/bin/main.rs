@@ -26,6 +26,14 @@ use hf_fetch_model::{
     FetchError, Filter,
 };
 
+#[path = "../format.rs"]
+mod format;
+
+#[path = "../gpu_check.rs"]
+mod gpu_check;
+
+use format::format_size;
+
 /// Applies optional `--timeout-per-file-secs` / `--timeout-total-secs` CLI overrides to a `FetchConfigBuilder`.
 ///
 /// Both arguments are seconds; `None` leaves the corresponding builder field
@@ -317,10 +325,14 @@ enum Commands {
         hf-fm inspect <repo>                             # inspect every .safetensors in the repo\n  \
         hf-fm inspect <repo> --list                      # list safetensors files (no headers read)\n  \
         hf-fm inspect <repo> 3                           # inspect file #3 from --list\n  \
-        hf-fm inspect <repo> model.safetensors --tree    # hierarchical view of one file\n\n\
+        hf-fm inspect <repo> model.safetensors --tree    # hierarchical view of one file\n  \
+        hf-fm inspect <repo> --check-gpu                 # GPU-fit verdict for the whole repo\n\n\
         Indices returned by --list are stable as long as the repo has not\n\
         changed remotely between invocations. Pass --revision <sha> on both\n\
         --list and the follow-up run to lock the view end-to-end.\n\n\
+        --check-gpu reads device 0's VRAM via hypomnesis (NVML / DXGI) and\n\
+        reports a one-line fit verdict against the model's weight bytes.\n\
+        Pass --check-gpu N to target a specific device.\n\n\
         For a walkthrough on a real 4-shard model, see\n\
         docs/tutorials/inspect-before-downloading.md")]
     Inspect {
@@ -365,6 +377,23 @@ enum Commands {
         /// `[0..N]` with a `×K` marker. Composes with `--filter` and `--json`.
         #[arg(long, conflicts_with_all = ["dtypes", "limit"])]
         tree: bool,
+        /// Show a GPU-fit verdict for the model weights against device `N` (default 0).
+        ///
+        /// Reads the device's total/free/used VRAM via `hypomnesis` (NVML on
+        /// Linux/Windows, DXGI on Windows). On systems with no NVIDIA device
+        /// or where neither backend is usable, prints a friendly note and
+        /// skips the verdict — never fails the command. The verdict uses the
+        /// **unfiltered** model totals; `--filter` and `--limit` only affect
+        /// the printed tensor table. Composes with `--json` (adds a
+        /// `gpu_check` object alongside the existing header schema).
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_missing_value = "0",
+            value_name = "N",
+            conflicts_with = "list"
+        )]
+        check_gpu: Option<u32>,
     },
     /// List files in a remote `HuggingFace` repository (no download).
     ListFiles {
@@ -734,6 +763,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             dtypes,
             limit,
             tree,
+            check_gpu,
         }) => run_inspect(
             repo_id.as_str(),
             filename.as_deref(),
@@ -747,6 +777,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             dtypes,
             limit,
             tree,
+            check_gpu,
         ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::ListFiles {
@@ -3580,6 +3611,7 @@ fn run_inspect(
     dtypes: bool,
     limit: Option<usize>,
     tree: bool,
+    check_gpu: Option<u32>,
 ) -> Result<(), FetchError> {
     if list {
         return run_inspect_list(repo_id, revision, token, cached);
@@ -3600,10 +3632,11 @@ fn run_inspect(
                 dtypes,
                 limit,
                 tree,
+                check_gpu,
             )
         }
         None => run_inspect_repo(
-            repo_id, revision, token, cached, json, filter, dtypes, limit, tree,
+            repo_id, revision, token, cached, json, filter, dtypes, limit, tree, check_gpu,
         ),
     }
 }
@@ -4248,6 +4281,8 @@ struct TreeJsonOutput<'a> {
     total_tensors: usize,
     total_params: u64,
     tree: Vec<TreeJsonNode<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_check: Option<serde_json::Value>,
 }
 
 fn tree_to_json(nodes: &[TreeNode]) -> Vec<TreeJsonNode<'_>> {
@@ -4296,6 +4331,7 @@ fn print_tree_json(
     tensors: &[inspect::TensorInfo],
     total_tensor_count: usize,
     total_params: u64,
+    gpu_check: Option<serde_json::Value>,
 ) -> Result<(), FetchError> {
     let forest = collapse_ranges(build_tree(tensors));
     let output = TreeJsonOutput {
@@ -4304,6 +4340,7 @@ fn print_tree_json(
         total_tensors: total_tensor_count,
         total_params,
         tree: tree_to_json(&forest),
+        gpu_check,
     };
     let serialized = serde_json::to_string_pretty(&output)
         .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
@@ -4358,12 +4395,18 @@ struct TruncationInfo {
 ///
 /// The field is omitted entirely when the tensor list is complete, preserving
 /// the plain `SafetensorsHeaderInfo` schema for non-truncated output.
+///
+/// The `gpu_check` field follows the same pattern: present only when
+/// `--check-gpu` was passed, omitted otherwise so v0.10.0 consumers see
+/// byte-identical output for non-`--check-gpu` invocations.
 #[derive(serde::Serialize)]
 struct InspectJsonOutput<'a> {
     #[serde(flatten)]
     header: &'a inspect::SafetensorsHeaderInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
     truncated: Option<TruncationInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_check: Option<serde_json::Value>,
 }
 
 /// Inspects a single `.safetensors` file and prints the result.
@@ -4387,6 +4430,7 @@ fn run_inspect_single(
     dtypes: bool,
     limit: Option<usize>,
     tree: bool,
+    check_gpu: Option<u32>,
 ) -> Result<(), FetchError> {
     if !has_safetensors_extension(filename) {
         // BORROW: owned Strings for error variant fields
@@ -4423,6 +4467,16 @@ fn run_inspect_single(
         ))?
     };
 
+    // `--check-gpu` uses the unfiltered model totals — fit is a whole-model
+    // question, not a per-filtered-tensor question. Capture the model-wide
+    // figures BEFORE the filter / limit pass below.
+    let gpu_inputs = check_gpu.map(|idx| GpuCheckInputs {
+        device_index: idx,
+        weight_bytes: gpu_check::sum_tensor_bytes(&info.tensors),
+        dtype_label: gpu_check::dominant_dtype_label(&info.tensors),
+        total_params: info.total_params(),
+    });
+
     // Apply tensor name filter.
     let total_tensor_count = info.tensors.len();
     let total_params = info.total_params();
@@ -4439,6 +4493,17 @@ fn run_inspect_single(
         info.tensors.truncate(n);
     }
 
+    // Probe the GPU once (after the filter/limit pass so the JSON value built
+    // here can be handed directly to the early-return branches below). The
+    // probe is a few-millisecond NVML / DXGI call; no need to skip it for
+    // any output mode.
+    let gpu_result = gpu_inputs
+        .as_ref()
+        .map(|i| gpu_check::query_gpu(i.device_index));
+    let gpu_check_value = gpu_inputs.as_ref().zip(gpu_result.as_ref()).map(|(i, r)| {
+        gpu_check::gpu_check_json(r, i.weight_bytes, i.dtype_label.as_str(), i.total_params)
+    });
+
     // `--tree --json`: hierarchical tree as JSON (distinct schema from plain --json).
     if tree && json {
         return print_tree_json(
@@ -4447,12 +4512,18 @@ fn run_inspect_single(
             &info.tensors,
             total_tensor_count,
             total_params,
+            gpu_check_value,
         );
     }
 
     // `--dtypes --json`: compact dtype breakdown as JSON (distinct schema from plain --json).
     if dtypes && json {
-        return print_dtype_summary_json(&info.tensors, total_tensor_count, total_params);
+        return print_dtype_summary_json(
+            &info.tensors,
+            total_tensor_count,
+            total_params,
+            gpu_check_value,
+        );
     }
 
     if json {
@@ -4464,6 +4535,7 @@ fn run_inspect_single(
                 shown: info.tensors.len(),
                 total: total_tensor_count,
             }),
+            gpu_check: gpu_check_value,
         };
         let output = serde_json::to_string_pretty(&wrapped)
             .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
@@ -4502,12 +4574,14 @@ fn run_inspect_single(
     // Hierarchical tree mode.
     if tree {
         print_tree_summary(&info.tensors, filter, total_tensor_count, total_params);
+        maybe_print_gpu_check(gpu_inputs.as_ref(), gpu_result.as_ref());
         return Ok(());
     }
 
     // Per-dtype summary mode.
     if dtypes {
         print_dtype_summary(&info.tensors, filter, total_tensor_count, total_params);
+        maybe_print_gpu_check(gpu_inputs.as_ref(), gpu_result.as_ref());
         return Ok(());
     }
 
@@ -4587,7 +4661,46 @@ fn run_inspect_single(
         }
     }
 
+    maybe_print_gpu_check(gpu_inputs.as_ref(), gpu_result.as_ref());
     Ok(())
+}
+
+/// Model-side inputs for one `--check-gpu` invocation, captured **before** the
+/// `--filter` / `--limit` pass so the verdict reflects the whole-model totals.
+///
+/// Travels in lockstep with a single [`gpu_check::GpuCheckResult`] from
+/// [`gpu_check::query_gpu`]; the pair drives both the text renderer
+/// ([`maybe_print_gpu_check`]) and the JSON renderer ([`gpu_check::gpu_check_json`]).
+struct GpuCheckInputs {
+    /// Zero-based device index the user passed via `--check-gpu N` (default 0).
+    device_index: u32,
+    /// Sum of tensor byte-lens across every tensor in the model (unfiltered).
+    weight_bytes: u64,
+    /// Display label for the `Model weights:` line — single dtype or
+    /// `"<dominant> + others"`. See [`gpu_check::dominant_dtype_label`].
+    dtype_label: String,
+    /// Total parameter count across every tensor in the model (unfiltered).
+    total_params: u64,
+}
+
+/// Renders the `--check-gpu` verdict block when both inputs are present.
+///
+/// `inputs` and `probe` are paired at construction in the callers — they are
+/// always either both `Some` or both `None`. The two-`Option` signature is
+/// preserved (rather than collapsed into one) so the caller can hold each
+/// half by reference without an extra borrow dance through a wrapper struct.
+fn maybe_print_gpu_check(
+    inputs: Option<&GpuCheckInputs>,
+    probe: Option<&gpu_check::GpuCheckResult>,
+) {
+    if let (Some(i), Some(result)) = (inputs, probe) {
+        gpu_check::print_gpu_check(
+            result,
+            i.weight_bytes,
+            i.dtype_label.as_str(),
+            i.total_params,
+        );
+    }
 }
 
 /// Inspects all `.safetensors` files in a repository (summary or per-file).
@@ -4611,10 +4724,13 @@ fn run_inspect_repo(
     dtypes: bool,
     limit: Option<usize>,
     tree: bool,
+    check_gpu: Option<u32>,
 ) -> Result<(), FetchError> {
     // When the user asked for tensor-level aggregation, every shard's header
     // must be read; the shard-index file alone has no dtype or shape data.
-    let needs_aggregation = dtypes || tree || limit.is_some();
+    // `--check-gpu` also needs per-tensor data to sum weight bytes precisely
+    // across shards, so it forces the aggregation path too.
+    let needs_aggregation = dtypes || tree || limit.is_some() || check_gpu.is_some();
 
     if cached {
         // Cache-only: try shard index first, then walk snapshot.
@@ -4634,7 +4750,9 @@ fn run_inspect_repo(
         }
 
         if needs_aggregation {
-            run_inspect_repo_aggregated(repo_id, &results, json, filter, dtypes, limit, tree)?;
+            run_inspect_repo_aggregated(
+                repo_id, &results, json, filter, dtypes, limit, tree, check_gpu,
+            )?;
             print_adapter_config_if_present(repo_id, revision, None, true, json);
             return Ok(());
         }
@@ -4695,7 +4813,9 @@ fn run_inspect_repo(
         .collect();
 
     if needs_aggregation {
-        run_inspect_repo_aggregated(repo_id, &mapped, json, filter, dtypes, limit, tree)?;
+        run_inspect_repo_aggregated(
+            repo_id, &mapped, json, filter, dtypes, limit, tree, check_gpu,
+        )?;
         print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, json);
         return Ok(());
     }
@@ -4735,6 +4855,7 @@ fn run_inspect_repo_aggregated(
     dtypes: bool,
     limit: Option<usize>,
     tree: bool,
+    check_gpu: Option<u32>,
 ) -> Result<(), FetchError> {
     // Flatten tensors across all shards. `(filename, &TensorInfo)` lets the
     // table renderer attribute each tensor to its source shard.
@@ -4751,6 +4872,24 @@ fn run_inspect_repo_aggregated(
         .iter()
         .map(|(_, t)| t.num_elements())
         .fold(0u64, u64::saturating_add);
+
+    // Capture `--check-gpu` inputs BEFORE the filter / limit pass so the
+    // verdict reflects the whole model. `gpu_check::{sum_tensor_bytes,
+    // dominant_dtype_label}` take `&[TensorInfo]`, so we materialize an
+    // owned vec once from the unfiltered `flat` slice; the heavier
+    // post-filter table path below builds its own owned vec separately,
+    // which we accept rather than deduplicate because `--check-gpu` is
+    // opt-in and only costs a single linear clone when it is set.
+    let gpu_inputs = check_gpu.map(|idx| {
+        let owned_unfiltered: Vec<inspect::TensorInfo> =
+            flat.iter().map(|(_, t)| (*t).clone()).collect();
+        GpuCheckInputs {
+            device_index: idx,
+            weight_bytes: gpu_check::sum_tensor_bytes(&owned_unfiltered),
+            dtype_label: gpu_check::dominant_dtype_label(&owned_unfiltered),
+            total_params,
+        }
+    });
 
     if let Some(pattern) = filter {
         // BORROW: explicit .as_str() instead of Deref coercion
@@ -4772,6 +4911,13 @@ fn run_inspect_repo_aggregated(
     // renderers that take `&[TensorInfo]` rather than `&[&TensorInfo]`.
     let tensors_owned: Vec<inspect::TensorInfo> = flat.iter().map(|(_, t)| (*t).clone()).collect();
 
+    let gpu_result = gpu_inputs
+        .as_ref()
+        .map(|i| gpu_check::query_gpu(i.device_index));
+    let gpu_check_value = gpu_inputs.as_ref().zip(gpu_result.as_ref()).map(|(i, r)| {
+        gpu_check::gpu_check_json(r, i.weight_bytes, i.dtype_label.as_str(), i.total_params)
+    });
+
     // `--tree --json`: tagged-enum tree schema (matches run_inspect_single).
     if tree && json {
         return print_tree_json(
@@ -4780,12 +4926,29 @@ fn run_inspect_repo_aggregated(
             &tensors_owned,
             total_tensor_count,
             total_params,
+            gpu_check_value,
         );
     }
 
     // `--dtypes --json`: compact dtype breakdown.
     if dtypes && json {
-        return print_dtype_summary_json(&tensors_owned, total_tensor_count, total_params);
+        return print_dtype_summary_json(
+            &tensors_owned,
+            total_tensor_count,
+            total_params,
+            gpu_check_value,
+        );
+    }
+
+    // Plain `--json` at the repo level on the aggregation path (forced by
+    // `--check-gpu` when neither `--tree` nor `--dtypes` is set). Emits a
+    // wrapped object so the verdict can ride along — distinct from the
+    // unwrapped `Vec<(name, info)>` schema used by the non-aggregation
+    // fast-path. The schema variation is gated by `--check-gpu`: without
+    // it, `run_inspect_repo` takes the non-aggregation path and returns
+    // the historical array.
+    if json {
+        return print_multi_file_json_with_gpu_check(results, filter, gpu_check_value);
     }
 
     // Header — same shape as the per-file inspect.
@@ -4797,12 +4960,14 @@ fn run_inspect_repo_aggregated(
     // `--tree`: hierarchical view, aggregated across shards.
     if tree {
         print_tree_summary(&tensors_owned, filter, total_tensor_count, total_params);
+        maybe_print_gpu_check(gpu_inputs.as_ref(), gpu_result.as_ref());
         return Ok(());
     }
 
     // `--dtypes`: per-dtype histogram, aggregated across shards.
     if dtypes {
         print_dtype_summary(&tensors_owned, filter, total_tensor_count, total_params);
+        maybe_print_gpu_check(gpu_inputs.as_ref(), gpu_result.as_ref());
         return Ok(());
     }
 
@@ -4820,6 +4985,7 @@ fn run_inspect_repo_aggregated(
         matched_params,
     );
 
+    maybe_print_gpu_check(gpu_inputs.as_ref(), gpu_result.as_ref());
     Ok(())
 }
 
@@ -4986,6 +5152,8 @@ struct DtypeSummaryJson<'a> {
     dtypes: Vec<DtypeGroup<'a>>,
     total_tensors: usize,
     total_params: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_check: Option<serde_json::Value>,
 }
 
 /// Groups tensors by dtype and returns rows sorted by tensor count descending.
@@ -5015,6 +5183,7 @@ fn print_dtype_summary_json(
     tensors: &[inspect::TensorInfo],
     total_tensor_count: usize,
     total_params: u64,
+    gpu_check: Option<serde_json::Value>,
 ) -> Result<(), FetchError> {
     let rows = compute_dtype_groups(tensors);
     let output = DtypeSummaryJson {
@@ -5029,6 +5198,7 @@ fn print_dtype_summary_json(
             .collect(),
         total_tensors: total_tensor_count,
         total_params,
+        gpu_check,
     };
     let serialized = serde_json::to_string_pretty(&output)
         .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
@@ -5200,6 +5370,73 @@ fn print_multi_file_json(
             .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
         println!("{output}");
     }
+    Ok(())
+}
+
+/// Same as [`print_multi_file_json`] but wraps the file array in a top-level
+/// object so a `gpu_check` field can ride along.
+///
+/// Schema:
+///
+/// ```jsonc
+/// {
+///   "files": [["filename", { /* SafetensorsHeaderInfo */ }], ...],
+///   "gpu_check": { /* see gpu_check::gpu_check_json */ }  // omitted when --check-gpu absent
+/// }
+/// ```
+///
+/// Only reached from [`run_inspect_repo_aggregated`] when `--check-gpu` was
+/// what forced the aggregation path; without `--check-gpu` the unwrapped
+/// `Vec` schema from [`print_multi_file_json`] is preserved for backwards
+/// compatibility.
+fn print_multi_file_json_with_gpu_check(
+    results: &[(String, inspect::SafetensorsHeaderInfo)],
+    filter: Option<&str>,
+    gpu_check: Option<serde_json::Value>,
+) -> Result<(), FetchError> {
+    let files_payload: Vec<(String, inspect::SafetensorsHeaderInfo)> = if let Some(pattern) = filter
+    {
+        results
+            .iter()
+            .filter_map(|(name, info)| {
+                let matching: Vec<inspect::TensorInfo> = info
+                    .tensors
+                    .iter()
+                    // BORROW: explicit .as_str() for &String → &str
+                    .filter(|t| t.name.as_str().contains(pattern))
+                    .cloned()
+                    .collect();
+                if matching.is_empty() {
+                    return None;
+                }
+                Some((
+                    name.clone(),
+                    inspect::SafetensorsHeaderInfo {
+                        tensors: matching,
+                        metadata: info.metadata.clone(),
+                        header_size: info.header_size,
+                        file_size: info.file_size,
+                    },
+                ))
+            })
+            .collect()
+    } else {
+        results.to_vec()
+    };
+
+    let mut top = serde_json::Map::new();
+    top.insert(
+        "files".to_owned(),
+        serde_json::to_value(&files_payload)
+            .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?,
+    );
+    if let Some(gc) = gpu_check {
+        top.insert("gpu_check".to_owned(), gc);
+    }
+
+    let output = serde_json::to_string_pretty(&serde_json::Value::Object(top))
+        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+    println!("{output}");
     Ok(())
 }
 
@@ -5682,38 +5919,10 @@ fn parse_size_arg(s: &str) -> Result<u64, String> {
     Ok(bytes)
 }
 
-/// Formats a byte size with human-readable suffixes (B, KiB, MiB, GiB).
-fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * 1024 * 1024;
-    const TIB: u64 = 1024 * GIB;
-
-    // Use TiB for values >= 1000 GiB, GiB for >= 1000 MiB.
-    if bytes >= 1000 * GIB {
-        // CAST: u64 → f64, precision loss acceptable; value is a display-only size scalar
-        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-        let val = bytes as f64 / TIB as f64;
-        format!("{val:.2} TiB")
-    } else if bytes >= 1000 * MIB {
-        // CAST: u64 → f64, precision loss acceptable; value is a display-only size scalar
-        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-        let val = bytes as f64 / GIB as f64;
-        format!("{val:.2} GiB")
-    } else if bytes >= MIB {
-        // CAST: u64 → f64, precision loss acceptable; value is a display-only size scalar
-        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-        let val = bytes as f64 / MIB as f64;
-        format!("{val:.2} MiB")
-    } else if bytes >= KIB {
-        // CAST: u64 → f64, precision loss acceptable; value is a display-only size scalar
-        #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-        let val = bytes as f64 / KIB as f64;
-        format!("{val:.1} KiB")
-    } else {
-        format!("{bytes} B")
-    }
-}
+// `format_size` lives in `src/format.rs` and is imported at the top of this
+// file via `use format::format_size;`. Extraction (v0.10.1) was prompted by
+// `src/gpu_check.rs` needing the same formatter for the `--check-gpu` verdict
+// block; further binary-internal display helpers belong in that module.
 
 /// Formats a [`SystemTime`] as a human-readable relative age string.
 ///

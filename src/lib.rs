@@ -66,6 +66,13 @@
 //! # }
 //! ```
 //!
+//! The CLI also exposes `hf-fm inspect <repo> [FILE] --check-gpu [N]` (v0.10.1)
+//! to print a one-line GPU-fit verdict against device `N` (default 0) using
+//! the `hypomnesis` crate (NVML on Linux/Windows, DXGI on Windows). The
+//! verdict is a binary-only feature today; no library equivalent is exposed
+//! — depend on `hypomnesis` directly if you need the device-info numbers
+//! from library code.
+//!
 //! ## `HuggingFace` Cache
 //!
 //! Downloaded files are stored in the standard `HuggingFace` cache directory
