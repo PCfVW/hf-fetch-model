@@ -285,12 +285,15 @@ These are more complex than prior releases: verify needs network + checksum comp
 
 The cache fast-path correctness and pipe-FAQ ✓ items above are early increments toward v0.10.0 — UX bugs surfaced during v0.9.8 dogfooding, fixed on `main` immediately rather than waiting for a v0.9.9 patch release. They establish a small precedent: post-release dogfooding gaps land on the next-minor's branch, not the current-patch's. With `cache verify`, `cache gc`, and `du --tree` all marked ✓, the v0.10.0 feature work is complete; only the **First docs effort** remains before the version bump.
 
-### v0.10.1 — `inspect --check-gpu` (hypomnesis adoption)
+### v0.10.1 — `inspect --check-gpu` (hypomnesis adoption) ✓
 
 | Feature | Scope |
 |---------|-------|
-| `inspect <repo> [FILE] --check-gpu [N]` | Add a GPU-fit verdict to `inspect`: model weight size compared against free VRAM on device `N` (default 0). |
-| `hypomnesis = "0.1"` dependency | First external consumer of the standalone GPU-memory crate ([crates.io/crates/hypomnesis](https://crates.io/crates/hypomnesis)) — uses `device_info` + `device_count`, ≈10 % of the surface. |
+| `inspect <repo> [FILE] --check-gpu [N]` ✓ | Adds a GPU-fit verdict to `inspect`: model weight size compared against free VRAM on device `N` (default 0). Works on both per-file (`inspect <repo> file.safetensors --check-gpu`) and whole-repo (`inspect <repo> --check-gpu`, forces shard aggregation so the verdict reflects the precise sum of tensor byte-lens across every shard, not the looser file-size proxy). Uses the **unfiltered** model totals (so `--filter` / `--limit` only affect the printed tensor table). On systems with no NVIDIA GPU detected, an out-of-range device index, or where neither NVML nor DXGI is usable, the verdict line reports the failure verbatim and the command still exits 0 — `--check-gpu` is informational, never a gate. |
+| `--json` composition ✓ | `gpu_check` JSON object added to the existing per-file schema, the `--tree --json` schema, and the `--dtypes --json` schema (each gated by `#[serde(skip_serializing_if = "Option::is_none")]` so non-`--check-gpu` JSON output stays byte-identical to v0.10.0). The repo-level plain `--json` schema switches from a `Vec<(filename, header)>` array to `{"files": [...], "gpu_check": {...}}` when `--check-gpu` is passed (the array schema is preserved when `--check-gpu` is absent). |
+| `hypomnesis = "0.2"` dependency ✓ | Bumped from the originally-planned `"0.1"` to the current crates.io tip; 0.2.0 was released after the v0.10.1 roadmap line was written and is API-additive (`device_info` / `device_count` unchanged). hf-fm v0.10.1 is hypomnesis's **first external consumer** — concrete dogfooding observations captured in [`docs/dogfooding-feedbacks/hypomnesis-adoption.md`](../dogfooding-feedbacks/hypomnesis-adoption.md). |
+| `format_size` extracted to `src/format.rs` ✓ | The byte-formatter that has lived in `src/bin/main.rs` since v0.9.4 moves to a binary-internal module (via `#[path = "../format.rs"] mod format;`) so the new `src/gpu_check.rs` verdict renderer can reuse it. Five new unit tests cover the four bucket transitions (B / KiB / MiB / GiB / TiB). No public library API change. |
+| Tutorial update ✓ | Tutorial §6 of [Inspect before you download](../tutorials/inspect-before-downloading.md) gains a real `--check-gpu` walkthrough against zeta-2 on an RTX 5060 Ti (verdict: `✗ short by 1.77 GiB` — exact numbers vary run-to-run with other GPU processes, the ✗ is stable). §7's "manual math" paragraph is compressed to a one-liner that points at the verdict already shown in §6. The tutorial's STYLE CONVENTIONS §4 prescribed this change in advance; v0.10.1 closes that forward reference. |
 
 Sample output:
 
@@ -308,7 +311,7 @@ $ hf-fm inspect google/gemma-4-E2B-it model.safetensors --check-gpu
 
 Validates the `hypomnesis` API surface against a real consumer before `candle-mi` migrates in `hypomnesis` Phase 3 (candle-mi v0.2). Implementation-light on the hf-fm side: read the device info, format the verdict alongside the existing inspect output. The hard work — Windows DXGI per-process VRAM, NVML `u64::MAX` sentinel handling, `nvidia-smi` fallback — lives in `hypomnesis` and is already battle-tested code ported from candle-mi.
 
-**Status:** unblocked — `hypomnesis 0.1.0` is on crates.io (Phase 1 Wave 2 complete). hf-fm is the proof-of-concept consumer named in the [hypomnesis brief](https://github.com/PCfVW/hypomnesis/blob/main/docs/hypomnesis-brief.md) under *First consumer*.
+**Status:** shipped. `hypomnesis 0.2.0` (the current tip; the originally-planned 0.1.0 was bumped because 0.2 is API-additive over 0.1 and the upstream brief moved on). hf-fm v0.10.1 is the proof-of-concept consumer named in the [hypomnesis brief](https://github.com/PCfVW/hypomnesis/blob/main/docs/hypomnesis-brief.md) under *First consumer*. Concrete adoption feedback for the upstream maintainer (us) is captured in [`docs/dogfooding-feedbacks/hypomnesis-adoption.md`](../dogfooding-feedbacks/hypomnesis-adoption.md).
 
 ### v0.10.2 — GGUF inspect (cached) + anamnesis dependency
 
@@ -336,6 +339,18 @@ Closes the format-coverage gap with `safetensors_explorer` for cached files. Low
 **Theme: cashing in the anamnesis dep.** v0.10.2 introduced `anamnesis 0.4.3` as a dependency (it's the GGUF parser); v0.10.3 extends that adoption to the other three formats and retires hf-fm's duplicated safetensors header parser. **No new HTTP work, no new library work in anamnesis** — pure dispatch wiring on a dep that's already there. ~115 LOC + tests, low-risk patch release.
 
 After v0.10.3, `hf-fm inspect <repo> <any-tensor-file> --cached` works uniformly across all four tensor formats anamnesis supports. Sets the stage for v0.11, where the same four formats become inspectable *remotely* via HTTP Range.
+
+### v0.10.4 — `--check-gpu` follow-ups (multi-GPU + KV-cache budgeting)
+
+| Feature | Scope |
+|---------|-------|
+| `inspect --check-gpu all` | Multi-GPU verdict. Iterates over `hypomnesis::device_count()`, prints one `GPU N:` line per visible device with its own free/used numbers, and picks the device with the most free VRAM for the `Fit:` summary line. The `all` token is parsed via clap's `value_parser`: a bare `--check-gpu` keeps the v0.10.1 single-device default, `--check-gpu N` keeps single-device targeting, `--check-gpu all` enables the iteration. JSON path gains a `devices: [...]` array under `gpu_check` and the existing `device` key becomes an alias for the auto-picked entry. Closes the "I have a 5060 Ti and a 5090 in the same box" case without breaking the v0.10.1 single-device default. |
+| `inspect --check-gpu --context N` | KV-cache budgeting. Computes KV bytes from the model's `num_key_value_heads × head_dim × dtype_bytes × 2 (K+V) × num_hidden_layers × context` against the user-supplied context length, adds it to the weight bytes, and reports a *real* fit verdict instead of the v0.10.1 "weights only" disclaimer. Reads `config.json` from cache / API for the architectural parameters (already on the cache-first path used by `inspect`); falls back to a clear error when the config is missing or doesn't expose the GQA-related keys. Replaces the v0.10.1 closing note (`Note: reports weights only…`) with a `KV cache @ ctx=N: X.YZ GiB` line and a precise `Total: W + KV = X.YZ GiB` rollup. |
+| `GpuDeviceInfo::name_or_unknown()` adoption | If [hypomnesis-adoption.md](../dogfooding-feedbacks/hypomnesis-adoption.md) lands an upstream `name_or_unknown` (or equivalent) convenience by then, hf-fm collapses its inline `.as_deref().unwrap_or("unknown GPU")` to one call. Purely cosmetic — caught here so the dogfooding loop closes. |
+
+**Theme: cashing in the v0.10.1 hypomnesis adoption.** v0.10.1 proved `device_info` works against a real consumer; v0.10.4 spends the dependency by adding the two features users will ask for once they have used `--check-gpu` on real boxes. Lands after the anamnesis-driven v0.10.2 / v0.10.3 patches because KV-cache budgeting wants the same config-aware infrastructure those patches are building (the cache-first `config.json` read in particular).
+
+**Out of scope for v0.10.4 (still deferred):** AMD ROCm support (waits on hypomnesis's `rocm-smi` backend, planned in hypomnesis 0.3); Apple Metal (likewise, future hypomnesis backend); multi-context "fit profile" sweep (e.g., printing fit at 4 K / 16 K / 64 K context in a table). All three are reasonable v0.11+ extensions.
 
 ---
 
