@@ -1,7 +1,7 @@
-# candle #3530 — reply 1 (draft)
+# candle #3530 — reply 1 (posted)
 
 - **Target issue:** https://github.com/huggingface/candle/issues/3530
-- **Status:** Draft (not yet posted)
+- **Status:** Posted (May 12, 2026)
 - **Context:** First reply on the thread. @sempervictus (RageLtMan, SemperVictus, Boston MA — 203 public repos, 120 followers) reports candle uses 81 GB / 119 GB on NVIDIA Spark loading what they describe as "about the size of an 80B NVPF4 model" and hypothesizes double-mapping (mmap-then-copy → 2× bounds counting). Zero existing comments at draft time. The OP's question is binary: is the actual on-disk model size ~40 GiB (supporting the 2× theory) or ~80 GiB (ruling it out)? `hf-fm inspect --check-gpu --dtypes` reads the safetensors header byte counts — ground truth for that comparison — which is the diagnostic this reply offers. v0.10.1 shipped `--check-gpu` the same day as this draft, making this the first candle-side application of the new flag.
 - **Outcome:** —
 - **Lesson / Leverage angle:** First-responder framing on the freshest open issue; cleanest fit yet for v0.10.1's `--check-gpu`. The dtype histogram + verdict block is the differentiator over Python alternatives (`huggingface_hub` and `safetensors_explorer` don't ship an equivalent fit-against-actual-GPU view). If the OP shares the repo, we can run the command ourselves and post the result inline as a p2.
