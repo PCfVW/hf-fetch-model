@@ -2,9 +2,9 @@
 
 *Read tensor metadata over HTTP Range — no weight data downloaded — and decide whether the model is worth the bandwidth.*
 
-*~1,490 words · about 6 min read*
+*~1,560 words · about 6 min read*
 
-<!-- Last updated: 2026-05-04, hf-fm v0.10.0 -->
+<!-- Last updated: 2026-05-12, hf-fm v0.10.1 -->
 
 <!--
 STYLE CONVENTIONS for editing this tutorial — keep growth consistent.
@@ -19,15 +19,21 @@ STYLE CONVENTIONS for editing this tutorial — keep growth consistent.
 3. Output blocks: paste exact output, do not paraphrase. Trim only when a
    block runs longer than ~20 lines and the trimmed lines are
    representative repetition (note the trim with `…`).
-4. Forward references: when v0.10.1 ships `inspect --check-gpu`, replace
-   the closing sentence of §6 (Targeting) with a real walkthrough and
-   compress §7's "manual math" paragraph to a one-liner. Do not restructure.
+4. Forward references: when v0.10.4 ships `--check-gpu --context N`,
+   compress §6's "30–50% on top" paragraph (the one immediately after
+   the `--check-gpu` output block) to a one-liner that points at the
+   new flag. Do not restructure.
 5. Length budget: under 300 lines total, including embedded outputs.
    Update the word count + reading-time line at the top whenever the
    prose changes non-trivially (250 wpm).
 6. Word count = total words in this file excluding code blocks and
    HTML comments. Reading time = word count / 250, rounded to the nearest
    minute, minimum 1.
+7. --check-gpu output (added v0.10.1): the GPU 0 line is the maintainer's
+   RTX 5060 Ti — `free` / `used` figures will drift run-to-run as the
+   desktop's other processes change. Re-capture if rerunning the tutorial
+   end-to-end; the verdict (✗ short by ~1–2 GiB) should remain stable
+   regardless of the moment.
 -->
 
 A new tutorial in the v0.10.0 docs effort. If you find a step confusing or an output that looks different from yours, please open an issue on [GitHub](https://github.com/PCfVW/hf-fetch-model/issues) — the tutorial improves as real questions land.
@@ -217,15 +223,37 @@ hf-fm inspect zed-industries/zeta-2 \
 
 The `Shard` column is hf-fm reminding you that shard 1 holds the embedding plus the first set of layer weights. That is occasionally useful when debugging: if a download failed for a specific shard, you know which tensors are at risk.
 
-In v0.10.1 hf-fm will gain `inspect --check-gpu`, which turns the next section's arithmetic into a one-line verdict — see the v0.10.1 release notes when it ships.
+One last `inspect` view before the verdict section. `--check-gpu` puts the model's weight bytes next to the device's free VRAM and tells you whether one fits in the other — the fit math done for you against device 0:
+
+```sh
+hf-fm inspect zed-industries/zeta-2 \
+  --revision 1529be60e35a55682cb6029e3840b53d9a57e6d0 \
+  --check-gpu --dtypes
+```
+
+```
+  Repo:   zed-industries/zeta-2
+  Source: aggregated across 4 shards
+
+  Dtype  Tensors       Params       Size
+  BF16       291        8.25B  15.37 GiB
+  ─────────────────────────────────────────
+  291 tensors, 8.25B params
+
+  Model weights:  15.37 GiB  (BF16, 8.25B params)
+  GPU 0:          NVIDIA GeForce RTX 5060 Ti — 15.93 GiB VRAM
+                  free: 13.60 GiB, used: 2.33 GiB
+  Fit:            ✗ short by 1.77 GiB for the weights alone
+
+  Note: reports weights only. Large-context inference typically needs ~1.3–1.5×
+  weight size for KV cache and activations.
+```
+
+The verdict is short and clear: the weights are 1.77 GiB larger than what is actually free on this RTX 5060 Ti right now. The note at the bottom is the reminder that *weights alone* is the easy part — full-context inference adds 30–50% on top for KV cache and activations, which puts the real shortfall closer to 6–8 GiB. The next section is the practical pivot to a quant that fits.
 
 ## The verdict — and what to do when it doesn't fit
 
-You now know zeta-2 is 15.37 GiB of BF16 weights. Suppose you have an RTX 5060 Ti with 16 GB of VRAM. Will the model fit?
-
-The math: 16 GB nominal works out to about 14.0–14.5 GiB usable free at desktop idle, after Windows and the driver carve out their reservations. The model alone — before activations, before KV cache, before CUDA workspace — is 15.37 GiB. So no, native BF16 doesn't fit. Even with a near-empty GPU you are roughly a gigabyte short before any inference state.
-
-The community usually solves this by quantizing. Search for GGUF variants:
+`--check-gpu` already gave you the answer: zeta-2's 15.37 GiB of BF16 weights won't fit on a 16 GB card, and that's before any inference state. The community pivot is to quantize — search for GGUF variants:
 
 ```sh
 hf-fm search zeta-2 --tag gguf
@@ -288,6 +316,7 @@ You went from "15 GiB I can't use" to "5 GiB that fits with room to spare" witho
 - **`inspect --dtypes`** answers how big and in what precision, aggregated across every shard.
 - **`inspect --tree`** answers what shape — architecture, layer count, GQA ratio, tied vs untied heads, vocabulary size.
 - **`inspect --filter` / `--limit`** answer "what does *this part* cost?" before you commit to anything.
+- **`inspect --check-gpu`** turns weight bytes vs. free VRAM into a one-line ✓ / ✗ verdict.
 - **`search --tag` + `list-files`** find community quantizations when the headline repo doesn't fit.
 - **`--revision <sha>`** pins every command above to a specific commit so notes stay reproducible.
 

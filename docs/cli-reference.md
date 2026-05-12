@@ -221,6 +221,15 @@ hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --filter "la
 
 # Inspect a PEFT adapter repo (auto-detects adapter_config.json)
 hf-fm inspect some-user/llama-2-7b-lora-adapter
+
+# Will it fit on my GPU? (device 0 by default; pass --check-gpu N to pick another)
+hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu
+
+# Multi-GPU box: check device 1 instead of 0
+hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu 1
+
+# JSON composition: gpu_check rides alongside the existing header schema
+hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu --json
 ```
 
 ## Diff examples
@@ -466,6 +475,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--cached` | Cache-only mode: fail if the file is not cached locally | off |
+| `--check-gpu [N]` | Append a one-line GPU-fit verdict comparing model weight bytes against free VRAM on device `N` (default `0`). Reads device info via [`hypomnesis`](https://crates.io/crates/hypomnesis) (NVML on Linux/Windows, DXGI on Windows; falls back to `nvidia-smi`). On systems with no NVIDIA GPU detected, prints `GPU N: unavailable — <reason>` and skips the verdict (exit code stays `0` — the command is informational, not a gate). Uses the **unfiltered** model totals (so `--filter` / `--limit` affect only the printed table). Composes with `--json`: a `gpu_check` object is added to the per-file schema, the `--tree --json` schema, and the `--dtypes --json` schema; the repo-level plain `--json` schema becomes `{"files": [...], "gpu_check": {...}}` when `--check-gpu` is passed (the array schema is preserved when it is absent). At the whole-repo level, forces shard aggregation so the verdict reflects the total weight bytes across every shard. Conflicts with `--list` (no headers are read in `--list` mode). | off |
 | `--dtypes` | Show a per-dtype summary (tensor count, params, size) instead of individual tensors. Composes with `--json` to emit `{ dtypes: [...], total_tensors, total_params }`. | off |
 | `--filter` | Show only tensors whose name contains this substring | — |
 | `--json` | Output the full header as JSON instead of a human-readable table | off |

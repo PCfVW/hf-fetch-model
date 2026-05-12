@@ -47,6 +47,7 @@ A living list of the questions we and our early users have actually run into. If
 - [Discovery — finding what to inspect or download](#discovery--finding-what-to-inspect-or-download)
   - [A repo has many `.safetensors` files — how do I pick one to inspect?](#a-repo-has-many-safetensors-files--how-do-i-pick-one-to-inspect)
   - [How do I see a model's tensor names without downloading it?](#how-do-i-see-a-models-tensor-names-without-downloading-it)
+  - [How do I know if a model fits on my GPU?](#how-do-i-know-if-a-model-fits-on-my-gpu)
   - [How do I list only the weight files in a repo, not the tokenizer and README?](#how-do-i-list-only-the-weight-files-in-a-repo-not-the-tokenizer-and-readme)
   - [How do I see what is already cached locally?](#how-do-i-see-what-is-already-cached-locally)
 - [Cache location and management](#cache-location-and-management)
@@ -143,6 +144,16 @@ Indices are stable for as long as the repository does not change remotely — fo
 ### How do I see a model's tensor names without downloading it?
 
 Run `hf-fm inspect <repo>` with no filename and it will inspect every `.safetensors` file in the repository. For one specific file, add the filename (or an index from `--list`). Internally, hf-fm fetches only the JSON header via an HTTP Range request — for a typical 2 GiB safetensors file, you transfer maybe 70 KiB of metadata. Add `--tree` for the hierarchical view that groups numeric layers (`layers.[0..27]   (×28)`), or `--dtypes` for a dtype-and-parameter summary. For a complete walkthrough on a real 4-shard model, see [Inspect before you download](tutorials/inspect-before-downloading.md).
+
+### How do I know if a model fits on my GPU?
+
+Pass `--check-gpu` to any `inspect` invocation:
+
+```
+hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu
+```
+
+hf-fm reads the device's total / free / used VRAM via [`hypomnesis`](https://crates.io/crates/hypomnesis) (NVML on Linux/Windows, DXGI on Windows; `nvidia-smi` fallback), sums the model's weight bytes across every shard, and prints a one-line verdict — `✓ X.YZ GiB headroom` if it fits, `✗ short by X.YZ GiB` if it doesn't. The verdict reports **weights only** — large-context inference typically needs another 30–50% on top for the KV cache and activations, which the closing note reminds you about. Default device is `0`; pass `--check-gpu 1` on a multi-GPU box. Works with `--cached` and the network path identically, and composes with `--json` (adds a `gpu_check` object alongside the existing header schema). On a system with no NVIDIA GPU detected, the verdict line reports `unavailable — <reason>` and the command still exits 0 — `--check-gpu` is informational, never a gate. A follow-up `--check-gpu --context N` will add KV-cache budgeting (see the [v0.10.4 roadmap line](roadmaps/cache-management-roadmap.md)); for now, the manual 1.3–1.5× rule of thumb is the right ceiling estimate.
 
 ### How do I list only the weight files in a repo, not the tokenizer and README?
 

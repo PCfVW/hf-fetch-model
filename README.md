@@ -43,7 +43,7 @@ cargo install hf-fetch-model --features cli
 | `hf-fm discover` | Find new model families on the Hub |
 | `hf-fm download-file <REPO_ID> <FILE>` | Download a single file (or glob pattern) |
 | `hf-fm du [REPO_ID\|N]` | Show cache disk usage (by name or `#` index) |
-| `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) without downloading weights |
+| `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) without downloading weights; add `--check-gpu` for a one-line GPU-fit verdict |
 | `hf-fm list-families` | List model families in local cache |
 | `hf-fm list-files <REPO_ID>` | List remote files (sizes, SHA256) without downloading |
 | `hf-fm search <QUERY>` | Search the HuggingFace Hub for models |
@@ -149,9 +149,17 @@ $ hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instru
   B: casperhansen/llama-3.2-1b-instruct-awq
   ──────────────────────────────────────────────────────────────────────────────────────────────
   A: 371 tensors | B: 370 tensors | only-A: 337 | only-B: 336 | differ: 34 | match: 0
+
+$ hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu
+  ...existing tensor table...
+
+  Model weights:  2.30 GiB  (BF16, 1.24B params)
+  GPU 0:          NVIDIA GeForce RTX 5060 Ti — 15.93 GiB VRAM
+                  free: 13.72 GiB, used: 2.21 GiB
+  Fit:            ✓ 11.41 GiB headroom for weights + KV cache + runtime
 ```
 
-Inspect reads tensor metadata via HTTP Range requests (2 requests per file) — no weight data downloaded. The `--tree` flag shows the hierarchical namespace with numeric sibling groups auto-collapsed to `[0..N]` for structural discovery. Diff compares tensor names, dtypes, and shapes between any two models (remote or cached).
+Inspect reads tensor metadata via HTTP Range requests (2 requests per file) — no weight data downloaded. The `--tree` flag shows the hierarchical namespace with numeric sibling groups auto-collapsed to `[0..N]` for structural discovery. The `--check-gpu` flag adds a one-line GPU-fit verdict using [`hypomnesis`](https://crates.io/crates/hypomnesis) (NVML on Linux/Windows, DXGI on Windows); composes with `--json`. Diff compares tensor names, dtypes, and shapes between any two models (remote or cached).
 
 ## Disk usage
 
