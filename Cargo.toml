@@ -23,7 +23,7 @@ dirs = "6"
 fs2 = "0.4"
 globset = "0.4"
 hf-hub = { version = "0.5", features = ["tokio"] }
-hypomnesis = "0.2"
+hypomnesis = "0.2.1"
 indicatif = { version = "0.18", optional = true }
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -51,6 +51,9 @@ required-features = ["indicatif"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# `test-helpers` exposes `GpuDeviceInfo::builder()` for synthetic fixtures
+# in tests that exercise the fit / miss JSON path. Default-off in runtime.
+hypomnesis = { version = "0.2.1", features = ["test-helpers"] }
 
 [lints.rust]
 unsafe_code = "forbid"

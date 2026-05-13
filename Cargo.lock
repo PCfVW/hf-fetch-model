@@ -822,9 +822,9 @@ dependencies = [
 
 [[package]]
 name = "hypomnesis"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36e500fcf22bd1c8b71ac7723ac0cf80781c24eb01fca91bb48e92f2a72af921"
+checksum = "4a3285148bca58f9b403c5ddddd02df685575cea8be163ac60c09886fab1d49c"
 dependencies = [
  "libloading",
  "thiserror",

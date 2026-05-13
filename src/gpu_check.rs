@@ -196,8 +196,7 @@ pub fn print_gpu_check(
         return;
     };
 
-    // BORROW: explicit .as_deref().unwrap_or for Option<String> → &str with fallback
-    let name = dev.name.as_deref().unwrap_or("unknown GPU");
+    let name = dev.name_or_unknown();
     println!(
         "  GPU {}:          {name} — {} VRAM",
         result.device_index,
@@ -378,6 +377,7 @@ mod tests {
         dominant_dtype_label, format_params, gpu_check_json, sum_tensor_bytes, GpuCheckResult,
     };
     use hf_fetch_model::inspect::TensorInfo;
+    use hypomnesis::GpuDeviceInfo;
 
     fn make_tensor(name: &str, dtype: &str, shape: Vec<usize>, byte_len: u64) -> TensorInfo {
         TensorInfo {
@@ -472,12 +472,88 @@ mod tests {
         assert_eq!(model.get("total_params"), Some(&serde_json::json!(100)));
     }
 
-    // EXPLICIT: Fit / miss path JSON cannot be directly unit-tested today —
-    // `hypomnesis::GpuDeviceInfo` is `#[non_exhaustive]`, so external crates
-    // cannot construct a test fixture. The arithmetic (`free >= weight` →
-    // `fits`, `headroom = free - weight` on hit, `short = weight - free` on
-    // miss) is exercised end-to-end by the manual smoke tests on the
-    // maintainer's RTX 5060 Ti (zeta-2 misses, gemma-4-E2B-it fits). See
-    // `docs/dogfooding-feedbacks/hypomnesis-adoption.md` for the recommended
-    // upstream helper that would unblock these tests.
+    #[test]
+    fn gpu_check_json_fit_path() {
+        // Free 14 GiB ≥ 10 GiB weight → fits: true with 4 GiB headroom.
+        let device = GpuDeviceInfo::builder()
+            .index(0)
+            .name(Some("NVIDIA GeForce RTX 5060 Ti".to_owned()))
+            .total_bytes(16 * 1024 * 1024 * 1024)
+            .free_bytes(14 * 1024 * 1024 * 1024)
+            .used_bytes(2 * 1024 * 1024 * 1024)
+            .build();
+        let result = GpuCheckResult {
+            device_index: 0,
+            device: Some(device),
+            error: None,
+        };
+        let weight_bytes: u64 = 10 * 1024 * 1024 * 1024;
+        let v = gpu_check_json(&result, weight_bytes, "BF16", 5_120_000_000);
+
+        assert_eq!(v.get("device_index"), Some(&serde_json::json!(0)));
+        assert!(v.get("error").is_none());
+        assert_eq!(v.get("fits"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            v.get("headroom_bytes"),
+            Some(&serde_json::json!(4u64 * 1024 * 1024 * 1024))
+        );
+        assert!(v.get("short_bytes").is_none());
+
+        let device_obj = v.get("device").expect("device object present");
+        assert_eq!(
+            device_obj.get("name"),
+            Some(&serde_json::json!("NVIDIA GeForce RTX 5060 Ti"))
+        );
+        assert_eq!(
+            device_obj.get("total_bytes"),
+            Some(&serde_json::json!(16u64 * 1024 * 1024 * 1024))
+        );
+        assert_eq!(
+            device_obj.get("free_bytes"),
+            Some(&serde_json::json!(14u64 * 1024 * 1024 * 1024))
+        );
+        assert_eq!(
+            device_obj.get("used_bytes"),
+            Some(&serde_json::json!(2u64 * 1024 * 1024 * 1024))
+        );
+    }
+
+    #[test]
+    fn gpu_check_json_miss_path() {
+        // Free 13.5 GiB < 25 GiB weight → fits: false, short by 11.5 GiB.
+        // Backend reported no adapter name (e.g. nvidia-smi fallback) — `device.name`
+        // must be absent from the JSON in this branch.
+        let device = GpuDeviceInfo::builder()
+            .index(0)
+            .name(None)
+            .total_bytes(16 * 1024 * 1024 * 1024)
+            .free_bytes(13_u64 * 1024 * 1024 * 1024 + 512 * 1024 * 1024)
+            .used_bytes(2_u64 * 1024 * 1024 * 1024 + 512 * 1024 * 1024)
+            .build();
+        let result = GpuCheckResult {
+            device_index: 0,
+            device: Some(device),
+            error: None,
+        };
+        let weight_bytes: u64 = 25 * 1024 * 1024 * 1024;
+        let v = gpu_check_json(&result, weight_bytes, "U8 + others", 23_910_000_000);
+
+        assert_eq!(v.get("fits"), Some(&serde_json::json!(false)));
+        assert!(v.get("headroom_bytes").is_none());
+        // 25 GiB - 13.5 GiB = 11.5 GiB
+        assert_eq!(
+            v.get("short_bytes"),
+            Some(&serde_json::json!(
+                11_u64 * 1024 * 1024 * 1024 + 512 * 1024 * 1024
+            ))
+        );
+
+        let device_obj = v.get("device").expect("device object present");
+        // `name` absent when the backend didn't report one — serde_json omits the key.
+        assert!(device_obj.get("name").is_none());
+        assert_eq!(
+            device_obj.get("total_bytes"),
+            Some(&serde_json::json!(16u64 * 1024 * 1024 * 1024))
+        );
+    }
 }
