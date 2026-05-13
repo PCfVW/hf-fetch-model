@@ -4792,9 +4792,8 @@ fn run_inspect_single(
 
     if is_gguf && !cached {
         return Err(FetchError::InvalidArgument(format!(
-            "remote GGUF inspect not yet supported (planned for v0.11). \
-             Pass --cached after downloading {filename} with `hf-fm download`, \
-             or use --cached if the file is already in your local cache."
+            "remote GGUF inspect not yet supported (planned for v0.11): \
+             pass --cached after downloading {filename} with `hf-fm download`"
         )));
     }
 

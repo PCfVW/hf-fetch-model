@@ -544,8 +544,9 @@ pub fn inspect_safetensors_cached(
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::SafetensorsHeader`] when the file is not present in
-/// the local cache or when anamnesis's GGUF parser rejects the file.
+/// Returns [`FetchError::SafetensorsHeader`] if the file is not in the cache.
+/// Returns [`FetchError::SafetensorsHeader`] if anamnesis rejects the GGUF
+/// file (malformed header, truncated tensor table, etc.).
 pub fn inspect_gguf_cached(
     repo_id: &str,
     filename: &str,
@@ -555,6 +556,7 @@ pub fn inspect_gguf_cached(
 
     let cached_path = resolve_cached_path(repo_id, rev, filename).ok_or_else(|| {
         FetchError::SafetensorsHeader {
+            // BORROW: explicit .to_owned() for owned String in the error variant
             filename: filename.to_owned(),
             reason: format!("file not found in local cache for {repo_id} ({rev})"),
         }
@@ -564,8 +566,9 @@ pub fn inspect_gguf_cached(
 
     let parsed =
         anamnesis::parse_gguf(&cached_path).map_err(|e| FetchError::SafetensorsHeader {
+            // BORROW: explicit .to_owned() for owned String in the error variant
             filename: filename.to_owned(),
-            reason: format!("GGUF parse failed: {e}"),
+            reason: format!("failed to parse GGUF: {e}"),
         })?;
 
     let tensors: Vec<TensorInfo> = parsed
@@ -575,7 +578,8 @@ pub fn inspect_gguf_cached(
             let start = info.data_offset;
             let end = info.byte_len.map_or(start, |b| start.saturating_add(b));
             TensorInfo {
-                // BORROW: explicit .clone() for owned String
+                // BORROW: explicit .clone() / .to_string() to materialise owned
+                // String + Vec<usize> from anamnesis's borrowed metadata
                 name: info.name.clone(),
                 dtype: info.dtype.to_string(),
                 shape: info.shape.clone(),
@@ -590,15 +594,18 @@ pub fn inspect_gguf_cached(
     let mut metadata: HashMap<String, String> = parsed
         .metadata()
         .iter()
+        // BORROW: explicit .clone() to materialise an owned String key from
+        // the borrowed HashMap iteration
         .filter_map(|(k, v)| stringify_gguf_scalar(v).map(|s| (k.clone(), s)))
         .collect();
+    // BORROW: explicit .to_owned() for owned String keys
     metadata.insert("gguf.version".to_owned(), parsed.version().to_string());
     metadata.insert("gguf.alignment".to_owned(), parsed.alignment().to_string());
 
     Ok(SafetensorsHeaderInfo {
         tensors,
         metadata: Some(metadata),
-        // EXPLICIT: GGUF has no discrete "header size" like safetensors's
+        // GGUF has no discrete "header size" like safetensors's
         // u64-length-prefix + JSON. The value is left at 0 here; consumers
         // that care can derive an approximation from `file_size` minus the
         // tensor byte sum. The `Metadata:` block's `gguf.version` /
@@ -608,18 +615,18 @@ pub fn inspect_gguf_cached(
     })
 }
 
-/// Stringifies a [`anamnesis::parse::gguf::GgufMetadataValue`] scalar.
+/// Stringifies a scalar `GgufMetadataValue` from anamnesis.
 ///
 /// Returns `None` for array variants (potentially huge — vocab tables, merges
 /// lists) and for any future `#[non_exhaustive]` variants we don't yet
 /// recognise. Surfaced through the `Metadata:` block in `inspect` output by
 /// [`inspect_gguf_cached`].
 //
-// EXHAUSTIVE: `GgufMetadataValue` is `#[non_exhaustive]`. The explicit
-// `V::Array(_)` arm and the `_ =>` catch-all both return `None`, but they
-// document different intents — "array variants are deliberately skipped"
-// vs "future unknown variants fall through". Clippy's `match_same_arms`
-// flags the bodies as identical; the duplication is intentional.
+// `GgufMetadataValue` is `#[non_exhaustive]`. The explicit `V::Array(_)` arm
+// and the `_ =>` catch-all both return `None`, but they document different
+// intents — "array variants are deliberately skipped" vs "future unknown
+// variants fall through". Clippy's `match_same_arms` flags the bodies as
+// identical; the duplication is intentional.
 #[allow(clippy::match_same_arms)]
 fn stringify_gguf_scalar(value: &anamnesis::parse::gguf::GgufMetadataValue) -> Option<String> {
     use anamnesis::parse::gguf::GgufMetadataValue as V;
