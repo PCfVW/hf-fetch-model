@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`docs/cli-reference.md` updated for v0.10.2's GGUF inspect dispatch** — three corrective edits caught after the release. (a) Subcommands table's `inspect` row now reads "Inspect `.safetensors` file headers (remote or cached) or `.gguf` files (cached only, since v0.10.2)" instead of safetensors-only. (b) `## Inspect examples` section gains a one-sentence preamble flagging multi-format coverage. (c) A `hf-fm inspect <repo> <file>.gguf --cached` example added to the Inspect-examples block (using `bartowski/Mistral-7B-Instruct-v0.3-GGUF` as the worked example — same repo the v0.10.2 smoke test used). The corresponding README and FAQ entries were already correct as of [`a7e635e`](https://github.com/PCfVW/hf-fetch-model/commit/a7e635e); the cli-reference omissions slipped through the doc-rollout commit and only surfaced in the post-v0.10.2 audit.
+
 ## [0.10.2] — Ecosystem-adoption release
 
 ### Added

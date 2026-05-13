@@ -45,7 +45,7 @@ cargo install hf-fetch-model --features cli
 | `cache delete <REPO_ID\|N>` | Delete a cached model (entire `models--org--name/` directory) |
 | `cache path <REPO_ID\|N>` | Print the snapshot directory path for scripting |
 | `cache verify <REPO_ID\|N>` | Re-verify SHA256 digests of cached files against HuggingFace LFS metadata |
-| `inspect <REPO_ID> [FILENAME]` | Inspect safetensors file headers (tensor names, shapes, dtypes); auto-detects PEFT adapter config |
+| `inspect <REPO_ID> [FILENAME]` | Inspect `.safetensors` file headers (remote or cached) or `.gguf` files (cached only, since v0.10.2) — tensor names, shapes, dtypes; auto-detects PEFT adapter config |
 | `list-families` | List model families (`model_type`) in local cache |
 | `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
 | `search <QUERY>` | Search the HuggingFace Hub for models (by downloads) |
@@ -177,7 +177,7 @@ hf-fm info mistralai/Ministral-3-3B-Instruct-2512 --revision v1.0
 
 ## Inspect examples
 
-For a narrative walkthrough using a real 4-shard model, see the [Inspect tutorial](tutorials/inspect-before-downloading.md).
+For a narrative walkthrough using a real 4-shard model, see the [Inspect tutorial](tutorials/inspect-before-downloading.md). `inspect` covers `.safetensors` (remote or cached) and `.gguf` (cached only as of v0.10.2; remote `.gguf` is planned for v0.11); other tensor formats are rejected with a clear error.
 
 ```sh
 # Inspect a single safetensors file (cache-first, falls back to HTTP Range requests)
@@ -230,6 +230,9 @@ hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu 1
 
 # JSON composition: gpu_check rides alongside the existing header schema
 hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu --json
+
+# Inspect a cached .gguf file (v0.10.2+, anamnesis-powered; remote .gguf planned for v0.11)
+hf-fm inspect bartowski/Mistral-7B-Instruct-v0.3-GGUF Mistral-7B-Instruct-v0.3-Q4_K_M.gguf --cached
 ```
 
 ## Diff examples
