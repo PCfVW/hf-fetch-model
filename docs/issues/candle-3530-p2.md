@@ -1,7 +1,7 @@
 # candle #3530 — reply 2 (draft)
 
 - **Target issue:** https://github.com/huggingface/candle/issues/3530
-- **Status:** Draft (not yet posted). The body uses `inspect --dtypes` which has shipped since v0.9.x; no v0.10.2 dependency. **Pre-post checklist:** replace the `(candle-3530-p1.md)` relative link to p1 with the actual GitHub `#issuecomment-` URL once p1's comment ID is known.
+- **Status:** Draft (not yet posted). The body uses `inspect --dtypes` which has shipped since v0.9.x; no v0.10.2 dependency. The body's link back to p1 points at the actual GitHub comment (`#issuecomment-4431550797`) so the reply is post-ready as-is; the metadata block above still uses the archive-relative `(candle-3530-p1.md)` link for local-browsing convenience.
 - **Context:** Sempervictus replied to [p1](candle-3530-p1.md) without sharing the repo, so we guessed it from the crash log fingerprint (hybrid Mamba allocation, 28 slots, 36 linear-attention layers, NVFP4 on Spark / SM121) — the four constraints narrow to a single public candidate. Running `hf-fm inspect --dtypes` on that candidate gives ground-truth on-disk numbers that, **assuming the guess is right**, correct his "FP4 = ½ × param count" heuristic (47.24 GiB, not ~40 GiB) and close branch B of p1 (mmap-then-copy / 2× bounds counting): the 47.24 GiB model + 18 GiB KV pool + 2 GiB Mamba state + ~14 GiB runtime accounts for `used: 81 GB` as a single, honest accounting. The bug locus then narrows to what sempervictus himself surfaced: the KV allocator caps at 18 GB on SM121 while 38 GB of UMA sits genuinely free — and *that* conclusion is independent of the guess.
 - **Outcome:** —
 - **Lesson / Leverage angle:** First reply in the archive that demonstrates `inspect --dtypes` on a real NVFP4 model and *names* a candidate public repo from a crash log alone. The ~30%-overhead-on-top-of-FP4-bulk fact (block-scaling factors + BF16 norms + tiny F32 scalars adding up to ~1.3× the FP4 weight bytes) is a general NVFP4 truth worth carrying forward to other replies. The identification reasoning chain — fingerprinting an architecture from a vllm-rs allocator log — is reusable when the OP omits the repo: it narrows the candidate set rather than uniquely identifying, often to a single public match. In an era where bug reports arrive with less reproducer detail than they used to (faster posting cadence, less hand-holding), that narrowing is the difference between "we can compute concrete numbers" and "we're stuck waiting for the OP" — the technique trades certainty for traction, which is the right trade when traction is the limiting factor.
@@ -48,7 +48,7 @@ So on NVFP4 builds, expect **~+30% on top of the FP4 bulk** for the scaling + no
 
 ### 2. Your `used: 81 GB` reconciles as a single accounting — no double-mapping
 
-With the corrected model size, your memory snapshot adds up cleanly without invoking branch B of my [p1](candle-3530-p1.md) (mmap-then-copy / 2× bounds counting):
+With the corrected model size, your memory snapshot adds up cleanly without invoking branch B of [my earlier reply](https://github.com/huggingface/candle/issues/3530#issuecomment-4431550797) (mmap-then-copy / 2× bounds counting):
 
 | Component | Size | Source |
 |---|---|---|
