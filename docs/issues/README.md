@@ -67,3 +67,5 @@ When archiving, **flag anything that's not 100% faithful or not 100% correct**:
 | [candle-3448-p2.md](candle-3448-p2.md) | candle #3448 — shape mismatch | Posted, superseded by p3 |
 | [candle-3448-p3.md](candle-3448-p3.md) | candle #3448 — `use_double_wide_mlp` bug | Posted |
 | [candle-3401-p1.md](candle-3401-p1.md) | candle #3401 — LightOnOCR-2-1B | Posted |
+| [candle-3530-p1.md](candle-3530-p1.md) | candle #3530 — 80B NVFP4 fit / double-mapping diagnostic ask | Posted |
+| [candle-3530-p2.md](candle-3530-p2.md) | candle #3530 — best-guess repo identification + corrected on-disk math | Draft |
