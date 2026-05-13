@@ -293,8 +293,17 @@ enum Commands {
         #[arg(long)]
         filter: Option<String>,
         /// Show only the summary line (counts per category).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "dtypes")]
         summary: bool,
+        /// Show per-dtype histograms side-by-side instead of the per-tensor body.
+        ///
+        /// Aggregates tensors by dtype on both sides; prints two columns
+        /// (A: Tensors, A: Size; B: Tensors, B: Size) plus a Δ Size column.
+        /// Composes with --filter (histograms aggregate over filtered tensors
+        /// only). Conflicts with --summary (incoherent intents: one-line total
+        /// vs per-dtype table).
+        #[arg(long, conflicts_with = "summary")]
+        dtypes: bool,
         /// Output the full diff as JSON.
         #[arg(long)]
         json: bool,
@@ -717,6 +726,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             cached,
             filter,
             summary,
+            dtypes,
             json,
         }) => run_diff(
             repo_a.as_str(),
@@ -727,6 +737,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             cached,
             filter.as_deref(),
             summary,
+            dtypes,
             json,
         ),
         // BORROW: explicit .as_str() for String → &str conversion
@@ -3318,6 +3329,7 @@ fn run_diff(
     cached: bool,
     filter: Option<&str>,
     summary: bool,
+    dtypes: bool,
     json: bool,
 ) -> Result<(), FetchError> {
     let tensors_a = collect_repo_tensors(repo_a, revision_a, token, cached)?;
@@ -3386,7 +3398,15 @@ fn run_diff(
     if json {
         return print_diff_json(
             repo_a, repo_b, &tensors_a, &tensors_b, &only_a, &only_b, &differ, &matching, filter,
+            dtypes,
         );
+    }
+
+    // --dtypes mode replaces the per-tensor body + standard summary with a
+    // side-by-side per-dtype histogram (header, table, own footer).
+    if dtypes {
+        print_diff_dtypes(repo_a, repo_b, &tensors_a, &tensors_b, filter);
+        return Ok(());
     }
 
     // Print header.
@@ -3502,13 +3522,42 @@ struct DiffTensorEntry {
     b: Option<DiffTensorSide>,
 }
 
-/// One side of a diff entry (dtype + shape).
+/// One side of a diff entry (dtype + shape + byte count).
 #[derive(serde::Serialize)]
 struct DiffTensorSide {
     /// Element dtype string.
     dtype: String,
     /// Tensor shape.
     shape: Vec<usize>,
+    /// On-disk byte count from the safetensors header; powers downstream `jq` recipes.
+    byte_count: u64,
+}
+
+/// One per-dtype row in a `--dtypes` histogram (owned, ready for serialization).
+///
+/// Owned mirror of [`DtypeGroup`] that doesn't borrow its dtype — required
+/// because [`DiffResult`] is constructed as an owned value before being
+/// serialized, and threading a lifetime through it for one borrowed field
+/// would propagate complexity for no gain.
+#[derive(serde::Serialize)]
+struct DiffDtypeGroup {
+    /// Element dtype string.
+    dtype: String,
+    /// Number of tensors of this dtype on this side.
+    tensors: usize,
+    /// Sum of element counts (`num_elements()`) across tensors of this dtype.
+    params: u64,
+    /// Sum of on-disk byte counts across tensors of this dtype.
+    bytes: u64,
+}
+
+/// Per-side dtype histograms emitted under `--dtypes --json`.
+#[derive(serde::Serialize)]
+struct DtypeHistograms {
+    /// Histogram for repo A, sorted by `bytes` descending.
+    a: Vec<DiffDtypeGroup>,
+    /// Histogram for repo B, sorted by `bytes` descending.
+    b: Vec<DiffDtypeGroup>,
 }
 
 /// Serializable diff result for `--json` output.
@@ -3529,6 +3578,9 @@ struct DiffResult {
     /// Filter pattern applied, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     filter: Option<String>,
+    /// Per-side dtype histograms when `--dtypes` is set; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dtype_histograms: Option<DtypeHistograms>,
 }
 
 /// Prints diff results as JSON.
@@ -3543,6 +3595,7 @@ fn print_diff_json(
     differ: &[&str],
     matching: &[&str],
     filter: Option<&str>,
+    dtypes: bool,
 ) -> Result<(), FetchError> {
     let make_entry = |name: &str,
                       a: Option<&inspect::TensorInfo>,
@@ -3554,13 +3607,26 @@ fn print_diff_json(
                 // BORROW: explicit .clone() for owned String
                 dtype: t.dtype.clone(),
                 shape: t.shape.clone(),
+                byte_count: t.byte_len(),
             }),
             b: b.map(|t| DiffTensorSide {
                 // BORROW: explicit .clone() for owned String
                 dtype: t.dtype.clone(),
                 shape: t.shape.clone(),
+                byte_count: t.byte_len(),
             }),
         }
+    };
+
+    // EXPLICIT: --dtypes populates dtype_histograms; otherwise the field is omitted via skip_serializing_if.
+    let dtype_histograms = if dtypes {
+        let (rows_a, rows_b) = aggregate_diff_dtypes(tensors_a, tensors_b, filter);
+        Some(DtypeHistograms {
+            a: rows_a,
+            b: rows_b,
+        })
+    } else {
+        None
     };
 
     let result = DiffResult {
@@ -3580,12 +3646,290 @@ fn print_diff_json(
             .collect(),
         matching_count: matching.len(),
         filter: filter.map(str::to_owned),
+        dtype_histograms,
     };
 
     let output = serde_json::to_string_pretty(&result)
         .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
     println!("{output}");
     Ok(())
+}
+
+/// Design target for the `--dtypes` histogram width on a default terminal.
+///
+/// Informational only — the renderer uses dynamic widths and the table is
+/// allowed to grow wider when dtype names or large byte values demand it.
+/// Guarded by `diff_dtypes_canonical_case_fits_design_width` so a future
+/// column-format change that blows past the budget on the canonical scaled-
+/// sibling case is caught at test time. Natural breakpoint for a future
+/// `--compact` mode or terminal-width-aware rendering.
+#[allow(dead_code)] // EXPLICIT: only the test target references this today; the const is also a documentation anchor for a future `--compact` mode.
+const DIFF_DTYPES_DESIGN_WIDTH: usize = 75;
+
+/// Column widths for the `diff --dtypes` histogram, computed from the data.
+///
+/// Returned by [`diff_dtypes_column_widths`]; consumed by [`print_diff_dtypes`]
+/// for `println!` width specs, and by the budget test to compare
+/// [`Self::total_width`] against [`DIFF_DTYPES_DESIGN_WIDTH`].
+struct DiffDtypesColumnWidths {
+    /// Width of the dtype-name column.
+    dtype: usize,
+    /// Width of the A-tensors count column.
+    a_tensors: usize,
+    /// Width of the A-size column (formatted byte string).
+    a_size: usize,
+    /// Width of the B-tensors count column.
+    b_tensors: usize,
+    /// Width of the B-size column (formatted byte string).
+    b_size: usize,
+    /// Width of the signed Δ-size column.
+    delta: usize,
+}
+
+impl DiffDtypesColumnWidths {
+    /// Total characters consumed by one full row: indent + columns + gaps.
+    ///
+    /// Layout has six 2-char gaps (one leading indent, five between the six
+    /// columns) plus the six column widths themselves.
+    fn total_width(&self) -> usize {
+        2 + self.dtype
+            + 2
+            + self.a_tensors
+            + 2
+            + self.a_size
+            + 2
+            + self.b_tensors
+            + 2
+            + self.b_size
+            + 2
+            + self.delta
+    }
+}
+
+/// Formats a signed byte delta with a leading `+` / `-` sign.
+///
+/// Zero renders as `format_size(0)` without a sign. Used for the `Δ Size`
+/// column in the `diff --dtypes` histogram footer.
+fn format_size_delta(delta: i64) -> String {
+    match delta.cmp(&0) {
+        std::cmp::Ordering::Less => format!("-{}", format_size(delta.unsigned_abs())),
+        std::cmp::Ordering::Greater => format!("+{}", format_size(delta.unsigned_abs())),
+        std::cmp::Ordering::Equal => format_size(0),
+    }
+}
+
+/// Formats a signed tensor-count delta with a leading sign.
+///
+/// Zero renders as `"0"` without a sign. Used in the histogram footer.
+fn format_count_delta(delta: i64) -> String {
+    if delta == 0 {
+        "0".to_owned()
+    } else {
+        format!("{delta:+}")
+    }
+}
+
+/// Aggregates per-dtype histograms for both repos, optionally filtered by name.
+///
+/// Returns `(rows_a, rows_b)` where each `Vec<DiffDtypeGroup>` is sorted by
+/// byte count descending. When `filter` is `Some(p)`, only tensors whose name
+/// contains `p` contribute to either side's histogram. Pure helper — no I/O.
+fn aggregate_diff_dtypes(
+    tensors_a: &HashMap<String, inspect::TensorInfo>,
+    tensors_b: &HashMap<String, inspect::TensorInfo>,
+    filter: Option<&str>,
+) -> (Vec<DiffDtypeGroup>, Vec<DiffDtypeGroup>) {
+    let collect = |map: &HashMap<String, inspect::TensorInfo>| -> Vec<DiffDtypeGroup> {
+        let filtered = map
+            .iter()
+            // `is_none_or` keeps the tensor when filter is None, or when its
+            // name contains the filter pattern. Stable since Rust 1.82.
+            .filter(|(name, _)| filter.is_none_or(|p| name.contains(p)))
+            .map(|(_, t)| t);
+        let mut rows: Vec<DiffDtypeGroup> = compute_dtype_groups(filtered)
+            .into_iter()
+            .map(|(dtype, tensors, params, bytes)| DiffDtypeGroup {
+                dtype: dtype.to_owned(),
+                tensors,
+                params,
+                bytes,
+            })
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.bytes));
+        rows
+    };
+    (collect(tensors_a), collect(tensors_b))
+}
+
+/// Computes dynamic column widths for the `diff --dtypes` histogram.
+///
+/// Each column floors at its header width (e.g. `"A Tensors".chars().count()`)
+/// and grows to fit the widest data cell. Em-dash placeholders for missing
+/// dtypes count as 1 char (single codepoint).
+fn diff_dtypes_column_widths(
+    rows_a: &[DiffDtypeGroup],
+    rows_b: &[DiffDtypeGroup],
+) -> DiffDtypesColumnWidths {
+    let mut dtype_w = "Dtype".chars().count();
+    let mut a_tensors_w = "A Tensors".chars().count();
+    let mut a_size_w = "A Size".chars().count();
+    let mut b_tensors_w = "B Tensors".chars().count();
+    let mut b_size_w = "B Size".chars().count();
+    let mut delta_w = "\u{0394} Size".chars().count(); // "Δ Size"
+
+    // Union of dtype names present in either side.
+    let mut all_dtypes: BTreeSet<&str> = BTreeSet::new();
+    for r in rows_a {
+        all_dtypes.insert(r.dtype.as_str());
+    }
+    for r in rows_b {
+        all_dtypes.insert(r.dtype.as_str());
+    }
+
+    for dtype in &all_dtypes {
+        dtype_w = dtype_w.max(dtype.chars().count());
+        let a = rows_a.iter().find(|r| r.dtype == *dtype);
+        let b = rows_b.iter().find(|r| r.dtype == *dtype);
+        let a_tensors_str = a.map_or_else(|| "\u{2014}".to_owned(), |r| r.tensors.to_string());
+        let b_tensors_str = b.map_or_else(|| "\u{2014}".to_owned(), |r| r.tensors.to_string());
+        let a_size_str = a.map_or_else(|| "\u{2014}".to_owned(), |r| format_size(r.bytes));
+        let b_size_str = b.map_or_else(|| "\u{2014}".to_owned(), |r| format_size(r.bytes));
+        a_tensors_w = a_tensors_w.max(a_tensors_str.chars().count());
+        b_tensors_w = b_tensors_w.max(b_tensors_str.chars().count());
+        a_size_w = a_size_w.max(a_size_str.chars().count());
+        b_size_w = b_size_w.max(b_size_str.chars().count());
+        // CAST: u64 → i64 for delta computation; clipping to i64::MAX is safe — tensor
+        // byte counts never approach 9.2 EiB in practice.
+        let a_bytes_i = a.map_or(0_i64, |r| i64::try_from(r.bytes).unwrap_or(i64::MAX));
+        let b_bytes_i = b.map_or(0_i64, |r| i64::try_from(r.bytes).unwrap_or(i64::MAX));
+        let delta = b_bytes_i.saturating_sub(a_bytes_i);
+        delta_w = delta_w.max(format_size_delta(delta).chars().count());
+    }
+
+    DiffDtypesColumnWidths {
+        dtype: dtype_w,
+        a_tensors: a_tensors_w,
+        a_size: a_size_w,
+        b_tensors: b_tensors_w,
+        b_size: b_size_w,
+        delta: delta_w,
+    }
+}
+
+/// Renders the side-by-side per-dtype histogram for `diff --dtypes`.
+///
+/// Output shape (data-driven widths):
+///
+/// ```text
+///   A: org/model-80B
+///   B: org/model-35B
+///
+///   Dtype  A Tensors   A Size     B Tensors   B Size     Δ Size
+///   BF16         630   6.72 GiB         126   1.34 GiB   -5.38 GiB
+///   U8           192  18.91 GiB         192  14.30 GiB   -4.61 GiB
+///   ───────────────────────────────────────────────────────────────
+///   A: 822 tensors, 25.63 GiB | B: 318 tensors, 15.64 GiB | Δ: -504 tensors, -9.99 GiB
+/// ```
+// EXPLICIT: clippy::similar_names — diff-shaped function inherently has A-side / B-side
+// mirrored bindings (rows_a / rows_b, total_a_tensors / total_b_tensors, ...). The
+// pairing is the function's *purpose*; renaming would obscure intent.
+#[allow(clippy::similar_names)]
+fn print_diff_dtypes(
+    repo_a: &str,
+    repo_b: &str,
+    tensors_a: &HashMap<String, inspect::TensorInfo>,
+    tensors_b: &HashMap<String, inspect::TensorInfo>,
+    filter: Option<&str>,
+) {
+    let (rows_a, rows_b) = aggregate_diff_dtypes(tensors_a, tensors_b, filter);
+    let w = diff_dtypes_column_widths(&rows_a, &rows_b);
+
+    let dw = w.dtype;
+    let atw = w.a_tensors;
+    let asw = w.a_size;
+    let btw = w.b_tensors;
+    let bsw = w.b_size;
+    let dlw = w.delta;
+
+    println!("  A: {repo_a}");
+    println!("  B: {repo_b}");
+    println!();
+
+    println!(
+        "  {:<dw$}  {:>atw$}  {:>asw$}  {:>btw$}  {:>bsw$}  {:>dlw$}",
+        "Dtype", "A Tensors", "A Size", "B Tensors", "B Size", "\u{0394} Size",
+    );
+
+    // Unified dtype order: union, sorted by max(A bytes, B bytes) descending.
+    let mut all_dtypes: Vec<&str> = rows_a
+        .iter()
+        .chain(rows_b.iter())
+        .map(|r| r.dtype.as_str())
+        .collect::<BTreeSet<&str>>()
+        .into_iter()
+        .collect();
+    all_dtypes.sort_by_key(|dtype| {
+        let a_bytes = rows_a
+            .iter()
+            .find(|r| r.dtype == *dtype)
+            .map_or(0, |r| r.bytes);
+        let b_bytes = rows_b
+            .iter()
+            .find(|r| r.dtype == *dtype)
+            .map_or(0, |r| r.bytes);
+        std::cmp::Reverse(a_bytes.max(b_bytes))
+    });
+
+    for dtype in &all_dtypes {
+        let a = rows_a.iter().find(|r| r.dtype == *dtype);
+        let b = rows_b.iter().find(|r| r.dtype == *dtype);
+        let a_tensors = a.map_or_else(|| "\u{2014}".to_owned(), |r| r.tensors.to_string());
+        let b_tensors = b.map_or_else(|| "\u{2014}".to_owned(), |r| r.tensors.to_string());
+        let a_size = a.map_or_else(|| "\u{2014}".to_owned(), |r| format_size(r.bytes));
+        let b_size = b.map_or_else(|| "\u{2014}".to_owned(), |r| format_size(r.bytes));
+        // CAST: u64 → i64 clipping at i64::MAX; tensor bytes never approach 9.2 EiB.
+        let a_bytes_i = a.map_or(0_i64, |r| i64::try_from(r.bytes).unwrap_or(i64::MAX));
+        let b_bytes_i = b.map_or(0_i64, |r| i64::try_from(r.bytes).unwrap_or(i64::MAX));
+        let delta_str = format_size_delta(b_bytes_i.saturating_sub(a_bytes_i));
+        println!(
+            "  {dtype:<dw$}  {a_tensors:>atw$}  {a_size:>asw$}  {b_tensors:>btw$}  {b_size:>bsw$}  {delta_str:>dlw$}",
+        );
+    }
+
+    // Footer separator: row width minus the 2-char leading indent (which the
+    // `"  "` literal in the println below contributes).
+    println!("  {}", "\u{2500}".repeat(w.total_width().saturating_sub(2)));
+
+    // Footer totals.
+    let total_a_tensors: usize = rows_a.iter().map(|r| r.tensors).sum();
+    let total_b_tensors: usize = rows_b.iter().map(|r| r.tensors).sum();
+    let total_a_bytes: u64 = rows_a.iter().map(|r| r.bytes).sum();
+    let total_b_bytes: u64 = rows_b.iter().map(|r| r.bytes).sum();
+    // CAST: usize → i64 for tensor-count delta; clipping at i64::MAX is safe.
+    let delta_tensors = i64::try_from(total_b_tensors)
+        .unwrap_or(i64::MAX)
+        .saturating_sub(i64::try_from(total_a_tensors).unwrap_or(i64::MAX));
+    // CAST: u64 → i64 for byte delta; clipping at i64::MAX is safe.
+    let delta_bytes = i64::try_from(total_b_bytes)
+        .unwrap_or(i64::MAX)
+        .saturating_sub(i64::try_from(total_a_bytes).unwrap_or(i64::MAX));
+
+    let footer_core = format!(
+        "  A: {} {}, {} | B: {} {}, {} | \u{0394}: {} tensors, {}",
+        total_a_tensors,
+        pluralize(total_a_tensors, "tensor", "tensors"),
+        format_size(total_a_bytes),
+        total_b_tensors,
+        pluralize(total_b_tensors, "tensor", "tensors"),
+        format_size(total_b_bytes),
+        format_count_delta(delta_tensors),
+        format_size_delta(delta_bytes),
+    );
+    if let Some(p) = filter {
+        println!("{footer_core} (filter: {p:?})");
+    } else {
+        println!("{footer_core}");
+    }
 }
 
 /// Returns whether `filename` ends in `.safetensors` (case-insensitive).
@@ -5158,8 +5502,13 @@ struct DtypeSummaryJson<'a> {
 
 /// Groups tensors by dtype and returns rows sorted by tensor count descending.
 ///
-/// Each row is `(dtype, count, params, bytes)`.
-fn compute_dtype_groups(tensors: &[inspect::TensorInfo]) -> Vec<(&str, usize, u64, u64)> {
+/// Each row is `(dtype, count, params, bytes)`. Generic over any iterator of
+/// `&TensorInfo` so both slice callers (`inspect` paths) and HashMap-values
+/// callers (`diff` paths) can use it without an intermediate `Vec`.
+fn compute_dtype_groups<'a, I>(tensors: I) -> Vec<(&'a str, usize, u64, u64)>
+where
+    I: IntoIterator<Item = &'a inspect::TensorInfo>,
+{
     let mut groups: HashMap<&str, (usize, u64, u64)> = HashMap::new();
     for t in tensors {
         let entry = groups
@@ -6604,5 +6953,231 @@ mod tests {
         // unknown/b evicted first (None < Some).
         assert_eq!(plan.evict.len(), 1);
         assert_eq!(plan.evict[0].repo_id, "unknown/b");
+    }
+
+    // ---------- diff --dtypes ----------
+
+    fn make_tensor_info(
+        name: &str,
+        dtype: &str,
+        shape: Vec<usize>,
+        byte_len: u64,
+    ) -> inspect::TensorInfo {
+        inspect::TensorInfo {
+            name: name.to_owned(),
+            dtype: dtype.to_owned(),
+            shape,
+            data_offsets: (0, byte_len),
+        }
+    }
+
+    #[test]
+    fn compute_dtype_groups_generic_works_with_hashmap_values() {
+        let mut map: HashMap<String, inspect::TensorInfo> = HashMap::new();
+        map.insert(
+            "a".to_owned(),
+            make_tensor_info("a", "BF16", vec![100, 100], 20_000),
+        );
+        map.insert(
+            "b".to_owned(),
+            make_tensor_info("b", "BF16", vec![50, 50], 5_000),
+        );
+        map.insert(
+            "c".to_owned(),
+            make_tensor_info("c", "F32", vec![10, 10], 400),
+        );
+
+        let vec_view: Vec<inspect::TensorInfo> = map.values().cloned().collect();
+        let from_slice = compute_dtype_groups(&vec_view);
+        let from_iter = compute_dtype_groups(map.values());
+
+        assert_eq!(from_slice.len(), from_iter.len());
+        for (dt, cnt, params, bytes) in &from_slice {
+            let row = from_iter
+                .iter()
+                .find(|r| r.0 == *dt)
+                .expect("dtype present in iter-based aggregation");
+            assert_eq!(row.1, *cnt);
+            assert_eq!(row.2, *params);
+            assert_eq!(row.3, *bytes);
+        }
+    }
+
+    #[test]
+    fn aggregate_diff_dtypes_scaled_sibling() {
+        // A and B share the same dtype mix; A is larger.
+        let mut a: HashMap<String, inspect::TensorInfo> = HashMap::new();
+        a.insert(
+            "w1".to_owned(),
+            make_tensor_info("w1", "BF16", vec![1000, 1000], 2_000_000),
+        );
+        a.insert(
+            "w2".to_owned(),
+            make_tensor_info("w2", "BF16", vec![1000, 1000], 2_000_000),
+        );
+        a.insert(
+            "g".to_owned(),
+            make_tensor_info("g", "F32", vec![1000], 4_000),
+        );
+
+        let mut b: HashMap<String, inspect::TensorInfo> = HashMap::new();
+        b.insert(
+            "w1".to_owned(),
+            make_tensor_info("w1", "BF16", vec![500, 500], 500_000),
+        );
+        b.insert(
+            "g".to_owned(),
+            make_tensor_info("g", "F32", vec![500], 2_000),
+        );
+
+        let (rows_a, rows_b) = aggregate_diff_dtypes(&a, &b, None);
+        let dtypes_a: BTreeSet<&str> = rows_a.iter().map(|r| r.dtype.as_str()).collect();
+        let dtypes_b: BTreeSet<&str> = rows_b.iter().map(|r| r.dtype.as_str()).collect();
+        assert_eq!(dtypes_a, dtypes_b);
+        assert!(dtypes_a.contains("BF16"));
+        assert!(dtypes_a.contains("F32"));
+        let a_bf16 = rows_a
+            .iter()
+            .find(|r| r.dtype == "BF16")
+            .expect("BF16 present in A");
+        let b_bf16 = rows_b
+            .iter()
+            .find(|r| r.dtype == "BF16")
+            .expect("BF16 present in B");
+        assert!(a_bf16.bytes > b_bf16.bytes);
+        assert!(a_bf16.tensors > b_bf16.tensors);
+    }
+
+    #[test]
+    fn aggregate_diff_dtypes_architectural_variant() {
+        // A has an F8_E4M3 tensor that B doesn't — the architectural-variant signature.
+        let mut a: HashMap<String, inspect::TensorInfo> = HashMap::new();
+        a.insert(
+            "w".to_owned(),
+            make_tensor_info("w", "BF16", vec![1000, 1000], 2_000_000),
+        );
+        a.insert(
+            "expert".to_owned(),
+            make_tensor_info("expert", "F8_E4M3", vec![100, 100], 10_000),
+        );
+
+        let mut b: HashMap<String, inspect::TensorInfo> = HashMap::new();
+        b.insert(
+            "w".to_owned(),
+            make_tensor_info("w", "BF16", vec![1000, 1000], 2_000_000),
+        );
+
+        let (rows_a, rows_b) = aggregate_diff_dtypes(&a, &b, None);
+        let dtypes_a: BTreeSet<&str> = rows_a.iter().map(|r| r.dtype.as_str()).collect();
+        let dtypes_b: BTreeSet<&str> = rows_b.iter().map(|r| r.dtype.as_str()).collect();
+        assert!(dtypes_a.contains("F8_E4M3"));
+        assert!(!dtypes_b.contains("F8_E4M3"));
+        // Both sides share BF16.
+        assert!(dtypes_a.contains("BF16"));
+        assert!(dtypes_b.contains("BF16"));
+    }
+
+    #[test]
+    fn aggregate_diff_dtypes_with_filter() {
+        let mut a: HashMap<String, inspect::TensorInfo> = HashMap::new();
+        a.insert(
+            "expert.w".to_owned(),
+            make_tensor_info("expert.w", "BF16", vec![100], 200),
+        );
+        a.insert(
+            "attn.q".to_owned(),
+            make_tensor_info("attn.q", "BF16", vec![1000], 2_000),
+        );
+
+        let mut b: HashMap<String, inspect::TensorInfo> = HashMap::new();
+        b.insert(
+            "expert.w".to_owned(),
+            make_tensor_info("expert.w", "BF16", vec![50], 100),
+        );
+        b.insert(
+            "attn.q".to_owned(),
+            make_tensor_info("attn.q", "BF16", vec![500], 1_000),
+        );
+
+        let (rows_a, rows_b) = aggregate_diff_dtypes(&a, &b, Some("expert"));
+        // Filter retains only "expert.w" on both sides.
+        assert_eq!(rows_a.len(), 1);
+        assert_eq!(rows_b.len(), 1);
+        assert_eq!(rows_a[0].dtype, "BF16");
+        assert_eq!(rows_a[0].tensors, 1);
+        assert_eq!(rows_a[0].bytes, 200);
+        assert_eq!(rows_b[0].tensors, 1);
+        assert_eq!(rows_b[0].bytes, 100);
+    }
+
+    #[test]
+    fn diff_tensor_side_serializes_byte_count() {
+        // The enrichment that powers the jq recipe planned for commit 3 of v0.10.2.
+        let side = DiffTensorSide {
+            dtype: "BF16".to_owned(),
+            shape: vec![10, 10],
+            byte_count: 200,
+        };
+        let json_str = serde_json::to_string(&side).expect("DiffTensorSide serializes cleanly");
+        assert!(
+            json_str.contains("\"byte_count\":200"),
+            "expected byte_count in JSON, got: {json_str}"
+        );
+        assert!(json_str.contains("\"dtype\":\"BF16\""));
+        assert!(json_str.contains("\"shape\":[10,10]"));
+    }
+
+    #[test]
+    fn diff_dtypes_canonical_case_fits_design_width() {
+        // Canonical scaled-sibling case for the candle #3530 use case:
+        // three dtypes (BF16, U8, F32), GiB-range sizes. If a future column-format
+        // change blows past the 75-char design budget on this shape, fail here so
+        // the regression is caught before users see it.
+        let rows_a = vec![
+            DiffDtypeGroup {
+                dtype: "BF16".to_owned(),
+                tensors: 630,
+                params: 3_610_000_000,
+                bytes: 7_213_120_000,
+            },
+            DiffDtypeGroup {
+                dtype: "U8".to_owned(),
+                tensors: 192,
+                params: 20_300_000_000,
+                bytes: 20_303_437_824,
+            },
+            DiffDtypeGroup {
+                dtype: "F32".to_owned(),
+                tensors: 50,
+                params: 70_000_000,
+                bytes: 322_122_547,
+            },
+        ];
+        let rows_b = vec![
+            DiffDtypeGroup {
+                dtype: "BF16".to_owned(),
+                tensors: 126,
+                params: 720_000_000,
+                bytes: 1_438_986_240,
+            },
+            DiffDtypeGroup {
+                dtype: "U8".to_owned(),
+                tensors: 192,
+                params: 16_000_000_000,
+                bytes: 15_351_808_000,
+            },
+            DiffDtypeGroup {
+                dtype: "F32".to_owned(),
+                tensors: 40,
+                params: 40_000_000,
+                bytes: 268_435_456,
+            },
+        ];
+        let w = diff_dtypes_column_widths(&rows_a, &rows_b);
+        let total = w.total_width();
+        assert!(
+            total <= DIFF_DTYPES_DESIGN_WIDTH,
+            "canonical histogram width = {total} chars, design target {DIFF_DTYPES_DESIGN_WIDTH}",
+        );
     }
 }
