@@ -514,6 +514,133 @@ pub fn inspect_safetensors_cached(
     inspect_safetensors_local(&cached_path)
 }
 
+/// Inspects a `.gguf` file's metadata from the local `HuggingFace` cache.
+///
+/// Delegates to [`anamnesis::parse_gguf`] for the on-disk parse, then maps the
+/// result into the format-agnostic [`SafetensorsHeaderInfo`] shape used by
+/// hf-fm's existing render path. Tensor names, GGUF-native shape order, and
+/// dtype name strings carry over directly; per-tensor `data_offsets` are
+/// `(data_offset, data_offset + byte_len)` (with `byte_len = 0` for tensors
+/// whose dtype has no known byte size in anamnesis yet).
+///
+/// **Naming note:** the returned type is still called [`SafetensorsHeaderInfo`]
+/// in v0.10.x because renaming a public type is a breaking change; the
+/// uniform-dispatch rename to a format-agnostic name is scheduled for v0.10.3
+/// when the dispatcher extends across `.npz` / `.pth` (see the cache-management
+/// roadmap). For now, treat the type name as "header / file-level inspect
+/// info" regardless of format.
+///
+/// **Metadata surfacing:** the GGUF metadata table can contain very large
+/// arrays (e.g. tokenizer.ggml.tokens with 50K+ entries). To keep `Metadata:`
+/// rendering useful, this function surfaces *scalar* metadata values only —
+/// strings, booleans, integers, floats — and skips arrays. The GGUF format
+/// version is surfaced under the synthetic key `gguf.version`, the effective
+/// alignment under `gguf.alignment`. The original `general.architecture`,
+/// `general.name`, and friends pass through unchanged.
+///
+/// **Blocking I/O:** anamnesis's GGUF parser mmaps the file; this function is
+/// synchronous and should be wrapped in [`tokio::task::spawn_blocking`] from
+/// async contexts.
+///
+/// # Errors
+///
+/// Returns [`FetchError::SafetensorsHeader`] when the file is not present in
+/// the local cache or when anamnesis's GGUF parser rejects the file.
+pub fn inspect_gguf_cached(
+    repo_id: &str,
+    filename: &str,
+    revision: Option<&str>,
+) -> Result<SafetensorsHeaderInfo, FetchError> {
+    let rev = revision.unwrap_or("main");
+
+    let cached_path = resolve_cached_path(repo_id, rev, filename).ok_or_else(|| {
+        FetchError::SafetensorsHeader {
+            filename: filename.to_owned(),
+            reason: format!("file not found in local cache for {repo_id} ({rev})"),
+        }
+    })?;
+
+    let file_size = std::fs::metadata(&cached_path).ok().map(|m| m.len());
+
+    let parsed =
+        anamnesis::parse_gguf(&cached_path).map_err(|e| FetchError::SafetensorsHeader {
+            filename: filename.to_owned(),
+            reason: format!("GGUF parse failed: {e}"),
+        })?;
+
+    let tensors: Vec<TensorInfo> = parsed
+        .tensor_info()
+        .iter()
+        .map(|info| {
+            let start = info.data_offset;
+            let end = info.byte_len.map_or(start, |b| start.saturating_add(b));
+            TensorInfo {
+                // BORROW: explicit .clone() for owned String
+                name: info.name.clone(),
+                dtype: info.dtype.to_string(),
+                shape: info.shape.clone(),
+                data_offsets: (start, end),
+            }
+        })
+        .collect();
+
+    // Stringify scalar metadata only; skip arrays (potentially huge — e.g.
+    // tokenizer.ggml.tokens). Add synthetic keys for the format version and
+    // alignment so they appear in the `Metadata:` block.
+    let mut metadata: HashMap<String, String> = parsed
+        .metadata()
+        .iter()
+        .filter_map(|(k, v)| stringify_gguf_scalar(v).map(|s| (k.clone(), s)))
+        .collect();
+    metadata.insert("gguf.version".to_owned(), parsed.version().to_string());
+    metadata.insert("gguf.alignment".to_owned(), parsed.alignment().to_string());
+
+    Ok(SafetensorsHeaderInfo {
+        tensors,
+        metadata: Some(metadata),
+        // EXPLICIT: GGUF has no discrete "header size" like safetensors's
+        // u64-length-prefix + JSON. The value is left at 0 here; consumers
+        // that care can derive an approximation from `file_size` minus the
+        // tensor byte sum. The `Metadata:` block's `gguf.version` /
+        // `gguf.alignment` keys surface the equivalent format-level info.
+        header_size: 0,
+        file_size,
+    })
+}
+
+/// Stringifies a [`anamnesis::parse::gguf::GgufMetadataValue`] scalar.
+///
+/// Returns `None` for array variants (potentially huge — vocab tables, merges
+/// lists) and for any future `#[non_exhaustive]` variants we don't yet
+/// recognise. Surfaced through the `Metadata:` block in `inspect` output by
+/// [`inspect_gguf_cached`].
+//
+// EXHAUSTIVE: `GgufMetadataValue` is `#[non_exhaustive]`. The explicit
+// `V::Array(_)` arm and the `_ =>` catch-all both return `None`, but they
+// document different intents — "array variants are deliberately skipped"
+// vs "future unknown variants fall through". Clippy's `match_same_arms`
+// flags the bodies as identical; the duplication is intentional.
+#[allow(clippy::match_same_arms)]
+fn stringify_gguf_scalar(value: &anamnesis::parse::gguf::GgufMetadataValue) -> Option<String> {
+    use anamnesis::parse::gguf::GgufMetadataValue as V;
+    match value {
+        V::String(s) => Some(s.clone()),
+        V::Bool(b) => Some(b.to_string()),
+        V::U8(n) => Some(n.to_string()),
+        V::I8(n) => Some(n.to_string()),
+        V::U16(n) => Some(n.to_string()),
+        V::I16(n) => Some(n.to_string()),
+        V::U32(n) => Some(n.to_string()),
+        V::I32(n) => Some(n.to_string()),
+        V::U64(n) => Some(n.to_string()),
+        V::I64(n) => Some(n.to_string()),
+        V::F32(n) => Some(format!("{n}")),
+        V::F64(n) => Some(format!("{n}")),
+        V::Array(_) => None,
+        _ => None,
+    }
+}
+
 // -----------------------------------------------------------------------
 // Public API: multi-file inspection
 // -----------------------------------------------------------------------

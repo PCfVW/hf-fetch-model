@@ -326,16 +326,20 @@ enum Commands {
         #[arg(long, conflicts_with = "repo_id")]
         tree: bool,
     },
-    /// Inspect `.safetensors` file headers (tensor names, shapes, dtypes).
+    /// Inspect tensor file headers (`.safetensors` remote/cached; `.gguf` cached).
     ///
-    /// Reads tensor metadata without downloading full weight data.
-    /// Checks the local cache first; falls back to HTTP Range requests.
+    /// Reads tensor metadata without downloading full weight data. For
+    /// `.safetensors`, checks the local cache first and falls back to HTTP
+    /// Range requests. For `.gguf`, only cached inspect is supported in
+    /// v0.10.x (remote GGUF inspect is planned for v0.11); pass `--cached`
+    /// after downloading the file.
     #[command(after_help = "Examples:\n  \
-        hf-fm inspect <repo>                             # inspect every .safetensors in the repo\n  \
-        hf-fm inspect <repo> --list                      # list safetensors files (no headers read)\n  \
-        hf-fm inspect <repo> 3                           # inspect file #3 from --list\n  \
-        hf-fm inspect <repo> model.safetensors --tree    # hierarchical view of one file\n  \
-        hf-fm inspect <repo> --check-gpu                 # GPU-fit verdict for the whole repo\n\n\
+        hf-fm inspect <repo>                                    # inspect every .safetensors in the repo\n  \
+        hf-fm inspect <repo> --list                             # list safetensors files (no headers read)\n  \
+        hf-fm inspect <repo> 3                                  # inspect file #3 from --list\n  \
+        hf-fm inspect <repo> model.safetensors --tree           # hierarchical view of one file\n  \
+        hf-fm inspect <repo> --check-gpu                        # GPU-fit verdict for the whole repo\n  \
+        hf-fm inspect <repo> model.gguf --cached                # inspect a cached GGUF file (v0.10.2+)\n\n\
         Indices returned by --list are stable as long as the repo has not\n\
         changed remotely between invocations. Pass --revision <sha> on both\n\
         --list and the follow-up run to lock the view end-to-end.\n\n\
@@ -347,7 +351,7 @@ enum Commands {
     Inspect {
         /// The repository identifier (e.g., `"google/gemma-2-2b-it"`).
         repo_id: String,
-        /// Specific `.safetensors` file, numeric index from `--list`, or omit for all.
+        /// Specific `.safetensors` or `.gguf` file, numeric index from `--list`, or omit for all.
         filename: Option<String>,
         /// Git revision (branch, tag, or commit SHA).
         #[arg(long)]
@@ -3932,14 +3936,6 @@ fn print_diff_dtypes(
     }
 }
 
-/// Returns whether `filename` ends in `.safetensors` (case-insensitive).
-fn has_safetensors_extension(filename: &str) -> bool {
-    Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"))
-}
-
 /// Inspects `.safetensors` file headers for tensor metadata.
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 fn run_inspect(
@@ -4776,23 +4772,42 @@ fn run_inspect_single(
     tree: bool,
     check_gpu: Option<u32>,
 ) -> Result<(), FetchError> {
-    if !has_safetensors_extension(filename) {
-        // BORROW: owned Strings for error variant fields
-        let extension = Path::new(filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("unknown")
-            .to_owned();
+    // Classify extension once; v0.10.2 dispatches across .safetensors (remote
+    // or cached) and .gguf (cached only — remote GGUF inspect waits on v0.11).
+    let ext_lc = Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    let is_safetensors = ext_lc.as_deref() == Some("safetensors");
+    let is_gguf = ext_lc.as_deref() == Some("gguf");
+
+    if !is_safetensors && !is_gguf {
+        // BORROW: owned String for the error variant field
+        let extension = ext_lc.unwrap_or_else(|| "unknown".to_owned());
         return Err(FetchError::UnsupportedInspectFormat {
             filename: filename.to_owned(),
             extension,
         });
     }
 
+    if is_gguf && !cached {
+        return Err(FetchError::InvalidArgument(format!(
+            "remote GGUF inspect not yet supported (planned for v0.11). \
+             Pass --cached after downloading {filename} with `hf-fm download`, \
+             or use --cached if the file is already in your local cache."
+        )));
+    }
+
     let (mut info, source) = if cached {
-        let info = inspect::inspect_safetensors_cached(repo_id, filename, revision)?;
+        let info = if is_gguf {
+            inspect::inspect_gguf_cached(repo_id, filename, revision)?
+        } else {
+            inspect::inspect_safetensors_cached(repo_id, filename, revision)?
+        };
         (info, inspect::InspectSource::Cached)
     } else {
+        // Reachable only when is_safetensors == true (the is_gguf && !cached
+        // branch returned earlier; the unclassified branch returned earlier).
         // BORROW: explicit String::from for Option<&str> → Option<String>
         let token = token
             .map(String::from)
