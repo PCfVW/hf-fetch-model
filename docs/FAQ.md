@@ -48,6 +48,7 @@ A living list of the questions we and our early users have actually run into. If
 - [Discovery — finding what to inspect or download](#discovery--finding-what-to-inspect-or-download)
   - [A repo has many `.safetensors` files — how do I pick one to inspect?](#a-repo-has-many-safetensors-files--how-do-i-pick-one-to-inspect)
   - [How do I see a model's tensor names without downloading it?](#how-do-i-see-a-models-tensor-names-without-downloading-it)
+  - [How do I compare two HuggingFace models structurally?](#how-do-i-compare-two-huggingface-models-structurally)
   - [How do I know if a model fits on my GPU?](#how-do-i-know-if-a-model-fits-on-my-gpu)
   - [How do I list only the weight files in a repo, not the tokenizer and README?](#how-do-i-list-only-the-weight-files-in-a-repo-not-the-tokenizer-and-readme)
   - [How do I see what is already cached locally?](#how-do-i-see-what-is-already-cached-locally)
@@ -156,6 +157,44 @@ Indices are stable for as long as the repository does not change remotely — fo
 ### How do I see a model's tensor names without downloading it?
 
 Run `hf-fm inspect <repo>` with no filename and it will inspect every `.safetensors` file in the repository. For one specific file, add the filename (or an index from `--list`). Internally, hf-fm fetches only the JSON header via an HTTP Range request — for a typical 2 GiB safetensors file, you transfer maybe 70 KiB of metadata. Add `--tree` for the hierarchical view that groups numeric layers (`layers.[0..27]   (×28)`), or `--dtypes` for a dtype-and-parameter summary. For a complete walkthrough on a real 4-shard model, see [Inspect before you download](tutorials/inspect-before-downloading.md).
+
+### How do I compare two HuggingFace models structurally?
+
+`hf-fm diff <REPO_A> <REPO_B>` classifies every tensor across both repos into four buckets — *only-in-A*, *only-in-B*, *dtype/shape differences*, and *matching* — by reading each side's safetensors headers via HTTP Range (no weight data downloaded). For scaled-sibling pairs (one model is a bigger sibling of the other in the same family) the per-tensor output is dominated by the extra-layer wall, so reach for `--dtypes` instead:
+
+```
+$ hf-fm diff openai/gpt-oss-20b openai/gpt-oss-120b --dtypes
+
+  A: openai/gpt-oss-20b
+  B: openai/gpt-oss-120b
+
+  Dtype  A Tensors     A Size  B Tensors      B Size      Δ Size
+  U8           192  18.91 GiB        288  113.46 GiB  +94.55 GiB
+  BF16         630   6.72 GiB        942    8.07 GiB   +1.35 GiB
+  ──────────────────────────────────────────────────────────────
+  A: 822 tensors, 25.63 GiB | B: 1230 tensors, 121.54 GiB | Δ: +408 tensors, +95.90 GiB
+```
+
+This is a side-by-side per-dtype histogram with a signed Δ Size column. Same dtype mix on both sides plus proportional scaling = scaled siblings (same architecture, different size). A dtype present in only one side, or a wildly disproportionate Δ Size ratio across dtypes, would point at an architectural variant rather than a clean scale-up. Composes with `--filter` (histograms aggregate over filtered tensors only) and `--json`. The complementary text mode `diff` (without `--dtypes`) remains useful for short tensor-level inspections — see `hf-fm diff --help`.
+
+For deeper structural analysis on the per-tensor list (when `--dtypes` says "same dtype mix but I want to see *which* tensors differ"), the JSON output now ships a `byte_count` field on every entry. Pipe it through `jq` to collapse `only_a` / `only_b` entries by name pattern — useful when one side has 200 extra layers and you want the *kinds* of new tensors, not the raw 200-row list:
+
+```bash
+hf-fm diff org/model-A org/model-B --json \
+  | jq -r '
+      .only_b
+      | group_by(.name | gsub("[0-9]+"; "{N}"))
+      | map({
+          pattern: (.[0].name | gsub("[0-9]+"; "{N}")),
+          tensors: length,
+          bytes: (map(.b.byte_count) | add),
+        })
+      | sort_by(-.bytes)
+      | .[] | "\(.pattern)  \(.tensors)  \(.bytes) bytes"
+    '
+```
+
+For a scaled-sibling pair this collapses `model.layers.0.self_attn.q_proj.weight`, `model.layers.1.self_attn.q_proj.weight`, … into a single `model.layers.{N}.self_attn.q_proj.weight` line with a count and a summed-byte total. The JSON-first approach lets you iterate on the collapse heuristic (regex, segment, expert-routing-aware) against your own pair before any of it becomes a built-in flag. The same recipe with `.only_a` swapped in does the symmetric job.
 
 ### How do I know if a model fits on my GPU?
 

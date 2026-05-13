@@ -247,7 +247,10 @@ hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct
 # Quick summary (counts only, no tensor listing)
 hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq --cached --summary
 
-# JSON output for programmatic consumption
+# Per-dtype histograms side-by-side, with Δ Size column (ideal for scaled-sibling pairs)
+hf-fm diff openai/gpt-oss-20b openai/gpt-oss-120b --dtypes
+
+# JSON output for programmatic consumption (includes byte_count on every tensor entry)
 hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq --cached --json
 ```
 
@@ -413,11 +416,12 @@ Exit code is non-zero only when at least one file mismatched; `skipped` and `mis
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--cached` | Cache-only mode: fail if files are not cached locally | off |
+| `--dtypes` | Show side-by-side per-dtype histograms instead of the per-tensor body (conflicts with `--summary`) | off |
 | `--filter` | Show only tensors whose name contains this substring | — |
-| `--json` | Output the full diff as JSON | off |
+| `--json` | Output the full diff as JSON (per-tensor entries include `byte_count`; `--dtypes` adds a `dtype_histograms` field) | off |
 | `--revision-a` | Git revision for model A | main |
 | `--revision-b` | Git revision for model B | main |
-| `--summary` | Show only the summary line (counts per category) | off |
+| `--summary` | Show only the summary line (counts per category; conflicts with `--dtypes`) | off |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
 ## Download flags
