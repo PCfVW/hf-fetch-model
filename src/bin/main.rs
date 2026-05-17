@@ -155,16 +155,30 @@ enum Commands {
     /// List model families in local HF cache.
     ListFamilies,
     /// Discover new model families from the `HuggingFace` Hub.
+    #[command(after_help = "Examples:
+  hf-fm discover --limit 100                  # top families by download count
+  hf-fm discover --tag bitsandbytes           # only models carrying this tag
+  hf-fm discover --tag gguf --limit 200       # tag composes with --limit
+
+See also: hf-fm list-families, hf-fm search")]
     Discover {
         /// Maximum number of models to scan.
         #[arg(long, default_value = "500")]
         limit: usize,
+        /// Filter by model tag (e.g., `"gguf"`, `"bitsandbytes"`, `"conversational"`).
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Search the `HuggingFace` Hub for models matching a query.
     ///
     /// Supports comma-separated multi-term filtering (e.g., `"mistral,3B,12"`).
     /// Slashes in queries are treated as spaces for broader matching.
-    #[command(after_help = "See also: hf-fm list-families, hf-fm discover")]
+    #[command(after_help = "Examples:
+  hf-fm search \"fp4\" --tag bitsandbytes        # text-match AND tag-match
+  hf-fm search \"llama\" --tag gguf --limit 5    # tag composes with other filters
+  hf-fm search \"qwen,3B\" --exact               # exact repo-id match
+
+See also: hf-fm list-families, hf-fm discover")]
     Search {
         /// Search query (e.g., `"RWKV-7"`, `"llama 3"`, `"mistral,3B,12"`).
         query: String,
@@ -657,7 +671,8 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), FetchError> {
     match cli.command {
         Some(Commands::ListFamilies) => run_list_families(),
-        Some(Commands::Discover { limit }) => run_discover(limit),
+        // BORROW: explicit .as_deref() for owned → borrowed conversion
+        Some(Commands::Discover { limit, tag }) => run_discover(limit, tag.as_deref()),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::Search {
             query,
@@ -1478,7 +1493,7 @@ fn run_list_families() -> Result<(), FetchError> {
     Ok(())
 }
 
-fn run_discover(limit: usize) -> Result<(), FetchError> {
+fn run_discover(limit: usize, tag: Option<&str>) -> Result<(), FetchError> {
     let families = cache::list_cached_families()?;
     let local_types: HashSet<String> = families.into_keys().collect();
 
@@ -1487,14 +1502,22 @@ fn run_discover(limit: usize) -> Result<(), FetchError> {
         source: e,
     })?;
 
-    let discovered = rt.block_on(discover::discover_new_families(&local_types, limit))?;
+    let discovered = rt.block_on(discover::discover_new_families(&local_types, limit, tag))?;
 
     if discovered.is_empty() {
-        println!("No new model families found.");
+        match tag {
+            Some(t) => println!("No new model families found with tag {t:?}."),
+            None => println!("No new model families found."),
+        }
         return Ok(());
     }
 
-    println!("New families not in local cache (top models by downloads):\n");
+    match tag {
+        Some(t) => {
+            println!("New families with tag {t:?} not in local cache (top models by downloads):\n");
+        }
+        None => println!("New families not in local cache (top models by downloads):\n"),
+    }
     let fw = discovered
         .iter()
         .map(|f| f.model_type.len())
@@ -4991,30 +5014,38 @@ fn run_inspect_single(
             );
         }
         (true, false) => {
+            let filter_str = filter.unwrap_or_default();
             println!(
-                "  {shown_count}/{total_tensor_count} {tensor_label}, {}/{} params (filter: {:?})",
+                "  Showing {shown_count} of {total_tensor_count} tensors matching filter {filter_str:?}."
+            );
+            println!(
+                "  Param counts: {} matching filter, {} total.",
                 inspect::format_params(shown_params),
                 inspect::format_params(total_params),
-                filter.unwrap_or_default(),
             );
         }
         (false, true) => {
+            let limit_val = limit.unwrap_or(0);
             println!(
-                "  {shown_count}/{total_tensor_count} {tensor_label} shown, {}/{} params (limit: {})",
+                "  Showing {shown_count} of {total_tensor_count} tensors (limit: {limit_val})."
+            );
+            println!(
+                "  Param counts: {} shown, {} total.",
                 inspect::format_params(shown_params),
                 inspect::format_params(total_params),
-                limit.unwrap_or(0),
             );
         }
         (true, true) => {
-            // Three-number format: shown/matched/total.
+            let filter_str = filter.unwrap_or_default();
+            let limit_val = limit.unwrap_or(0);
             println!(
-                "  {shown_count}/{matched_count}/{total_tensor_count} {tensor_label} shown, {}/{}/{} params (filter: {:?}, limit: {})",
+                "  Showing {shown_count} of {matched_count} tensors matching filter {filter_str:?} ({total_tensor_count} tensors total, limit: {limit_val})."
+            );
+            println!(
+                "  Param counts: {} shown, {} matching filter, {} total.",
                 inspect::format_params(shown_params),
                 inspect::format_params(matched_params),
                 inspect::format_params(total_params),
-                filter.unwrap_or_default(),
-                limit.unwrap_or(0),
             );
         }
     }

@@ -1200,8 +1200,8 @@ fn inspect_cached_filter() {
             || trimmed.starts_with("Metadata:")
             || trimmed.starts_with("Tensor")
             || trimmed.starts_with('\u{2500}')
-            || trimmed.contains("tensor")
-            || trimmed.contains("params")
+            || trimmed.starts_with("Showing ")
+            || trimmed.starts_with("Param counts:")
         {
             continue;
         }
@@ -1210,14 +1210,11 @@ fn inspect_cached_filter() {
             "filtered line should contain 'embed': {trimmed}"
         );
     }
-    // Summary should show filtered/total format.
+    // Summary line should use the labelled "Showing X of Y tensors matching
+    // filter ..." form introduced in v0.10.3.
     assert!(
-        stdout.contains('/'),
-        "filtered summary should show filtered/total format, got:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("filter:"),
-        "filtered summary should mention filter, got:\n{stdout}"
+        stdout.contains("Showing ") && stdout.contains("matching filter"),
+        "filtered summary should show 'Showing X of Y tensors matching filter ...', got:\n{stdout}"
     );
 }
 

@@ -171,26 +171,41 @@ const HF_API_BASE: &str = "https://huggingface.co/api/models";
 ///
 /// * `local_families` — Set of `model_type` values already cached locally.
 /// * `max_models` — Maximum number of models to scan (paginated in batches of 100).
+/// * `tag` — Optional tag filter (e.g., `"gguf"`, `"bitsandbytes"`). When set,
+///   only models carrying this tag contribute to family discovery.
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Http`] if any API request fails.
+/// Returns [`FetchError::Http`](crate::FetchError::Http) if any API request fails.
 pub async fn discover_new_families<S: BuildHasher>(
     local_families: &std::collections::HashSet<String, S>,
     max_models: usize,
+    tag: Option<&str>,
 ) -> Result<Vec<DiscoveredFamily>, FetchError> {
     let client = reqwest::Client::new();
     let mut remote_families: BTreeMap<String, (String, u64)> = BTreeMap::new();
     let mut offset: usize = 0;
 
     while offset < max_models {
-        let limit = PAGE_SIZE.min(max_models.saturating_sub(offset));
-        let url = format!(
-            "{HF_API_BASE}?config=true&sort=downloads&direction=-1&limit={limit}&offset={offset}"
-        );
+        let page_limit = PAGE_SIZE.min(max_models.saturating_sub(offset));
+        let page_limit_str = page_limit.to_string();
+        let offset_str = offset.to_string();
+
+        // BORROW: explicit .as_str() instead of Deref coercion
+        let mut query_params: Vec<(&str, &str)> = vec![
+            ("config", "true"),
+            ("sort", "downloads"),
+            ("direction", "-1"),
+            ("limit", page_limit_str.as_str()),
+            ("offset", offset_str.as_str()),
+        ];
+        if let Some(t) = tag {
+            query_params.push(("filter", t));
+        }
 
         let response = client
-            .get(url.as_str()) // BORROW: explicit .as_str()
+            .get(HF_API_BASE)
+            .query(&query_params)
             .send()
             .await
             .map_err(|e| FetchError::Http(e.to_string()))?;
@@ -212,7 +227,19 @@ pub async fn discover_new_families<S: BuildHasher>(
         }
 
         for model in &models {
-            // BORROW: explicit .as_ref() and .as_str() for Option<String>
+            // Client-side tag filter: the HF API may ignore the `filter` query
+            // parameter when combined with other params, so verify the tag is
+            // actually present on each returned model.
+            if let Some(t) = tag {
+                if !model.tags.iter().any(|model_tag| {
+                    // BORROW: explicit .as_str() instead of Deref coercion
+                    model_tag.as_str().eq_ignore_ascii_case(t)
+                }) {
+                    continue;
+                }
+            }
+
+            // BORROW: explicit .as_ref() and .as_deref() for Option<String>
             let model_type = model.config.as_ref().and_then(|c| c.model_type.as_deref());
 
             if let Some(mt) = model_type {
@@ -225,7 +252,7 @@ pub async fn discover_new_families<S: BuildHasher>(
         offset = offset.saturating_add(models.len());
     }
 
-    // Filter to families not already cached locally
+    // Filter to families not already cached locally.
     // BORROW: explicit .as_str() instead of Deref coercion
     let discovered: Vec<DiscoveredFamily> = remote_families
         .into_iter()

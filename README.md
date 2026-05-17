@@ -143,7 +143,8 @@ $ hf-fm inspect EleutherAI/pythia-1.4b model.safetensors --cached --filter "laye
   gpt_neox.layers.0.mlp.dense_h_to_4h.weight         F16      [8192, 2048]      32.00 MiB      16.8M
   ...
   ────────────────────────────────────────────────────────────────────────────────────────────────
-  15/364 tensors, 54.6M/1.52B params (filter: "layers.0.")
+  Showing 15 of 364 tensors matching filter "layers.0.".
+  Param counts: 54.6M matching filter, 1.52B total.
 
 $ hf-fm inspect google/gemma-4-E2B-it model.safetensors --tree --filter "embed"
   Repo:     google/gemma-4-E2B-it
@@ -159,7 +160,8 @@ $ hf-fm inspect google/gemma-4-E2B-it model.safetensors --tree --filter "embed"
       └── vision_tower.patch_embedder.
           ├── input_proj.weight         BF16  [768, 768]        1.12 MiB
           └── position_embedding_table  BF16  [2, 10240, 768]  30.00 MiB
-  6/2011 tensors, 2.77B/5.12B params (filter: "embed")
+  Showing 6 of 2011 tensors matching filter "embed".
+  Param counts: 2.77B matching filter, 5.12B total.
 
 $ hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq --cached --summary
   A: RedHatAI/Llama-3.2-1B-Instruct-FP8

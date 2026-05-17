@@ -155,6 +155,9 @@ hf-fm search mistral --pipeline text-generation
 
 # Filter by tag (useful for GGUF models without a library_name)
 hf-fm search llama --tag gguf
+
+# Combine a free-text query with a tag filter (text-match AND tag-match)
+hf-fm search fp4 --tag bitsandbytes
 ```
 
 Common quantization synonyms are normalized automatically: `8bit`, `8-bit`, `int8`, and `INT8` all produce the same results. Same for `4bit`/`4-bit`/`int4` and `fp8`/`float8`.
@@ -298,6 +301,9 @@ hf-fm list-families
 
 # Discover new families from HuggingFace Hub
 hf-fm discover
+
+# Discover families restricted to a specific tag (e.g. bitsandbytes, gguf)
+hf-fm discover --tag bitsandbytes
 ```
 
 ## Cache commands

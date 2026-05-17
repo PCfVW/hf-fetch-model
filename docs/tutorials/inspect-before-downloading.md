@@ -194,10 +194,11 @@ hf-fm inspect zed-industries/zeta-2 \
   Source: aggregated across 4 shards
 
   └── lm_head.weight  BF16  [155136, 4096]  1.18 GiB
-  1/291 tensor, 635.4M/8.25B params (filter: "lm_head")
+  Showing 1 of 291 tensors matching filter "lm_head".
+  Param counts: 635.4M matching filter, 8.25B total.
 ```
 
-The footer's `1/291 tensor, 635.4M/8.25B params` is the answer: the head alone is 635 million parameters, 1.18 GiB. If you are sketching a fine-tuning budget, that's the cost of replacing the head and freezing the rest.
+The footer's `Showing 1 of 291 tensors matching filter "lm_head"` (635.4M matching out of 8.25B total) is the answer: the head alone is 635 million parameters, 1.18 GiB. If you are sketching a fine-tuning budget, that's the cost of replacing the head and freezing the rest.
 
 Or "show me the first five tensors with their source shard":
 
@@ -218,7 +219,8 @@ hf-fm inspect zed-industries/zeta-2 \
   model.layers.0.mlp.gate_proj.weight   BF16     [14336, 4096]  112.00 MiB      58.7M  model-00001-of-00004.safetensors
   model.layers.0.mlp.up_proj.weight     BF16     [14336, 4096]  112.00 MiB      58.7M  model-00001-of-00004.safetensors
   ─────────────────────────────────────────────────────────────────────────────────────────────
-  5/291 tensors shown, 811.6M/8.25B params (limit: 5)
+  Showing 5 of 291 tensors (limit: 5).
+  Param counts: 811.6M shown, 8.25B total.
 ```
 
 The `Shard` column is hf-fm reminding you that shard 1 holds the embedding plus the first set of layer weights. That is occasionally useful when debugging: if a download failed for a specific shard, you know which tensors are at risk.
