@@ -632,6 +632,87 @@ pub fn inspect_gguf_cached(
     })
 }
 
+/// Inspects a `.npz` file's metadata from the local `HuggingFace` cache.
+///
+/// Delegates to [`anamnesis::inspect_npz`] for the on-disk parse (which
+/// reads only the ZIP central directory + per-entry NPY headers — no
+/// tensor data), then maps the result into the format-agnostic
+/// [`SafetensorsHeaderInfo`] shape used by hf-fm's existing render path.
+///
+/// **Synthesised offsets.** Anamnesis exposes per-tensor `byte_len` but
+/// not on-disk byte offsets (NPZ tensors live inside a ZIP archive;
+/// offsets are not part of the inspect surface). hf-fm's
+/// `TensorInfo::data_offsets` is synthesised as cumulative `(start, end)`
+/// pairs — `start = sum of previous byte_lens` — so `byte_len()`
+/// (= `end - start`) renders the actual storage size. The synthetic
+/// offsets are NOT on-disk truth; consumers that need real offsets
+/// should defer to v0.11.x once remote-inspect lands.
+///
+/// **Metadata.** `metadata: None` — NPZ has no metadata block analogous
+/// to safetensors's `__metadata__` or GGUF's KV table.
+///
+/// **Header size.** Always `0` — NPZ has no discrete header analogous
+/// to safetensors's `u64`-length-prefix + JSON. Mirrors the GGUF convention.
+///
+/// **Blocking I/O:** anamnesis's NPZ parser opens the file with
+/// `std::fs::File`; this function is synchronous and should be wrapped
+/// in [`tokio::task::spawn_blocking`] from async contexts.
+///
+/// # Errors
+///
+/// Returns [`FetchError::SafetensorsHeader`] if the file is not in the cache.
+/// Returns [`FetchError::SafetensorsHeader`] if anamnesis rejects the NPZ
+/// file (malformed ZIP central directory, unsupported NPY dtype, etc.).
+pub fn inspect_npz_cached(
+    repo_id: &str,
+    filename: &str,
+    revision: Option<&str>,
+) -> Result<SafetensorsHeaderInfo, FetchError> {
+    let rev = revision.unwrap_or("main");
+
+    let cached_path = resolve_cached_path(repo_id, rev, filename).ok_or_else(|| {
+        FetchError::SafetensorsHeader {
+            // BORROW: explicit .to_owned() for owned String in the error variant
+            filename: filename.to_owned(),
+            reason: format!("file not found in local cache for {repo_id} ({rev})"),
+        }
+    })?;
+
+    let file_size = std::fs::metadata(&cached_path).ok().map(|m| m.len());
+
+    let parsed =
+        anamnesis::inspect_npz(&cached_path).map_err(|e| FetchError::SafetensorsHeader {
+            // BORROW: explicit .to_owned() for owned String in the error variant
+            filename: filename.to_owned(),
+            reason: format!("failed to parse NPZ: {e}"),
+        })?;
+
+    let mut tensors: Vec<TensorInfo> = Vec::with_capacity(parsed.tensors.len());
+    let mut cursor: u64 = 0;
+    for t in parsed.tensors {
+        // CAST: usize → u64, byte_len fits in u64 by definition (in-memory size).
+        #[allow(clippy::as_conversions)]
+        let len = t.byte_len as u64;
+        let start = cursor;
+        let end = cursor.saturating_add(len);
+        cursor = end;
+        tensors.push(TensorInfo {
+            name: t.name,
+            // BORROW: explicit .to_string() — anamnesis `NpzDtype` enum → owned `String`
+            dtype: t.dtype.to_string(),
+            shape: t.shape,
+            data_offsets: (start, end),
+        });
+    }
+
+    Ok(SafetensorsHeaderInfo {
+        tensors,
+        metadata: None,
+        header_size: 0,
+        file_size,
+    })
+}
+
 /// Stringifies a scalar `GgufMetadataValue` from anamnesis.
 ///
 /// Returns `None` for array variants (potentially huge — vocab tables, merges
