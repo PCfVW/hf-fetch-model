@@ -1205,6 +1205,47 @@ fn inspect_cached_gguf_tree_renders() {
 }
 
 #[test]
+fn inspect_cached_gguf_dtypes_renders() {
+    // v0.10.3 Phase A commit 3: confirm `--dtypes` works for cached GGUF.
+    // `compute_dtype_groups` already buckets by `t.dtype` string and sums
+    // `t.byte_len()` directly (no `dtype_bytes()` lookup), so GGUF
+    // quantization dtypes (`Q4_K_M`, `Q2_K`, `IQ4_NL`, `F32`, …) bucket
+    // transparently with the byte counts anamnesis populates at parse time.
+    let Some((repo_id, filename)) = find_cached_gguf_repo() else {
+        eprintln!("SKIP: no cached .gguf file found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, &filename, "--cached", "--dtypes"]));
+    assert!(
+        success,
+        "inspect --cached --dtypes on GGUF should succeed: {stderr}"
+    );
+    assert!(
+        stdout.contains("Dtype") && stdout.contains("Tensors") && stdout.contains("Params"),
+        "GGUF --dtypes should show histogram columns, got:\n{stdout}"
+    );
+    // Any cached GGUF will have at least one row matching one of the
+    // common dtype prefixes — the OR chain stays robust across quantizations
+    // (Q4_K_M, Q5_0, Q8_0, IQ4_NL, …) and the F32 / F16 passthrough types.
+    let has_gguf_dtype = stdout.lines().any(|l| {
+        l.contains("Q4_")
+            || l.contains("Q5_")
+            || l.contains("Q6_")
+            || l.contains("Q8_")
+            || l.contains("Q2_K")
+            || l.contains("Q3_K")
+            || l.contains("IQ")
+            || l.contains("F32")
+            || l.contains("F16")
+    });
+    assert!(
+        has_gguf_dtype,
+        "GGUF --dtypes should bucket GGUF dtype names, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn inspect_cached_sharded_dtypes_json_aggregates() {
     let Some(repo_id) = find_cached_sharded_repo() else {
         eprintln!("SKIP: no cached sharded safetensors model found");
