@@ -357,6 +357,38 @@ The order is insurance — commits 1–3 are small, contained, and ship the cand
 
 After v0.10.3, `hf-fm inspect <repo> <any-tensor-file> --cached` works uniformly across all four tensor formats anamnesis supports, with all rendering flags (`--list`, `--filter`, `--limit`, `--tree`, `--dtypes`, `--json`) honoured across every format. Sets the stage for v0.11, where the same four formats become inspectable *remotely* via HTTP Range.
 
+**Commit order on the v0.10.3 work branch, smallest to largest, smallest-risk to highest-risk:**
+
+The eight feature-table items above land in three phases. Each phase is independently shippable as v0.10.3 — if a later phase stalls, the remainder defers to v0.10.4 without renumbering or backing out.
+
+**Phase A — Finish v0.10.2-deferred GGUF rendering (no new format scope):**
+
+1. **GGUF render polish (3 cosmetic fixes from v0.10.2 commit 4b)** — pure render-path changes: drop the `(JSON)` suffix + leading `0 B` from the `Header:` line for GGUF; switch the one-line comma-separated `Metadata:` to a tabular block (sorted/grouped by namespace prefix) when keys > 6; render `tokenizer.chat_template`'s multi-line Jinja value as an indented block automatically via the tabular fix. All three live in the same renderer code; bundling preserves coherence. ~50 LOC, no new dispatch paths.
+
+2. **`--tree` for GGUF** — verification + tests that [`print_tree_summary`](../../src/bin/main.rs) handles GGUF's `blk.<N>.<part>` naming the same way it handles safetensors's `model.layers.<N>.<part>`. The numeric-sibling collapse is regex-based and should work as-is. ~10 LOC + fixture-driven tests.
+
+3. **`--dtypes` for GGUF** — the dtype-mapping layer (option (b) per the feature table above: bypass `dtype_bytes` for GGUF and use per-tensor `byte_len` already populated by anamnesis at parse time). [`print_dtype_summary`](../../src/bin/main.rs)'s aggregator gains a format-keyed alternate code path. ~40 LOC + tests.
+
+**Phase B — Extend anamnesis adoption across the remaining three formats:**
+
+4. **Safetensors parser dedup (cache-hit path)** — replace hf-fm's in-tree JSON header parser with `anamnesis::parse_safetensors_header(&bytes)`. Pure refactor — same in/out behavior, existing safetensors fixtures verify identical output. The bespoke remote-inspect `fetch_header_bytes` path stays (retired in v0.11.1). ~30 LOC net negative.
+
+5. **NPZ cached inspect** — new `.npz` dispatch via `anamnesis::inspect_npz(path)`. Anamnesis's NPZ primitive is already shipped in v0.4.3 (the originally-motivating GemmaScope case). New test fixture needed. ~40 LOC + fixture + tests.
+
+6. **PTH cached inspect** — new `.pth` dispatch via `anamnesis::parse_pth(path).inspect()`. PTH parsing is anamnesis's most complex format (pickle VM, adversarial-input caps), but at hf-fm's layer it is just one more dispatch arm. New test fixture needed. ~40 LOC + fixture + tests. **Highest-risk commit** because anamnesis's PTH coverage is the newest of the four — real-world `.pth` files may stress the parser in ways NPZ / GGUF have not.
+
+7. **Format-aware error wording** — lift the `FetchError::UnsupportedInspectFormat` Display message (and the inline dispatch's error path) so the supported set is named explicitly: `.safetensors` / `.npz` / `.pth` / `.gguf` for cached files. Trivial wording-only change; ~5 LOC. Naturally lands after commits 5 + 6 so the wording matches what is actually implemented.
+
+**Phase C — User-facing polish:**
+
+8. **Quant-scheme display** — `inspect` output gains the `Format: <QuantScheme>` and `Dequantised: X GB` lines, both pulled from `anamnesis::InspectInfo`. Benefits from all four formats being inspectable so the field renders uniformly. ~30 LOC.
+
+**Rescue path** (insurance — commits 1–3 ship the deferred v0.10.2 promise on their own):
+
+- If only Phase A lands cleanly: ship v0.10.3 as "GGUF rendering completion". Phases B + C defer to v0.10.4. The GGUF work was the chief deferred-from-v0.10.2 commitment and stands alone.
+- If commit 6 (PTH) hits anamnesis-side friction: ship 1–5 + 7 (re-scoped to name only the three formats actually supported in this release) as v0.10.3. PTH + Phase C defer to v0.10.4.
+- If commit 8 (quant-scheme) hits unexpected `InspectInfo` API friction: ship 1–7 as v0.10.3 (full four-format `--cached` coverage minus the polish line). Quant-scheme defers to v0.10.4.
+
 ### v0.10.4 — `--check-gpu` follow-ups (multi-GPU + KV-cache & hybrid-Mamba budgeting)
 
 | Feature | Scope |
