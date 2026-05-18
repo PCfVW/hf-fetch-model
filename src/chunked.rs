@@ -103,7 +103,7 @@ pub(crate) fn build_no_redirect_client(token: Option<&str>) -> Result<Client, Fe
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Http`](crate::FetchError::Http) if the client or auth header cannot be constructed.
+/// Returns [`FetchError::Http`] if the client or auth header cannot be constructed.
 pub fn build_client(token: Option<&str>) -> Result<Client, FetchError> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(

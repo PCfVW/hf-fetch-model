@@ -141,7 +141,7 @@ impl ChunkedState {
     ///
     /// # Errors
     ///
-    /// Returns [`FetchError::Io`](crate::FetchError::Io) on read failures
+    /// Returns [`FetchError::Io`] on read failures
     /// other than file-not-found.
     pub(crate) async fn load(path: &Path) -> Result<Option<Self>, FetchError> {
         match tokio::fs::read_to_string(path).await {
@@ -163,10 +163,10 @@ impl ChunkedState {
     ///
     /// # Errors
     ///
-    /// Returns [`FetchError::ChunkedDownload`](crate::FetchError::ChunkedDownload)
+    /// Returns [`FetchError::ChunkedDownload`]
     /// if JSON serialization fails (would indicate a programmer bug —
     /// every field of [`ChunkedState`] is plain-old-data).
-    /// Returns [`FetchError::Io`](crate::FetchError::Io) on filesystem
+    /// Returns [`FetchError::Io`] on filesystem
     /// errors during the temp write or rename.
     pub(crate) async fn save_atomic(&self, path: &Path) -> Result<(), FetchError> {
         let json = serde_json::to_string(self).map_err(|e| FetchError::ChunkedDownload {
@@ -197,7 +197,7 @@ impl ChunkedState {
     ///
     /// # Errors
     ///
-    /// Returns [`FetchError::Io`](crate::FetchError::Io) on hard I/O
+    /// Returns [`FetchError::Io`] on hard I/O
     /// errors (permission denied, etc.). File-not-found is silently
     /// ignored.
     pub(crate) async fn remove(path: &Path) -> Result<(), FetchError> {

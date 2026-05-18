@@ -177,7 +177,7 @@ const HF_API_BASE: &str = "https://huggingface.co/api/models";
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Http`](crate::FetchError::Http) if any API request fails.
+/// Returns [`FetchError::Http`] if any API request fails.
 pub async fn discover_new_families<S: BuildHasher>(
     local_families: &std::collections::HashSet<String, S>,
     max_models: usize,
@@ -427,9 +427,9 @@ pub async fn search_models(
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Http`](crate::FetchError::Http) if the API request
+/// Returns [`FetchError::Http`] if the API request
 /// fails or returns a non-success status.
-/// Returns [`FetchError::RepoNotFound`](crate::FetchError::RepoNotFound) if
+/// Returns [`FetchError::RepoNotFound`] if
 /// the repository does not exist on the Hub.
 pub async fn fetch_repo_total_size(
     repo_id: &str,

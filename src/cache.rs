@@ -65,9 +65,9 @@ pub fn snapshot_path(repo_dir: &Path) -> PathBuf {
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Io`](crate::FetchError::Io) if the file exists but
+/// Returns [`FetchError::Io`] if the file exists but
 /// cannot be read.
-/// Returns [`FetchError::InvalidArgument`](crate::FetchError::InvalidArgument)
+/// Returns [`FetchError::InvalidArgument`]
 /// if the file is present but its JSON cannot be parsed (e.g. corruption or
 /// a future schema version this binary cannot understand).
 pub fn read_snapshot(repo_dir: &Path) -> Result<Option<Snapshot>, FetchError> {
@@ -91,7 +91,7 @@ pub fn read_snapshot(repo_dir: &Path) -> Result<Option<Snapshot>, FetchError> {
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Io`](crate::FetchError::Io) on any filesystem
+/// Returns [`FetchError::Io`] on any filesystem
 /// failure (parent directory missing, no write permission, rename across
 /// filesystems, etc.).
 pub fn write_snapshot(repo_dir: &Path, snapshot: &Snapshot) -> Result<(), FetchError> {
@@ -186,7 +186,7 @@ pub struct FamilyEntry {
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Io`](crate::FetchError::Io) if the cache directory cannot be read.
+/// Returns [`FetchError::Io`] if the cache directory cannot be read.
 pub fn list_cached_families() -> Result<BTreeMap<String, Vec<FamilyEntry>>, FetchError> {
     let cache_dir = hf_cache_dir()?;
 
@@ -432,9 +432,9 @@ impl RepoStatus {
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Http`](crate::FetchError::Http) if the API request fails.
-/// Returns [`FetchError::Io`](crate::FetchError::Io) if the cache directory cannot be read.
-/// Returns [`FetchError::InvalidPattern`](crate::FetchError::InvalidPattern)
+/// Returns [`FetchError::Http`] if the API request fails.
+/// Returns [`FetchError::Io`] if the cache directory cannot be read.
+/// Returns [`FetchError::InvalidPattern`]
 /// if any of the supplied `preset_globs` patterns fails to compile.
 pub async fn repo_status(
     repo_id: &str,

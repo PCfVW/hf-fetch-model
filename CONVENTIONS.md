@@ -53,12 +53,20 @@ Two patterns to watch:
    > ✅ `` /// Implemented by `NpyArray` (requires `npz` feature). ``
    > ❌ `` /// Implemented by [`NpyArray`](crate::npz::NpyArray). ``
 
-2. **Cross-module links** — items re-exported at the crate root (e.g.,
-   `FetchError`) are not automatically in scope inside submodules. Use explicit
-   `crate::` paths:
+2. **Cross-module links** — for items re-exported at the crate root (e.g.,
+   `FetchError`), the bare-label form resolves correctly inside submodules
+   today (rustdoc resolves through the crate-root re-export). **Prefer the
+   bare form** — the explicit `(crate::...)` target is redundant and rustdoc's
+   `rustdoc::redundant_explicit_links` lint will error under `#![deny(warnings)]`
+   (which the publish dry-run enforces via `RUSTDOCFLAGS="-D warnings"`).
 
-   > ✅ `` /// Returns [`FetchError::Http`](crate::FetchError::Http) on failure. ``
-   > ❌ `` /// Returns [`FetchError::Http`] on failure. ``
+   > ✅ `` /// Returns [`FetchError::Http`] on failure. ``
+   > ❌ `` /// Returns [`FetchError::Http`](crate::FetchError::Http) on failure. ``
+
+   Use the explicit `crate::` path only when the bare label is genuinely
+   ambiguous — e.g., when two types with the same name are in scope, or when
+   linking to a feature-gated submodule item that is _not_ re-exported at
+   the crate root.
 
 ### Field-Level Docs
 
