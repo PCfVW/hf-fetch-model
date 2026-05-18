@@ -786,6 +786,58 @@ fn find_cached_safetensors_repo() -> Option<(String, String)> {
     None
 }
 
+/// Returns `(repo_id, filename)` of the first cached `.gguf` file found
+/// across all locally-cached repos, or `None` if the local cache has none.
+///
+/// Used by GGUF-flavoured `inspect --cached` integration tests; these tests
+/// SKIP on CI / fresh machines where no `.gguf` has been downloaded. Mirrors
+/// the shape of `find_cached_safetensors_repo` exactly so future GGUF tests
+/// can drop in the same skip-pattern.
+fn find_cached_gguf_repo() -> Option<(String, String)> {
+    let cache_dir = dirs::home_dir()?.join(".cache/huggingface/hub");
+    if !cache_dir.exists() {
+        return None;
+    }
+    for entry in std::fs::read_dir(&cache_dir).ok()? {
+        let entry = entry.ok()?;
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let Some(repo_part) = dir_name.strip_prefix("models--") else {
+            continue;
+        };
+        let repo_id = match repo_part.find("--") {
+            Some(pos) => {
+                let (org, name_with_sep) = repo_part.split_at(pos);
+                let name = name_with_sep.get(2..).unwrap_or_default();
+                format!("{org}/{name}")
+            }
+            None => continue,
+        };
+        let snapshots_dir = entry.path().join("snapshots");
+        let Ok(snapshots) = std::fs::read_dir(&snapshots_dir) else {
+            continue;
+        };
+        for snap in snapshots.flatten() {
+            if !snap.path().is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(snap.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+                {
+                    let fname = file.file_name().to_string_lossy().to_string();
+                    return Some((repo_id, fname));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Finds all cached repos that have at least one `.safetensors` file.
 fn find_all_cached_safetensors_repos() -> Vec<String> {
     let mut repos = Vec::new();
@@ -1121,6 +1173,34 @@ fn inspect_cached_sharded_tree_aggregates() {
     assert!(
         stdout.contains("├──") || stdout.contains("└──"),
         "sharded --tree should render box-drawing connectors, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_gguf_tree_renders() {
+    // v0.10.3 Phase A commit 2: confirm `--tree` works for cached GGUF.
+    // The tree pipeline (`build_tree` → `collapse_ranges`) is format-agnostic;
+    // GGUF's `blk.<N>.<part>` naming should collapse the same way safetensors'
+    // `model.layers.<N>.<part>` does. We do not assert on specific tensor names
+    // because different cached GGUFs have different structures; the
+    // box-drawing-and-footer check confirms the renderer ran end-to-end.
+    let Some((repo_id, filename)) = find_cached_gguf_repo() else {
+        eprintln!("SKIP: no cached .gguf file found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, &filename, "--cached", "--tree"]));
+    assert!(
+        success,
+        "inspect --cached --tree on GGUF should succeed: {stderr}"
+    );
+    assert!(
+        stdout.contains('\u{2500}') || stdout.contains('\u{2514}') || stdout.contains('\u{251c}'),
+        "GGUF --tree output should contain box-drawing connectors, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("tensor"),
+        "GGUF --tree should print a tensor-count footer, got:\n{stdout}"
     );
 }
 
