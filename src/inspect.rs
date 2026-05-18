@@ -713,6 +713,91 @@ pub fn inspect_npz_cached(
     })
 }
 
+/// Inspects a `.pth` file's metadata from the local `HuggingFace` cache.
+///
+/// Delegates to [`anamnesis::parse_pth`] for the on-disk parse, then uses
+/// the metadata-only `ParsedPth::tensor_info()` view (new in anamnesis
+/// `0.5.0`) to enumerate `(name, shape, dtype, byte_len)` per tensor — no
+/// further I/O beyond the initial mmap. The earlier `.tensors()` method
+/// would materialise each tensor's data via `Cow<'a, [u8]>`, which is
+/// unnecessary for inspect-only use.
+///
+/// **Synthesised offsets.** As with NPZ, anamnesis exposes per-tensor
+/// `byte_len` but not on-disk byte offsets (PTH tensors live inside a
+/// ZIP archive; offsets are not part of the inspect surface). hf-fm's
+/// `TensorInfo::data_offsets` is synthesised as cumulative `(start, end)`
+/// pairs so `byte_len()` (= `end - start`) renders the actual storage size.
+///
+/// **Metadata.** `metadata: None` — PTH has no metadata block analogous
+/// to safetensors's `__metadata__` or GGUF's KV table. The format-level
+/// `big_endian` flag (rare, near-always `false`) is not surfaced here;
+/// can be added as a synthetic `pth.big_endian` key in a future patch if
+/// real users request it.
+///
+/// **Header size.** Always `0` — PTH has no discrete header analogous
+/// to safetensors's `u64`-length-prefix + JSON. Mirrors the GGUF / NPZ
+/// convention.
+///
+/// **Blocking I/O:** anamnesis's PTH parser mmaps the file; this function
+/// is synchronous and should be wrapped in [`tokio::task::spawn_blocking`]
+/// from async contexts.
+///
+/// # Errors
+///
+/// Returns [`FetchError::SafetensorsHeader`] if the file is not in the cache.
+/// Returns [`FetchError::SafetensorsHeader`] if anamnesis rejects the PTH
+/// file (malformed pickle stream, legacy pre-1.6 raw-pickle format,
+/// unsupported tensor dtype, etc.).
+pub fn inspect_pth_cached(
+    repo_id: &str,
+    filename: &str,
+    revision: Option<&str>,
+) -> Result<SafetensorsHeaderInfo, FetchError> {
+    let rev = revision.unwrap_or("main");
+
+    let cached_path = resolve_cached_path(repo_id, rev, filename).ok_or_else(|| {
+        FetchError::SafetensorsHeader {
+            // BORROW: explicit .to_owned() for owned String in the error variant
+            filename: filename.to_owned(),
+            reason: format!("file not found in local cache for {repo_id} ({rev})"),
+        }
+    })?;
+
+    let file_size = std::fs::metadata(&cached_path).ok().map(|m| m.len());
+
+    let parsed = anamnesis::parse_pth(&cached_path).map_err(|e| FetchError::SafetensorsHeader {
+        // BORROW: explicit .to_owned() for owned String in the error variant
+        filename: filename.to_owned(),
+        reason: format!("failed to parse PTH: {e}"),
+    })?;
+
+    let pth_tensors = parsed.tensor_info();
+    let mut tensors: Vec<TensorInfo> = Vec::with_capacity(pth_tensors.len());
+    let mut cursor: u64 = 0;
+    for t in pth_tensors {
+        // CAST: usize → u64, byte_len fits in u64 by definition (in-memory size).
+        #[allow(clippy::as_conversions)]
+        let len = t.byte_len as u64;
+        let start = cursor;
+        let end = cursor.saturating_add(len);
+        cursor = end;
+        tensors.push(TensorInfo {
+            name: t.name,
+            // BORROW: explicit .to_string() — anamnesis `PthDtype` enum → owned `String`
+            dtype: t.dtype.to_string(),
+            shape: t.shape,
+            data_offsets: (start, end),
+        });
+    }
+
+    Ok(SafetensorsHeaderInfo {
+        tensors,
+        metadata: None,
+        header_size: 0,
+        file_size,
+    })
+}
+
 /// Stringifies a scalar `GgufMetadataValue` from anamnesis.
 ///
 /// Returns `None` for array variants (potentially huge — vocab tables, merges

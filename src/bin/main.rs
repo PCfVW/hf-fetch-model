@@ -5179,9 +5179,9 @@ fn run_inspect_single(
     check_gpu: Option<u32>,
 ) -> Result<(), FetchError> {
     // Classify extension once; v0.10.3 dispatches across .safetensors (remote
-    // or cached), .gguf / .npz (cached only — remote inspect for these formats
-    // arrives in v0.11 via the planned `HttpRangeReader` adapter), with .pth
-    // following in the next Phase B commit.
+    // or cached) and .gguf / .npz / .pth (cached only — remote inspect for
+    // these three formats arrives in v0.11 via the planned `HttpRangeReader`
+    // adapter).
     let ext_lc = Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())
@@ -5189,8 +5189,9 @@ fn run_inspect_single(
     let is_safetensors = ext_lc.as_deref() == Some("safetensors");
     let is_gguf = ext_lc.as_deref() == Some("gguf");
     let is_npz = ext_lc.as_deref() == Some("npz");
+    let is_pth = ext_lc.as_deref() == Some("pth");
 
-    if !is_safetensors && !is_gguf && !is_npz {
+    if !is_safetensors && !is_gguf && !is_npz && !is_pth {
         // BORROW: owned String for the error variant field
         let extension = ext_lc.unwrap_or_else(|| "unknown".to_owned());
         return Err(FetchError::UnsupportedInspectFormat {
@@ -5199,8 +5200,14 @@ fn run_inspect_single(
         });
     }
 
-    if (is_gguf || is_npz) && !cached {
-        let format_label = if is_npz { "NPZ" } else { "GGUF" };
+    if (is_gguf || is_npz || is_pth) && !cached {
+        let format_label = if is_pth {
+            "PTH"
+        } else if is_npz {
+            "NPZ"
+        } else {
+            "GGUF"
+        };
         return Err(FetchError::InvalidArgument(format!(
             "remote {format_label} inspect not yet supported (planned for v0.11): \
              pass --cached after downloading {filename} with `hf-fm download`"
@@ -5212,13 +5219,16 @@ fn run_inspect_single(
             inspect::inspect_gguf_cached(repo_id, filename, revision)?
         } else if is_npz {
             inspect::inspect_npz_cached(repo_id, filename, revision)?
+        } else if is_pth {
+            inspect::inspect_pth_cached(repo_id, filename, revision)?
         } else {
             inspect::inspect_safetensors_cached(repo_id, filename, revision)?
         };
         (info, inspect::InspectSource::Cached)
     } else {
-        // Reachable only when is_safetensors == true (the .gguf/.npz cached-only
-        // branch returned earlier; the unclassified branch returned earlier).
+        // Reachable only when is_safetensors == true (the .gguf/.npz/.pth
+        // cached-only branch returned earlier; the unclassified branch
+        // returned earlier).
         // BORROW: explicit String::from for Option<&str> → Option<String>
         let token = token
             .map(String::from)

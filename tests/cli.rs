@@ -838,6 +838,56 @@ fn find_cached_gguf_repo() -> Option<(String, String)> {
     None
 }
 
+/// Returns `(repo_id, filename)` of the first cached `.pth` file found
+/// across all locally-cached repos, or `None` if the local cache has none.
+///
+/// Used by PTH-flavoured `inspect --cached` integration tests; these tests
+/// SKIP on CI / fresh machines where no `.pth` has been downloaded.
+fn find_cached_pth_repo() -> Option<(String, String)> {
+    let cache_dir = dirs::home_dir()?.join(".cache/huggingface/hub");
+    if !cache_dir.exists() {
+        return None;
+    }
+    for entry in std::fs::read_dir(&cache_dir).ok()? {
+        let entry = entry.ok()?;
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let Some(repo_part) = dir_name.strip_prefix("models--") else {
+            continue;
+        };
+        let repo_id = match repo_part.find("--") {
+            Some(pos) => {
+                let (org, name_with_sep) = repo_part.split_at(pos);
+                let name = name_with_sep.get(2..).unwrap_or_default();
+                format!("{org}/{name}")
+            }
+            None => continue,
+        };
+        let snapshots_dir = entry.path().join("snapshots");
+        let Ok(snapshots) = std::fs::read_dir(&snapshots_dir) else {
+            continue;
+        };
+        for snap in snapshots.flatten() {
+            if !snap.path().is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(snap.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pth"))
+                {
+                    let fname = file.file_name().to_string_lossy().to_string();
+                    return Some((repo_id, fname));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Returns `(repo_id, filename)` of the first cached `.npz` file found
 /// across all locally-cached repos, or `None` if the local cache has none.
 ///
@@ -1311,6 +1361,25 @@ fn inspect_cached_npz_renders() {
     assert!(
         stdout.contains("Tensor") && stdout.contains("Dtype"),
         "NPZ inspect should print the standard tensor table, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_pth_renders() {
+    // v0.10.3 Phase B commit 6: confirm `--cached` inspect works for `.pth`.
+    // Delegates to `anamnesis::parse_pth` + `ParsedPth::tensor_info()` (new
+    // in anamnesis 0.5.0 — metadata-only, no data materialisation). hf-fm
+    // synthesises cumulative `(start, end)` offsets from per-tensor
+    // `byte_len`, same pattern as NPZ.
+    let Some((repo_id, filename)) = find_cached_pth_repo() else {
+        eprintln!("SKIP: no cached .pth file found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args(["inspect", &repo_id, &filename, "--cached"]));
+    assert!(success, "inspect --cached on PTH should succeed: {stderr}");
+    assert!(
+        stdout.contains("Tensor") && stdout.contains("Dtype"),
+        "PTH inspect should print the standard tensor table, got:\n{stdout}"
     );
 }
 
