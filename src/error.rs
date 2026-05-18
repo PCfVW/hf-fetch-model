@@ -119,7 +119,7 @@ pub enum FetchError {
     ///
     /// Emitted before any parse attempt so users see a clear format mismatch
     /// rather than a misleading header-parse error.
-    #[error("hf-fm inspect supports .safetensors or .gguf (got .{extension} for {filename})")]
+    #[error("hf-fm inspect supports .safetensors, .gguf, .npz, or .pth (got .{extension} for {filename})")]
     UnsupportedInspectFormat {
         /// The filename whose extension is unsupported.
         filename: String,
@@ -159,4 +159,34 @@ fn format_failures(failures: &[FileFailure]) -> String {
         s.push_str(f.reason.as_str());
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_format_error_lists_all_four_formats() {
+        // v0.10.3 Phase B commit 7: the `UnsupportedInspectFormat` wording
+        // now names every format the cached-inspect dispatcher handles —
+        // .safetensors (remote or cached), .gguf / .npz / .pth (cached only,
+        // until the `HttpRangeReader` adapter lands in v0.11).
+        let e = FetchError::UnsupportedInspectFormat {
+            filename: "weights.pt".to_owned(),
+            extension: "pt".to_owned(),
+        };
+        let msg = e.to_string();
+        for ext in [".safetensors", ".gguf", ".npz", ".pth"] {
+            assert!(msg.contains(ext), "Display message missing {ext}: {msg}");
+        }
+        // Sanity: the unrecognised extension and filename are still surfaced.
+        assert!(
+            msg.contains(".pt"),
+            "should name the offending extension: {msg}"
+        );
+        assert!(
+            msg.contains("weights.pt"),
+            "should name the filename: {msg}"
+        );
+    }
 }
