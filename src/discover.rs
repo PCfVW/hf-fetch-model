@@ -482,6 +482,48 @@ pub async fn fetch_repo_sizes_concurrent(repo_ids: Vec<String>) -> HashMap<Strin
     by_repo
 }
 
+/// Fans out [`fetch_model_card`] across the given repository IDs through a
+/// bounded `tokio::sync::Semaphore` (8 permits) and returns a map from
+/// `repo_id` to the model card's tag list.
+///
+/// Per-repo failures (network errors, 404s, missing models) are silently
+/// dropped from the returned map. Callers that want strict semantics should
+/// treat absence as "no tags known". Mirrors the same fan-out pattern used by
+/// [`fetch_repo_sizes_concurrent`] for `search --show size`.
+///
+/// # Arguments
+///
+/// * `repo_ids` — Owned list of model identifiers. Ownership is moved into
+///   the spawned tasks so each future is `'static`.
+#[must_use]
+pub async fn fetch_tags_concurrent(repo_ids: Vec<String>) -> HashMap<String, Vec<String>> {
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+    let mut set: tokio::task::JoinSet<Option<(String, Vec<String>)>> = tokio::task::JoinSet::new();
+
+    for repo_id in repo_ids {
+        let sem = Arc::clone(&semaphore);
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await.ok()?;
+            // EXPLICIT: per-repo failure intentionally swallowed — missing
+            // tags mean the row simply doesn't match any --tag filter (the
+            // user's listing is not aborted on a single 404 / network blip).
+            match fetch_model_card(&repo_id).await {
+                Ok(card) => Some((repo_id, card.tags)),
+                Err(_) => None,
+            }
+        });
+    }
+
+    let mut by_repo: HashMap<String, Vec<String>> = HashMap::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Some((repo_id, tags))) = joined {
+            by_repo.insert(repo_id, tags);
+        }
+    }
+
+    by_repo
+}
+
 /// Fetches model card metadata for a specific model from the `HuggingFace` Hub.
 ///
 /// Queries `GET https://huggingface.co/api/models/{model_id}` and extracts

@@ -153,7 +153,26 @@ struct DownloadArgs {
 #[derive(Subcommand)]
 enum Commands {
     /// List model families in local HF cache.
-    ListFamilies,
+    #[command(after_help = "Examples:
+  hf-fm list-families                           # default grouped view
+  hf-fm list-families --show quant              # add a quant column
+  hf-fm list-families --tag bitsandbytes        # filter to bitsandbytes-tagged repos
+  hf-fm list-families --show quant --tag gguf   # combine
+
+See also: hf-fm discover, hf-fm du")]
+    ListFamilies {
+        /// Additional columns to show. Currently only `quant` (read from
+        /// each repo's cached `config.json` `quantization_config.quant_method`;
+        /// falls back to `gguf` for repos with a `.gguf` file in the snapshot).
+        #[arg(long, value_delimiter = ',', value_enum)]
+        show: Vec<ShowFamiliesColumn>,
+        /// Filter cached repos by a `HuggingFace` tag (case-insensitive).
+        /// Tags are fetched at query time via the HF `model_info` API, bounded
+        /// to 8 concurrent requests; per-repo fetch failures silently drop
+        /// the row from the filter result.
+        #[arg(long)]
+        tag: Option<String>,
+    },
     /// Discover new model families from the `HuggingFace` Hub.
     #[command(after_help = "Examples:
   hf-fm discover --limit 100                  # top families by download count
@@ -373,7 +392,8 @@ See also: hf-fm list-families, hf-fm discover")]
         reports a one-line fit verdict against the model's weight bytes.\n\
         Pass --check-gpu N to target a specific device.\n\n\
         For a walkthrough on a real 4-shard model, see\n\
-        docs/tutorials/inspect-before-downloading.md")]
+        docs/tutorials/inspect-before-downloading.md\n\n\
+        See also: hf-fm diff <A> <B>    # compare two repos' tensor layouts")]
     Inspect {
         /// The repository identifier (e.g., `"google/gemma-2-2b-it"`).
         repo_id: String,
@@ -536,11 +556,14 @@ enum CacheCommands {
     /// Output is a bare path (no labels), suitable for shell substitution:
     /// `cd $(hf-fm cache path google/gemma-2-2b-it)`.
     ///
-    /// Resolves the `main` ref only; repos downloaded at a non-default revision
-    /// are not yet supported (planned for a future `--revision` flag).
+    /// Resolves the `main` ref by default; pass `--revision <REV>` to
+    /// resolve a different branch, tag, or commit SHA.
     Path {
         /// Repository identifier or numeric index from `du` output.
         repo_id: String,
+        /// Git revision (branch, tag, or commit SHA). Defaults to `main`.
+        #[arg(long)]
+        revision: Option<String>,
     },
     /// Re-verify `SHA256` digests of cached files against `HuggingFace` LFS metadata.
     ///
@@ -579,6 +602,15 @@ enum ShowColumn {
     Tags,
     /// Total repository size, summed across all files. Requires one extra HTTP request per result.
     Size,
+}
+
+// EXHAUSTIVE: internal CLI dispatch enum; crate owns all variants
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ShowFamiliesColumn {
+    /// Quant column read from each repo's cached `config.json`
+    /// (`quantization_config.quant_method`); falls back to `gguf` for repos
+    /// with a `.gguf` file in the snapshot.
+    Quant,
 }
 
 /// Canonical kebab-case name for a [`Preset`], matching the value `clap` parses
@@ -630,7 +662,7 @@ fn main() -> ExitCode {
         Some(Commands::DownloadFile { verbose, .. }) => *verbose,
         None => cli.download.verbose,
         Some(
-            Commands::ListFamilies
+            Commands::ListFamilies { .. }
             | Commands::Discover { .. }
             | Commands::Search { .. }
             | Commands::Info { .. }
@@ -707,7 +739,8 @@ fn main() -> ExitCode {
 #[allow(clippy::too_many_lines)]
 fn run(cli: Cli) -> Result<(), FetchError> {
     match cli.command {
-        Some(Commands::ListFamilies) => run_list_families(),
+        // BORROW: explicit .as_deref() for owned → borrowed conversion
+        Some(Commands::ListFamilies { show, tag }) => run_list_families(&show, tag.as_deref()),
         // BORROW: explicit .as_deref() for owned → borrowed conversion
         Some(Commands::Discover { limit, tag }) => run_discover(limit, tag.as_deref()),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
@@ -898,11 +931,10 @@ fn run(cli: Cli) -> Result<(), FetchError> {
                 yes,
                 list_kept,
             } => run_cache_gc(older_than, max_size, except, dry_run, yes, list_kept),
-            // BORROW: explicit .as_str() for String → &str conversion
-            CacheCommands::Path { repo_id } => {
+            // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
+            CacheCommands::Path { repo_id, revision } => {
                 let resolved = resolve_du_arg(repo_id.as_str())?;
-                // BORROW: explicit .as_str() instead of Deref coercion
-                run_cache_path(resolved.as_str())
+                run_cache_path(resolved.as_str(), revision.as_deref())
             }
             // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
             CacheCommands::Verify {
@@ -1550,9 +1582,12 @@ fn run_download_file_glob(params: DownloadFileParams<'_>) -> Result<(), FetchErr
     Ok(())
 }
 
-fn run_list_families() -> Result<(), FetchError> {
+#[allow(clippy::too_many_lines)]
+fn run_list_families(show: &[ShowFamiliesColumn], tag: Option<&str>) -> Result<(), FetchError> {
+    let show_quant = show.contains(&ShowFamiliesColumn::Quant);
+
     let cache_dir = cache::hf_cache_dir()?;
-    let families = cache::list_cached_families()?;
+    let mut families = cache::list_cached_families()?;
 
     println!("Cache: {}", cache_dir.display());
     println!();
@@ -1562,6 +1597,43 @@ fn run_list_families() -> Result<(), FetchError> {
         return Ok(());
     }
 
+    // Apply --tag filter (one HTTP request per cached repo, bounded to 8 concurrent).
+    if let Some(tag_filter) = tag {
+        let lower_tag = tag_filter.to_lowercase();
+        // BORROW: explicit .clone() — fetch_tags_concurrent takes Vec<String>
+        // because each spawned task needs an owned `'static` String.
+        let repo_ids: Vec<String> = families
+            .values()
+            .flat_map(|entries| entries.iter().map(|e| e.repo_id.clone()))
+            .collect();
+
+        let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+            path: PathBuf::from("<runtime>"),
+            source: e,
+        })?;
+        let tags_by_repo = rt.block_on(discover::fetch_tags_concurrent(repo_ids));
+
+        for entries in families.values_mut() {
+            entries.retain(|entry| {
+                // BORROW: explicit .as_str() instead of Deref coercion
+                let Some(tags) = tags_by_repo.get(entry.repo_id.as_str()) else {
+                    return false;
+                };
+                tags.iter()
+                    // BORROW: explicit .as_str() instead of Deref coercion
+                    .any(|t| t.eq_ignore_ascii_case(lower_tag.as_str()))
+            });
+        }
+        // Prune empty families.
+        families.retain(|_, entries| !entries.is_empty());
+
+        if families.is_empty() {
+            println!("No cached families match tag {tag_filter:?}.");
+            return Ok(());
+        }
+    }
+
+    // Column widths.
     let fw = families
         .keys()
         .map(String::len)
@@ -1571,18 +1643,46 @@ fn run_list_families() -> Result<(), FetchError> {
         + 2;
     let mw = families
         .values()
-        .flat_map(|repos| repos.iter().map(String::len))
+        .flat_map(|entries| entries.iter().map(|e| e.repo_id.len()))
         .max()
         .unwrap_or(6)
         .max(6); // BORROW: "Models".len()
-    println!("{:<fw$}Models", "Family");
-    println!("{:-<fw$}{:-<mw$}", "", "");
-    for (model_type, repos) in &families {
-        for (i, repo) in repos.iter().enumerate() {
-            if i == 0 {
-                println!("{model_type:<fw$}{repo}");
+                 // BORROW: explicit .as_deref() in the closure below for Option<String> → Option<&str>
+    let qw = if show_quant {
+        families
+            .values()
+            .flat_map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| e.quant_method.as_deref().unwrap_or("\u{2014}").len())
+            })
+            .max()
+            .unwrap_or(5)
+            .max(5) // BORROW: "Quant".len()
+            + 2
+    } else {
+        0
+    };
+
+    // Header.
+    if show_quant {
+        println!("{:<fw$}{:<qw$}Models", "Family", "Quant");
+        println!("{:-<fw$}{:-<qw$}{:-<mw$}", "", "", "");
+    } else {
+        println!("{:<fw$}Models", "Family");
+        println!("{:-<fw$}{:-<mw$}", "", "");
+    }
+
+    // Body.
+    for (model_type, entries) in &families {
+        for (i, entry) in entries.iter().enumerate() {
+            // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+            let quant_cell = entry.quant_method.as_deref().unwrap_or("\u{2014}");
+            let family_cell = if i == 0 { model_type.as_str() } else { "" }; // BORROW: explicit .as_str()
+            if show_quant {
+                println!("{family_cell:<fw$}{quant_cell:<qw$}{}", entry.repo_id);
             } else {
-                println!("{:<fw$}{repo}", "");
+                println!("{family_cell:<fw$}{}", entry.repo_id);
             }
         }
     }
@@ -1762,6 +1862,10 @@ fn run_search(
                 Ok(card) => print_model_card(&card),
                 Err(e) => eprintln!("\n  (could not fetch model card: {e})"),
             }
+            // Discoverability cross-link: users who land on --exact often want
+            // the longer-form view (full README, license fields) — point them
+            // at `info` so they don't have to guess the next subcommand.
+            println!("\n  See also: hf-fm info {}", matched.model_id);
         } else {
             println!("No exact match for \"{query}\".");
             if !filtered.is_empty() {
@@ -1909,6 +2013,9 @@ fn run_info(
 
         println!();
         println!("  README:");
+        if looks_like_default_template(body) {
+            println!("  Note: README appears to be the HuggingFace default template (low information density).");
+        }
         println!("  {}", "\u{2500}".repeat(70));
         let lines: Vec<&str> = body.lines().collect();
         let display_count = if max_lines == 0 {
@@ -2014,6 +2121,38 @@ fn strip_yaml_front_matter(text: &str) -> &str {
         return body.trim_start_matches('\r');
     }
     text
+}
+
+/// Heuristic: does the README body look like an unmodified `HuggingFace` default template?
+///
+/// Two conditions, either of which fires:
+/// - The first 20 body lines contain the literal `# Model Card for Model ID`
+///   heading that ships with the HF Hub default template.
+/// - More than 30% of the first 20 body lines are HTML comments (lines whose
+///   first non-whitespace characters are `<!--`).
+///
+/// A `true` return triggers a one-line `Note:` warning above the README dump
+/// in [`run_info`]. Misfire cost is low — a slightly customised template
+/// keeps the warning but the user still sees the full README.
+#[must_use]
+fn looks_like_default_template(body: &str) -> bool {
+    let lines: Vec<&str> = body.lines().take(20).collect();
+    if lines.is_empty() {
+        return false;
+    }
+    if lines
+        .iter()
+        .any(|l| l.trim() == "# Model Card for Model ID")
+    {
+        return true;
+    }
+    let comment_count = lines
+        .iter()
+        .filter(|l| l.trim_start().starts_with("<!--"))
+        .count();
+    // Integer arithmetic: comment_count / lines.len() > 0.30 is equivalent to
+    // 100 * comment_count > 30 * lines.len() with no float involvement.
+    comment_count.saturating_mul(100) > lines.len().saturating_mul(30)
 }
 
 fn run_status_all() -> Result<(), FetchError> {
@@ -2798,10 +2937,11 @@ fn run_cache_delete(repo_id: &str, yes: bool) -> Result<(), FetchError> {
 
 /// Prints the snapshot directory path for a cached model.
 ///
-/// Resolves the `main` ref to a commit hash and constructs the snapshot
-/// path. Output is a bare path with no decoration, intended for shell
-/// substitution: `cd $(hf-fm cache path org/model)`.
-fn run_cache_path(repo_id: &str) -> Result<(), FetchError> {
+/// Resolves the named ref (default: `main`) to a commit hash and constructs
+/// the snapshot path. Output is a bare path with no decoration, intended for
+/// shell substitution: `cd $(hf-fm cache path org/model)`.
+fn run_cache_path(repo_id: &str, revision: Option<&str>) -> Result<(), FetchError> {
+    let revision = revision.unwrap_or("main");
     let cache_dir = cache::hf_cache_dir()?;
     let repo_dir = hf_fetch_model::cache_layout::repo_dir(&cache_dir, repo_id);
 
@@ -2811,8 +2951,10 @@ fn run_cache_path(repo_id: &str) -> Result<(), FetchError> {
         )));
     }
 
-    let commit_hash = cache::read_ref(&repo_dir, "main").ok_or_else(|| {
-        FetchError::InvalidArgument(format!("{repo_id} is cached but has no ref for \"main\""))
+    let commit_hash = cache::read_ref(&repo_dir, revision).ok_or_else(|| {
+        FetchError::InvalidArgument(format!(
+            "{repo_id} is cached but has no ref for \"{revision}\""
+        ))
     })?;
 
     // BORROW: explicit .as_str() instead of Deref coercion
@@ -2820,7 +2962,7 @@ fn run_cache_path(repo_id: &str) -> Result<(), FetchError> {
 
     if !snapshot_dir.exists() {
         return Err(FetchError::InvalidArgument(format!(
-            "snapshot directory for {repo_id} does not exist"
+            "snapshot directory for {repo_id} at revision \"{revision}\" does not exist"
         )));
     }
 
@@ -7409,5 +7551,72 @@ mod tests {
             total <= DIFF_DTYPES_DESIGN_WIDTH,
             "canonical histogram width = {total} chars, design target {DIFF_DTYPES_DESIGN_WIDTH}",
         );
+    }
+
+    // ---------- looks_like_default_template ----------
+
+    #[test]
+    fn template_detector_fires_on_default_hf_card() {
+        // Verbatim opening of the HuggingFace default model card.
+        let body = "\
+# Model Card for Model ID
+
+<!-- Provide a quick summary of what the model is/does. -->
+
+## Model Details
+
+### Model Description
+
+<!-- Provide a longer summary of what this model is. -->
+";
+        assert!(looks_like_default_template(body));
+    }
+
+    #[test]
+    fn template_detector_clears_a_real_readme() {
+        // A content-rich README excerpt (no template markers, no HTML comments).
+        let body = "\
+# Llama 3.2 1B Instruct
+
+A 1B-parameter instruction-tuned Llama 3.2 model trained on a mixture of
+public and proprietary data. Optimized for low-latency on-device inference.
+
+## Usage
+
+```python
+from transformers import AutoModelForCausalLM
+model = AutoModelForCausalLM.from_pretrained(\"meta-llama/Llama-3.2-1B\")
+```
+
+## License
+
+This model is released under the Llama 3.2 community license.
+";
+        assert!(!looks_like_default_template(body));
+    }
+
+    #[test]
+    fn template_detector_is_robust_to_blank_input() {
+        assert!(!looks_like_default_template(""));
+    }
+
+    #[test]
+    fn template_detector_fires_on_high_comment_density() {
+        // 5 HTML comments out of 12 lines = 41% — above the 30% threshold.
+        let body = "\
+# Random Custom Title
+
+Some intro text here.
+<!-- comment 1 -->
+<!-- comment 2 -->
+<!-- comment 3 -->
+<!-- comment 4 -->
+<!-- comment 5 -->
+More content.
+More content.
+More content.
+More content.
+";
+        assert!(looks_like_default_template(body));
     }
 }

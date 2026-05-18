@@ -398,6 +398,9 @@ hf-fm cache path 2
 
 # Use in shell scripts
 cd $(hf-fm cache path google/gemma-2-2b-it)
+
+# Pin to a specific branch / tag / commit SHA
+hf-fm cache path google/gemma-2-2b-it --revision v1.0
 ```
 
 ```sh
@@ -481,6 +484,13 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--pipeline` | Filter by pipeline task (e.g., `text-generation`, `text-classification`) | — |
 | `--tag` | Filter by model tag (e.g., `gguf`, `conversational`, `imatrix`) | — |
 | `--show` | Comma-separated columns to add: `tags` (free; from the existing API payload), `size` (one extra HTTP request per result, bounded to 8 concurrent). | — |
+
+## List-families flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--show` | Comma-separated columns to add. Currently only `quant` — reads `quantization_config.quant_method` from each repo's cached `config.json`, falling back to `gguf` when any cached file ends in `.gguf`. | — |
+| `--tag` | Filter cached repos by a HuggingFace tag (case-insensitive). Tags are fetched at query time via the HF model_info API, bounded to 8 concurrent requests. Per-repo fetch failures silently drop the row from the filter result. Empty families are pruned from the output. | — |
 
 ## Status flags
 

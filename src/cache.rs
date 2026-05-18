@@ -157,20 +157,37 @@ pub fn hf_cache_dir() -> Result<PathBuf, FetchError> {
     Ok(path)
 }
 
+/// One repository inside a cached family, with optional quantization label.
+///
+/// Returned by [`list_cached_families`] so callers can render a quant column
+/// alongside the repo ID without re-reading every snapshot's `config.json`
+/// in a second pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilyEntry {
+    /// The repository identifier (e.g., `"meta-llama/Llama-3.2-1B"`).
+    pub repo_id: String,
+    /// Quantization method as reported by `quantization_config.quant_method`
+    /// in the cached `config.json`. Falls back to `"gguf"` when any cached
+    /// file in the newest snapshot directory has a `.gguf` extension.
+    /// `None` for full-precision repos.
+    pub quant_method: Option<String>,
+}
+
 /// Scans the local HF cache for downloaded models and groups them by `model_type`.
 ///
 /// Looks for `config.json` files inside model snapshot directories:
 /// `<cache>/models--<org>--<name>/snapshots/*/config.json`
 ///
 /// Returns a map from `model_type` (e.g., `"llama"`) to a sorted list of
-/// repository identifiers (e.g., `["meta-llama/Llama-3.2-1B"]`).
+/// [`FamilyEntry`] values, each pairing a repo ID with its quantization
+/// label (if any).
 ///
 /// Models without a `model_type` field in their `config.json` are skipped.
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Io`] if the cache directory cannot be read.
-pub fn list_cached_families() -> Result<BTreeMap<String, Vec<String>>, FetchError> {
+/// Returns [`FetchError::Io`](crate::FetchError::Io) if the cache directory cannot be read.
+pub fn list_cached_families() -> Result<BTreeMap<String, Vec<FamilyEntry>>, FetchError> {
     let cache_dir = hf_cache_dir()?;
 
     if !cache_dir.exists() {
@@ -182,7 +199,7 @@ pub fn list_cached_families() -> Result<BTreeMap<String, Vec<String>>, FetchErro
         source: e,
     })?;
 
-    let mut families: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut families: BTreeMap<String, Vec<FamilyEntry>> = BTreeMap::new();
 
     for entry in entries {
         let Ok(entry) = entry else { continue };
@@ -201,35 +218,48 @@ pub fn list_cached_families() -> Result<BTreeMap<String, Vec<String>>, FetchErro
             continue;
         }
 
-        if let Some(model_type) = find_model_type_in_snapshots(&snapshots_dir) {
-            families.entry(model_type).or_default().push(repo_id);
+        if let Some((model_type, quant_method)) = find_family_info_in_snapshots(&snapshots_dir) {
+            families.entry(model_type).or_default().push(FamilyEntry {
+                repo_id,
+                quant_method,
+            });
         }
     }
 
     // Sort repo lists within each family for stable output
-    for repos in families.values_mut() {
-        repos.sort();
+    for entries in families.values_mut() {
+        entries.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
     }
 
     Ok(families)
 }
 
-/// Searches snapshot directories for a `config.json` containing `model_type`.
+/// Searches snapshot directories for a `config.json` containing `model_type`,
+/// and reports an accompanying quantization label when one can be inferred.
 ///
-/// Returns the first `model_type` value found, or `None`.
-fn find_model_type_in_snapshots(snapshots_dir: &std::path::Path) -> Option<String> {
+/// Returns the first `(model_type, quant_method)` pair found. The quant
+/// label comes from `quantization_config.quant_method` in `config.json`,
+/// or falls back to `Some("gguf".to_owned())` when any sibling file in the
+/// same snapshot directory has a `.gguf` extension. Returns `None` if no
+/// snapshot yields a parseable `model_type`.
+fn find_family_info_in_snapshots(
+    snapshots_dir: &std::path::Path,
+) -> Option<(String, Option<String>)> {
     let snapshots = std::fs::read_dir(snapshots_dir).ok()?;
 
     for snap_entry in snapshots {
         let Ok(snap_entry) = snap_entry else { continue };
-        let config_path = snap_entry.path().join("config.json");
+        let snap_path = snap_entry.path();
+        let config_path = snap_path.join("config.json");
 
         if !config_path.exists() {
             continue;
         }
 
         if let Some(model_type) = extract_model_type(&config_path) {
-            return Some(model_type);
+            let quant_method = extract_quant_method(&config_path)
+                .or_else(|| snapshot_has_gguf(&snap_path).then(|| "gguf".to_owned())); // BORROW: explicit .to_owned()
+            return Some((model_type, quant_method));
         }
     }
 
@@ -243,6 +273,46 @@ fn extract_model_type(config_path: &std::path::Path) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(contents.as_str()).ok()?;
     // BORROW: explicit .as_str() on serde_json Value
     value.get("model_type")?.as_str().map(String::from)
+}
+
+/// Reads a `config.json` file and extracts the transformers-standard
+/// `quantization_config.quant_method` field, if present.
+///
+/// Returns `None` when the file is unreadable, malformed, or contains no
+/// quantization config (the repo is treated as full-precision in that case;
+/// the GGUF filename fallback is applied separately by the caller).
+fn extract_quant_method(config_path: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(config_path).ok()?;
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let value: serde_json::Value = serde_json::from_str(contents.as_str()).ok()?;
+    // BORROW: explicit .as_str() on serde_json Value
+    value
+        .get("quantization_config")?
+        .get("quant_method")?
+        .as_str()
+        .map(String::from)
+}
+
+/// Returns `true` if any file in the snapshot directory has a `.gguf` extension.
+///
+/// Used as a fallback quant label when `config.json` carries no
+/// `quantization_config` (GGUF repos typically lack a transformers-style
+/// `config.json` `quantization_config` block). Extension comparison is
+/// case-insensitive via `OsStr::eq_ignore_ascii_case`.
+fn snapshot_has_gguf(snapshot_dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(snapshot_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Status of a single file in the cache.
