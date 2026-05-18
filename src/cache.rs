@@ -13,7 +13,102 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::FetchError;
+
+/// Filename of the per-repo `hf-fm` snapshot sidecar.
+///
+/// Lives at `{cache_root}/models--{org}--{name}/.hf-fm-snapshot.json`.
+/// Written by `download` (recording the active `--preset` / `--filter` /
+/// `--exclude`) and consumed by `status` (to distinguish files deliberately
+/// skipped via the preset's glob list from files that are genuinely missing).
+pub const SNAPSHOT_FILENAME: &str = ".hf-fm-snapshot.json";
+
+/// Schema version of the on-disk [`Snapshot`] file. Bumped on incompatible changes.
+pub const SNAPSHOT_VERSION: u32 = 1;
+
+/// On-disk record of the arguments that produced a cached repository.
+///
+/// Persisted by `hf-fm download` as a small JSON file at the repository's
+/// cache root, alongside `refs/`, `blobs/`, and `snapshots/`. Read back by
+/// `hf-fm status` so files that don't match the recorded preset can be
+/// reported as [`FileStatus::Excluded`] instead of [`FileStatus::Missing`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snapshot {
+    /// Schema version. Equals [`SNAPSHOT_VERSION`] for newly-written files.
+    pub version: u32,
+    /// Git revision at download time (resolved commit SHA or branch name).
+    pub revision: String,
+    /// The `--preset` value used at download time, if any. One of
+    /// `"safetensors"`, `"gguf"`, `"npz"`, `"pth"`, `"config-only"`.
+    pub preset: Option<String>,
+    /// `--filter` glob patterns used at download time. Reserved for a later
+    /// patch that adds `status --filter`; not yet consumed by `status`.
+    pub filter: Vec<String>,
+    /// `--exclude` glob patterns used at download time. Reserved for a later
+    /// patch that adds `status --exclude`; not yet consumed by `status`.
+    pub exclude: Vec<String>,
+}
+
+/// Returns the absolute path of the [`SNAPSHOT_FILENAME`] sidecar for a given
+/// repository cache directory.
+#[must_use]
+pub fn snapshot_path(repo_dir: &Path) -> PathBuf {
+    repo_dir.join(SNAPSHOT_FILENAME)
+}
+
+/// Reads the per-repo [`Snapshot`] sidecar if it exists.
+///
+/// A missing sidecar is not an error — older caches (downloaded before this
+/// feature) simply return `Ok(None)`.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`](crate::FetchError::Io) if the file exists but
+/// cannot be read.
+/// Returns [`FetchError::InvalidArgument`](crate::FetchError::InvalidArgument)
+/// if the file is present but its JSON cannot be parsed (e.g. corruption or
+/// a future schema version this binary cannot understand).
+pub fn read_snapshot(repo_dir: &Path) -> Result<Option<Snapshot>, FetchError> {
+    let path = snapshot_path(repo_dir);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(FetchError::Io { path, source: e }),
+    };
+    let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|e| {
+        FetchError::InvalidArgument(format!("failed to parse snapshot {}: {e}", path.display()))
+    })?;
+    Ok(Some(snapshot))
+}
+
+/// Writes the [`Snapshot`] sidecar for a repository, atomically (write to a
+/// `.tmp` sibling, then rename).
+///
+/// Overwrites any previously-written sidecar — the design is intentionally
+/// last-download-wins.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`](crate::FetchError::Io) on any filesystem
+/// failure (parent directory missing, no write permission, rename across
+/// filesystems, etc.).
+pub fn write_snapshot(repo_dir: &Path, snapshot: &Snapshot) -> Result<(), FetchError> {
+    let path = snapshot_path(repo_dir);
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(snapshot)
+        .map_err(|e| FetchError::InvalidArgument(format!("failed to serialize snapshot: {e}")))?;
+    std::fs::write(&tmp, bytes).map_err(|e| FetchError::Io {
+        path: tmp.clone(),
+        source: e,
+    })?;
+    std::fs::rename(&tmp, &path).map_err(|e| FetchError::Io {
+        path: path.clone(),
+        source: e,
+    })?;
+    Ok(())
+}
 
 /// Reconstructs a repo ID from a `models--org--name` directory name.
 ///
@@ -173,6 +268,14 @@ pub enum FileStatus {
         /// Expected file size in bytes (0 if unknown).
         expected_size: u64,
     },
+    /// File is on the Hub but was deliberately not requested at download time
+    /// (or is now filtered out by `status --preset <P>`). Distinguished from
+    /// [`FileStatus::Missing`] so the user does not chase a "fix" for an
+    /// intentional skip.
+    Excluded {
+        /// Expected file size in bytes (0 if unknown).
+        expected_size: u64,
+    },
 }
 
 /// Cache status report for a repository.
@@ -215,15 +318,38 @@ impl RepoStatus {
             .filter(|(_, s)| matches!(s, FileStatus::Missing { .. }))
             .count()
     }
+
+    /// Number of files deliberately excluded by the active preset / filter.
+    ///
+    /// Always `0` when `status` is invoked without a preset (whether from
+    /// CLI or sidecar) — the `Excluded` variant requires an active filter.
+    #[must_use]
+    pub fn excluded_count(&self) -> usize {
+        self.files
+            .iter()
+            .filter(|(_, s)| matches!(s, FileStatus::Excluded { .. }))
+            .count()
+    }
 }
 
 /// Inspects the local cache for a repository and compares against the remote file list.
+///
+/// When `preset_globs` is `Some`, files that do **not** match any of the
+/// supplied glob patterns and are absent locally are classified as
+/// [`FileStatus::Excluded`] instead of [`FileStatus::Missing`]. Files that
+/// **do** match the preset and are absent are still [`FileStatus::Missing`].
+/// Files that are present locally classify as `Complete` / `Partial`
+/// regardless of whether they match (the user has them — by what route is
+/// not status's concern).
 ///
 /// # Arguments
 ///
 /// * `repo_id` — The repository identifier (e.g., `"RWKV/RWKV7-Goose-World3-1.5B-HF"`).
 /// * `token` — Optional authentication token.
 /// * `revision` — Optional revision (defaults to `"main"`).
+/// * `preset_globs` — Optional include-glob list (typically returned by
+///   [`crate::config::preset_globs`]). When supplied, governs the
+///   `Excluded` distinction. When `None`, no `Excluded` entries are produced.
 ///
 /// # Notes
 ///
@@ -236,12 +362,15 @@ impl RepoStatus {
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::Http`] if the API request fails.
-/// Returns [`FetchError::Io`] if the cache directory cannot be read.
+/// Returns [`FetchError::Http`](crate::FetchError::Http) if the API request fails.
+/// Returns [`FetchError::Io`](crate::FetchError::Io) if the cache directory cannot be read.
+/// Returns [`FetchError::InvalidPattern`](crate::FetchError::InvalidPattern)
+/// if any of the supplied `preset_globs` patterns fails to compile.
 pub async fn repo_status(
     repo_id: &str,
     token: Option<&str>,
     revision: Option<&str>,
+    preset_globs: Option<&[&str]>,
 ) -> Result<RepoStatus, FetchError> {
     let revision = revision.unwrap_or("main");
     let cache_dir = hf_cache_dir()?;
@@ -265,6 +394,17 @@ pub async fn repo_status(
     // the blobs directory for every missing file in the loop below).
     let blobs_dir = crate::cache_layout::blobs_dir(&repo_dir);
     let has_any_partial = has_partial_blob(&blobs_dir);
+
+    // Compile preset globs once, outside the per-file loop. `compile_glob_patterns`
+    // already returns `Ok(None)` for empty slices, so an empty `Some(&[])`
+    // collapses to the "no filter" case below.
+    let preset_globset: Option<globset::GlobSet> = if let Some(patterns) = preset_globs {
+        // BORROW: explicit .to_string() — compile_glob_patterns expects &[String]
+        let owned: Vec<String> = patterns.iter().map(|s| (*s).to_string()).collect();
+        crate::compile_glob_patterns(&owned)?
+    } else {
+        None
+    };
 
     // Cross-reference remote files against local state.
     let mut files: Vec<(String, FileStatus)> = Vec::with_capacity(remote_files.len());
@@ -296,6 +436,13 @@ pub async fn repo_status(
                     local_size: part_size,
                     expected_size,
                 }
+            } else if preset_globset
+                .as_ref()
+                // BORROW: explicit .as_str() — globset matches against &str
+                .is_some_and(|gs| !gs.is_match(remote.filename.as_str()))
+            {
+                // File is absent AND the active preset deliberately excludes it.
+                FileStatus::Excluded { expected_size }
             } else {
                 FileStatus::Missing { expected_size }
             }
@@ -996,5 +1143,45 @@ mod tests {
             sidecars[1],
             PathBuf::from("/tmp/models--org--model/blobs/abc.def.chunked.part.state.tmp")
         );
+    }
+
+    #[test]
+    fn snapshot_roundtrip_write_then_read_returns_equal_value() {
+        // Use a freshly-created temp dir so the test is isolated from any
+        // pre-existing cache state on the developer machine / CI runner.
+        let tmp =
+            std::env::temp_dir().join(format!("hf-fm-snapshot-roundtrip-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let original = Snapshot {
+            version: SNAPSHOT_VERSION,
+            revision: "main".to_owned(),
+            preset: Some("safetensors".to_owned()),
+            filter: vec!["*.json".to_owned()],
+            exclude: vec!["*.md".to_owned()],
+        };
+
+        write_snapshot(&tmp, &original).expect("write_snapshot");
+        let round_tripped = read_snapshot(&tmp)
+            .expect("read_snapshot")
+            .expect("snapshot present");
+
+        assert_eq!(round_tripped, original);
+
+        // Cleanup
+        let _ = std::fs::remove_file(snapshot_path(&tmp));
+        let _ = std::fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn snapshot_read_returns_none_when_absent() {
+        let tmp =
+            std::env::temp_dir().join(format!("hf-fm-snapshot-absent-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let result = read_snapshot(&tmp).expect("read_snapshot");
+        assert!(result.is_none(), "expected None for absent sidecar");
+
+        let _ = std::fs::remove_dir(&tmp);
     }
 }

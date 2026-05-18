@@ -86,6 +86,13 @@ Models matching "llama" (by downloads):
   hf-fm bartowski/Meta-Llama-3.1-8B-Instruct-GGUF        (237,791 downloads)  [text-generation]
   hf-fm MaziyarPanahi/Meta-Llama-3.1-8B-Instruct-GGUF    (184,847 downloads)  [text-generation]
 
+$ hf-fm search fp4 --tag bitsandbytes --show tags,size --limit 3
+Models matching "fp4" (by downloads):
+
+  hf-fm HF-Quantization/Llama-3.2-1B-BNB-FP4-BF16     (5 downloads)  [transformers, text-generation]  1.50 GiB  tags: transformers, safetensors, llama, 4-bit, bitsandbytes
+  hf-fm saxman/Qwen3-Coder-30B-A3B-Instruct-bnb-fp4   (4 downloads)  [transformers, text-generation]  18.20 GiB  tags: transformers, safetensors, qwen3, 4-bit, bitsandbytes
+  hf-fm ema1234/qwen_mcqa_bnb_fp4                     (2 downloads)  [transformers, text-generation]  548.00 MiB  tags: transformers, safetensors, qwen3, 4-bit, bitsandbytes
+
 $ hf-fm search mistralai/Ministral-3-3B-Instruct-2512 --exact
 Exact match:
 

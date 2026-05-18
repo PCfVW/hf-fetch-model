@@ -158,6 +158,9 @@ hf-fm search llama --tag gguf
 
 # Combine a free-text query with a tag filter (text-match AND tag-match)
 hf-fm search fp4 --tag bitsandbytes
+
+# Enrich result rows with inline tag list (free) and total repo size (one extra HTTP request per row)
+hf-fm search fp4 --tag bitsandbytes --show tags,size
 ```
 
 Common quantization synonyms are normalized automatically: `8bit`, `8-bit`, `int8`, and `INT8` all produce the same results. Same for `4bit`/`4-bit`/`int4` and `fp8`/`float8`.
@@ -295,6 +298,10 @@ hf-fm du --tree --age
 # Check download status (per-repo or entire cache)
 hf-fm status RWKV/RWKV7-Goose-World3-1.5B-HF
 hf-fm status
+
+# Re-evaluate "MISSING" through a preset's glob list — `.gitattributes` and `README.md`
+# read `excluded` instead of `MISSING` for a `--preset safetensors` cache.
+hf-fm status RWKV/RWKV7-Goose-World3-1.5B-HF --preset safetensors
 
 # List model families in local cache
 hf-fm list-families
@@ -473,6 +480,15 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--limit` | Maximum number of results | 20 |
 | `--pipeline` | Filter by pipeline task (e.g., `text-generation`, `text-classification`) | — |
 | `--tag` | Filter by model tag (e.g., `gguf`, `conversational`, `imatrix`) | — |
+| `--show` | Comma-separated columns to add: `tags` (free; from the existing API payload), `size` (one extra HTTP request per result, bounded to 8 concurrent). | — |
+
+## Status flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--preset` | Re-evaluate which remote files are deliberate skips. Files not matching this preset's glob list (`safetensors`, `gguf`, `npz`, `pth`, `config-only`) are reported as `excluded` instead of `MISSING`. Overrides the value persisted in `.hf-fm-snapshot.json` by `download --preset`. | sidecar value (or none) |
+| `--revision` | Git revision (branch, tag, SHA) | main |
+| `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
 ## Info flags
 

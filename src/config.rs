@@ -382,6 +382,42 @@ impl FetchConfigBuilder {
     }
 }
 
+/// Glob patterns for the `safetensors` preset (matches what [`Filter::safetensors`] builds).
+pub const PRESET_SAFETENSORS_GLOBS: &[&str] = &["*.safetensors", "*.json", "*.txt"];
+
+/// Glob patterns for the `gguf` preset (matches what [`Filter::gguf`] builds).
+pub const PRESET_GGUF_GLOBS: &[&str] = &["*.gguf", "*.json", "*.txt"];
+
+/// Glob patterns for the `npz` preset (matches what [`Filter::npz`] builds).
+pub const PRESET_NPZ_GLOBS: &[&str] = &["*.npz", "*.npy", "config.yaml", "*.json", "*.txt"];
+
+/// Glob patterns for the `pth` preset (matches what [`Filter::pth`] builds).
+pub const PRESET_PTH_GLOBS: &[&str] = &["pytorch_model*.bin", "*.json", "*.txt"];
+
+/// Glob patterns for the `config-only` preset (matches what [`Filter::config_only`] builds).
+pub const PRESET_CONFIG_ONLY_GLOBS: &[&str] = &["*.json", "*.txt", "*.md"];
+
+/// Resolves a preset name (e.g. `"safetensors"`, `"gguf"`, `"npz"`, `"pth"`,
+/// `"config-only"`) to its underlying include-glob list. Returns `None` for
+/// unknown names.
+///
+/// Single source of truth shared by both the `download` path (via [`Filter`])
+/// and the `status` path (via `hf-fm status --preset <P>`). Callers at status
+/// time use the returned glob list to classify files that don't match the
+/// preset as [`crate::cache::FileStatus::Excluded`] instead of
+/// [`crate::cache::FileStatus::Missing`].
+#[must_use]
+pub fn preset_globs(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "safetensors" => Some(PRESET_SAFETENSORS_GLOBS),
+        "gguf" => Some(PRESET_GGUF_GLOBS),
+        "npz" => Some(PRESET_NPZ_GLOBS),
+        "pth" => Some(PRESET_PTH_GLOBS),
+        "config-only" => Some(PRESET_CONFIG_ONLY_GLOBS),
+        _ => None,
+    }
+}
+
 /// Common filter presets for typical download patterns.
 #[non_exhaustive]
 pub struct Filter;
@@ -391,20 +427,14 @@ impl Filter {
     /// plus common config files.
     #[must_use]
     pub fn safetensors() -> FetchConfigBuilder {
-        FetchConfigBuilder::default()
-            .filter("*.safetensors")
-            .filter("*.json")
-            .filter("*.txt")
+        Self::from_globs(PRESET_SAFETENSORS_GLOBS)
     }
 
     /// Returns a builder pre-configured to download only GGUF files
     /// plus common config files.
     #[must_use]
     pub fn gguf() -> FetchConfigBuilder {
-        FetchConfigBuilder::default()
-            .filter("*.gguf")
-            .filter("*.json")
-            .filter("*.txt")
+        Self::from_globs(PRESET_GGUF_GLOBS)
     }
 
     /// Returns a builder pre-configured to download only `.npz` and `.npy`
@@ -412,32 +442,29 @@ impl Filter {
     /// such as Google's `GemmaScope` transcoders (`config.yaml` + many `.npz`).
     #[must_use]
     pub fn npz() -> FetchConfigBuilder {
-        FetchConfigBuilder::default()
-            .filter("*.npz")
-            .filter("*.npy")
-            .filter("config.yaml")
-            .filter("*.json")
-            .filter("*.txt")
+        Self::from_globs(PRESET_NPZ_GLOBS)
     }
 
     /// Returns a builder pre-configured to download only `pytorch_model*.bin`
     /// files plus common config files.
     #[must_use]
     pub fn pth() -> FetchConfigBuilder {
-        FetchConfigBuilder::default()
-            .filter("pytorch_model*.bin")
-            .filter("*.json")
-            .filter("*.txt")
+        Self::from_globs(PRESET_PTH_GLOBS)
     }
 
     /// Returns a builder pre-configured to download only config files
     /// (no model weights).
     #[must_use]
     pub fn config_only() -> FetchConfigBuilder {
-        FetchConfigBuilder::default()
-            .filter("*.json")
-            .filter("*.txt")
-            .filter("*.md")
+        Self::from_globs(PRESET_CONFIG_ONLY_GLOBS)
+    }
+
+    fn from_globs(globs: &[&str]) -> FetchConfigBuilder {
+        let mut builder = FetchConfigBuilder::default();
+        for glob in globs {
+            builder = builder.filter(glob);
+        }
+        builder
     }
 }
 

@@ -177,6 +177,7 @@ See also: hf-fm list-families, hf-fm search")]
   hf-fm search \"fp4\" --tag bitsandbytes        # text-match AND tag-match
   hf-fm search \"llama\" --tag gguf --limit 5    # tag composes with other filters
   hf-fm search \"qwen,3B\" --exact               # exact repo-id match
+  hf-fm search \"fp4\" --show tags,size          # enrich rows with tag list + total size
 
 See also: hf-fm list-families, hf-fm discover")]
     Search {
@@ -197,6 +198,11 @@ See also: hf-fm list-families, hf-fm discover")]
         /// Filter by model tag (e.g., `"gguf"`, `"conversational"`, `"imatrix"`).
         #[arg(long)]
         tag: Option<String>,
+        /// Additional columns to show, comma-separated. `tags` is free
+        /// (already in the API payload); `size` adds one extra HTTP request
+        /// per result, fanned out through a bounded semaphore.
+        #[arg(long, value_delimiter = ',', value_enum)]
+        show: Vec<ShowColumn>,
     },
     /// Show model card metadata and README text for a repository.
     Info {
@@ -280,6 +286,12 @@ See also: hf-fm list-families, hf-fm discover")]
         /// Authentication token (or set `HF_TOKEN` env var).
         #[arg(long)]
         token: Option<String>,
+        /// Re-evaluate which remote files are deliberate skips. Files not
+        /// matching this preset's glob list are reported as `excluded`
+        /// instead of `MISSING`. Overrides any value persisted by
+        /// `download --preset` in the per-repo `.hf-fm-snapshot.json` sidecar.
+        #[arg(long, value_enum)]
+        preset: Option<Preset>,
     },
     /// Compare tensor layouts between two models.
     ///
@@ -560,6 +572,31 @@ enum Preset {
     ConfigOnly,
 }
 
+// EXHAUSTIVE: internal CLI dispatch enum; crate owns all variants
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ShowColumn {
+    /// Inline list of all tags from the model's metadata (free; already in the HF API payload).
+    Tags,
+    /// Total repository size, summed across all files. Requires one extra HTTP request per result.
+    Size,
+}
+
+/// Canonical kebab-case name for a [`Preset`], matching the value `clap` parses
+/// from `--preset <NAME>` and the string stored in [`cache::Snapshot::preset`].
+///
+/// Single source of truth shared by the download-time snapshot writer, the
+/// status-time snapshot reader, and the glob lookup
+/// ([`hf_fetch_model::config::preset_globs`]).
+const fn preset_name(preset: &Preset) -> &'static str {
+    match preset {
+        Preset::Safetensors => "safetensors",
+        Preset::Gguf => "gguf",
+        Preset::Npz => "npz",
+        Preset::Pth => "pth",
+        Preset::ConfigOnly => "config-only",
+    }
+}
+
 /// Sorts a [`clap::Command`]'s subcommands alphabetically by assigning
 /// ascending `display_order` values in sorted-name order. Recurses into
 /// each subcommand so nested command trees (e.g., `cache …`) are sorted
@@ -681,6 +718,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             library,
             pipeline,
             tag,
+            show,
         }) => run_search(
             query.as_str(),
             limit,
@@ -688,6 +726,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             library.as_deref(),
             pipeline.as_deref(),
             tag.as_deref(),
+            &show,
         ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::Info {
@@ -732,8 +771,14 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             repo_id: Some(repo_id),
             revision,
             token,
+            preset,
             // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
-        }) => run_status(repo_id.as_str(), revision.as_deref(), token.as_deref()),
+        }) => run_status(
+            repo_id.as_str(),
+            revision.as_deref(),
+            token.as_deref(),
+            preset.as_ref(),
+        ),
         Some(Commands::Status { repo_id: None, .. }) => run_status_all(),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::Diff {
@@ -1049,11 +1094,23 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
 
     if flat {
         // --flat: download to cache, then copy to flat layout.
+        let repo_id_for_snapshot = repo_id.clone();
         let outcome = rt.block_on(hf_fetch_model::download_files_with_config(repo_id, &config))?;
         let elapsed = start.elapsed();
 
         if let Some(ref p) = indicatif {
             p.finish();
+        }
+
+        // Snapshot sidecar — same best-effort write as the non-flat branch.
+        if let Err(e) = write_download_snapshot(
+            repo_id_for_snapshot.as_str(), // BORROW: explicit .as_str()
+            args.preset.as_ref(),
+            &args.filter,
+            &args.exclude,
+            args.revision.as_deref(), // BORROW: explicit .as_deref()
+        ) {
+            eprintln!("warning: could not write snapshot sidecar: {e}");
         }
 
         let file_map = outcome.inner();
@@ -1071,12 +1128,28 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
         }
         print_download_summary(&target_dir, elapsed);
     } else {
+        let repo_id_for_snapshot = repo_id.clone();
         let outcome = rt.block_on(hf_fetch_model::download_with_config(repo_id, &config))?;
         let elapsed = start.elapsed();
 
         // Finalize progress bar before printing to avoid interleaved output.
         if let Some(ref p) = indicatif {
             p.finish();
+        }
+
+        // Persist the per-repo `.hf-fm-snapshot.json` sidecar recording the
+        // preset / filter / exclude that produced this cache state. `status`
+        // later consults it to distinguish deliberately-skipped files from
+        // genuinely-missing ones. Best-effort: snapshot failures are logged
+        // to stderr but do not fail the download.
+        if let Err(e) = write_download_snapshot(
+            repo_id_for_snapshot.as_str(), // BORROW: explicit .as_str()
+            args.preset.as_ref(),
+            &args.filter,
+            &args.exclude,
+            args.revision.as_deref(), // BORROW: explicit .as_deref()
+        ) {
+            eprintln!("warning: could not write snapshot sidecar: {e}");
         }
 
         if outcome.is_cached() {
@@ -1087,6 +1160,30 @@ fn run_download(args: DownloadArgs) -> Result<(), FetchError> {
         }
     }
     Ok(())
+}
+
+/// Writes the per-repo `.hf-fm-snapshot.json` sidecar capturing the active
+/// `--preset` / `--filter` / `--exclude` arguments for later consumption by
+/// `hf-fm status`. Best-effort — propagates errors so the caller can decide
+/// whether to warn (current callers warn but do not abort).
+fn write_download_snapshot(
+    repo_id: &str,
+    preset: Option<&Preset>,
+    filter: &[String],
+    exclude: &[String],
+    revision: Option<&str>,
+) -> Result<(), FetchError> {
+    let cache_root = cache::hf_cache_dir()?;
+    let repo_dir = hf_fetch_model::cache_layout::repo_dir(&cache_root, repo_id);
+    let snapshot = cache::Snapshot {
+        version: cache::SNAPSHOT_VERSION,
+        // BORROW: explicit .to_owned() — Snapshot owns its strings
+        revision: revision.unwrap_or("main").to_owned(),
+        preset: preset.map(|p| preset_name(p).to_owned()),
+        filter: filter.to_vec(),
+        exclude: exclude.to_vec(),
+    };
+    cache::write_snapshot(&repo_dir, &snapshot)
 }
 
 /// Displays a download plan without downloading anything.
@@ -1540,6 +1637,7 @@ fn run_discover(limit: usize, tag: Option<&str>) -> Result<(), FetchError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_search(
     query: &str,
     limit: usize,
@@ -1547,11 +1645,15 @@ fn run_search(
     library: Option<&str>,
     pipeline: Option<&str>,
     tag: Option<&str>,
+    show: &[ShowColumn],
 ) -> Result<(), FetchError> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
         path: PathBuf::from("<runtime>"),
         source: e,
     })?;
+
+    let show_tags = show.contains(&ShowColumn::Tags);
+    let show_size = show.contains(&ShowColumn::Size);
 
     // When the query contains commas, treat both `,` and `/` as term separators
     // so that "mistralai/3B,12" becomes ["mistralai", "3B", "12"].
@@ -1624,6 +1726,18 @@ fn run_search(
         .take(limit)
         .collect();
 
+    // Fan out repo-size lookups (one HTTP request per result) when
+    // `--show size` is set. Per-repo failures are silently dropped from the
+    // map; rows whose `model_id` is absent render with "—" in the size cell.
+    let size_by_repo: HashMap<String, u64> = if show_size && !filtered.is_empty() {
+        // BORROW: explicit .clone() — fetch_repo_sizes_concurrent takes Vec<String>
+        // because each spawned task needs an owned `'static` String.
+        let repo_ids: Vec<String> = filtered.iter().map(|r| r.model_id.clone()).collect();
+        rt.block_on(discover::fetch_repo_sizes_concurrent(repo_ids))
+    } else {
+        HashMap::new()
+    };
+
     if exact {
         // Exact match: compare against the original query (not normalized)
         let exact_match = filtered
@@ -1632,7 +1746,14 @@ fn run_search(
 
         if let Some(matched) = exact_match {
             println!("Exact match:\n");
-            print_search_result(matched, matched.model_id.len());
+            let size_bytes = size_by_repo.get(matched.model_id.as_str()).copied(); // BORROW: explicit .as_str()
+            print_search_result(
+                matched,
+                matched.model_id.len(),
+                show_tags,
+                show_size,
+                size_bytes,
+            );
 
             // Fetch and display model card metadata
             match rt.block_on(discover::fetch_model_card(
@@ -1647,7 +1768,8 @@ fn run_search(
                 println!("\nDid you mean:\n");
                 let nw = filtered.iter().map(|r| r.model_id.len()).max().unwrap_or(0);
                 for result in &filtered {
-                    print_search_result(result, nw);
+                    let size_bytes = size_by_repo.get(result.model_id.as_str()).copied(); // BORROW: explicit .as_str()
+                    print_search_result(result, nw, show_tags, show_size, size_bytes);
                 }
             }
         }
@@ -1659,7 +1781,8 @@ fn run_search(
             let nw = filtered.iter().map(|r| r.model_id.len()).max().unwrap_or(0);
             println!("Models matching \"{query}\" (by downloads):\n");
             for result in &filtered {
-                print_search_result(result, nw);
+                let size_bytes = size_by_repo.get(result.model_id.as_str()).copied(); // BORROW: explicit .as_str()
+                print_search_result(result, nw, show_tags, show_size, size_bytes);
             }
         }
     }
@@ -1667,7 +1790,13 @@ fn run_search(
     Ok(())
 }
 
-fn print_search_result(result: &discover::SearchResult, name_width: usize) {
+fn print_search_result(
+    result: &discover::SearchResult,
+    name_width: usize,
+    show_tags: bool,
+    show_size: bool,
+    size_bytes: Option<u64>,
+) {
     let suffix = match (&result.library_name, &result.pipeline_tag) {
         (Some(lib), Some(pipe)) => format!("  [{lib}, {pipe}]"),
         (Some(lib), None) => format!("  [{lib}]"),
@@ -1682,8 +1811,25 @@ fn print_search_result(result: &discover::SearchResult, name_width: usize) {
     } else {
         "downloads"
     };
+    // Size column: predictable width, placed before the variable-width tag list.
+    // Renders the formatted size when known, "—" when --show size was requested
+    // but the per-repo lookup failed, and nothing at all when --show size is off.
+    let size_col = if show_size {
+        match size_bytes {
+            Some(bytes) => format!("  {}", format_size(bytes)),
+            None => "  \u{2014}".to_owned(), // BORROW: explicit .to_owned() — em-dash placeholder
+        }
+    } else {
+        String::new()
+    };
+    // Tag column: shown verbatim when --show tags is set (the user opted in).
+    let tags_col = if show_tags && !result.tags.is_empty() {
+        format!("  tags: {}", result.tags.join(", "))
+    } else {
+        String::new()
+    };
     println!(
-        "  hf-fm {:<nw$} ({} {downloads_label}){suffix}",
+        "  hf-fm {:<nw$} ({} {downloads_label}){suffix}{size_col}{tags_col}",
         result.model_id,
         format_downloads(result.downloads),
         nw = name_width,
@@ -5919,10 +6065,12 @@ fn print_multi_file_summary(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_status(
     repo_id: &str,
     revision: Option<&str>,
     token: Option<&str>,
+    preset: Option<&Preset>,
 ) -> Result<(), FetchError> {
     // BORROW: explicit String::from (equivalent to .to_owned()) for Option<&str> → Option<String>
     let token = token
@@ -5934,8 +6082,27 @@ fn run_status(
         source: e,
     })?;
 
+    // Resolve the effective preset: CLI override → sidecar → none.
+    // The sidecar lookup needs the repo cache dir; reuse the same helper
+    // `cache::repo_status` uses internally so paths stay in lockstep.
+    let cache_root = cache::hf_cache_dir()?;
+    let repo_dir = hf_fetch_model::cache_layout::repo_dir(&cache_root, repo_id);
+    let sidecar = cache::read_snapshot(&repo_dir)?;
+    let effective_preset_name: Option<String> = match preset {
+        Some(p) => Some(preset_name(p).to_owned()), // BORROW: explicit .to_owned()
+        None => sidecar.and_then(|s| s.preset),
+    };
+    let preset_glob_list: Option<&'static [&'static str]> = effective_preset_name
+        .as_deref() // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+        .and_then(hf_fetch_model::config::preset_globs);
+
     // BORROW: explicit .as_deref() for Option<String> → Option<&str>
-    let status = rt.block_on(cache::repo_status(repo_id, token.as_deref(), revision))?;
+    let status = rt.block_on(cache::repo_status(
+        repo_id,
+        token.as_deref(),
+        revision,
+        preset_glob_list,
+    ))?;
 
     // Header
     let rev_display = revision.unwrap_or("main");
@@ -5989,6 +6156,17 @@ fn run_status(
                     println!("  {filename:<fw$} {:>10}  MISSING", "\u{2014}");
                 }
             }
+            cache::FileStatus::Excluded { expected_size } => {
+                if *expected_size > 0 {
+                    println!(
+                        "  {:<fw$} {:>10}  excluded",
+                        filename,
+                        format_size(*expected_size)
+                    );
+                } else {
+                    println!("  {filename:<fw$} {:>10}  excluded", "\u{2014}");
+                }
+            }
             // EXPLICIT: future FileStatus variants display as UNKNOWN
             _ => {
                 println!("  {filename:<fw$}              UNKNOWN");
@@ -6001,8 +6179,15 @@ fn run_status(
     let complete = status.complete_count();
     let partial = status.partial_count();
     let missing = status.missing_count();
+    let excluded = status.excluded_count();
     println!();
-    println!("{complete}/{total} complete, {partial} partial, {missing} missing");
+    if excluded > 0 {
+        println!(
+            "{complete}/{total} complete, {partial} partial, {missing} missing, {excluded} excluded"
+        );
+    } else {
+        println!("{complete}/{total} complete, {partial} partial, {missing} missing");
+    }
 
     Ok(())
 }

@@ -5,8 +5,9 @@
 //! Queries the HF Hub for popular models, extracts `model_type` metadata,
 //! compares against locally cached families, and fetches model card metadata.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::BuildHasher;
+use std::sync::Arc;
 
 use serde::Deserialize;
 
@@ -408,6 +409,77 @@ pub async fn search_models(
         .collect();
 
     Ok(results)
+}
+
+/// Returns the total size in bytes of all files in the given repository's
+/// `main` revision, summed across `siblings[].size` from the
+/// `/api/models/{repo_id}?blobs=true` endpoint.
+///
+/// Used by `hf-fm search --show size` to enrich result rows with a total-repo
+/// size column. Failures are surfaced to the caller so individual repo
+/// lookups can be skipped (the search itself is not aborted on a single
+/// 404 / network blip).
+///
+/// # Arguments
+///
+/// * `repo_id` — The full model identifier (e.g., `"org/model"`).
+/// * `client` — Shared `reqwest::Client` (callers fan out N lookups concurrently).
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`](crate::FetchError::Http) if the API request
+/// fails or returns a non-success status.
+/// Returns [`FetchError::RepoNotFound`](crate::FetchError::RepoNotFound) if
+/// the repository does not exist on the Hub.
+pub async fn fetch_repo_total_size(
+    repo_id: &str,
+    client: &reqwest::Client,
+) -> Result<u64, FetchError> {
+    let files = crate::repo::list_repo_files_with_metadata(repo_id, None, None, client).await?;
+    Ok(files.iter().filter_map(|f| f.size).sum())
+}
+
+/// Fans out [`fetch_repo_total_size`] across the given repository IDs through
+/// a bounded `tokio::sync::Semaphore` (8 permits) to stay friendly to the HF
+/// Hub on `--limit 100`-style invocations.
+///
+/// Per-repo failures (network errors, 404s, missing `size` fields) are
+/// silently dropped from the returned map; callers should render rows whose
+/// `repo_id` is absent from the map with a placeholder (`—`). The search
+/// itself is not aborted on a single failure.
+///
+/// # Arguments
+///
+/// * `repo_ids` — Owned list of model identifiers. Ownership is moved into
+///   the spawned tasks so each future is `'static`.
+#[must_use]
+pub async fn fetch_repo_sizes_concurrent(repo_ids: Vec<String>) -> HashMap<String, u64> {
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+    let client = reqwest::Client::new();
+    let mut set: tokio::task::JoinSet<Option<(String, u64)>> = tokio::task::JoinSet::new();
+
+    for repo_id in repo_ids {
+        let sem = Arc::clone(&semaphore);
+        let client = client.clone();
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await.ok()?;
+            // EXPLICIT: per-repo failure intentionally swallowed — the caller
+            // renders the row with "—" rather than aborting the search.
+            match fetch_repo_total_size(&repo_id, &client).await {
+                Ok(bytes) => Some((repo_id, bytes)),
+                Err(_) => None,
+            }
+        });
+    }
+
+    let mut by_repo: HashMap<String, u64> = HashMap::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Some((repo_id, bytes))) = joined {
+            by_repo.insert(repo_id, bytes);
+        }
+    }
+
+    by_repo
 }
 
 /// Fetches model card metadata for a specific model from the `HuggingFace` Hub.
