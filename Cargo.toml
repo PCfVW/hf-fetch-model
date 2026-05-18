@@ -20,7 +20,7 @@ cli = ["dep:clap", "dep:tracing-subscriber", "indicatif"]
 [dependencies]
 # `gguf` feature enables anamnesis's GGUF metadata parser (used by the
 # upcoming `inspect <repo> file.gguf --cached` dispatch path in v0.10.2).
-anamnesis = { version = "0.4.5", features = ["gguf"] }
+anamnesis = { version = "0.5.0", features = ["gguf", "npz"] }
 clap = { version = "4", features = ["derive"], optional = true }
 dirs = "6"
 fs2 = "0.4"
