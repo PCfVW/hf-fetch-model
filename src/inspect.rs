@@ -276,8 +276,6 @@ fn resolve_cached_path(repo_id: &str, revision: &str, filename: &str) -> Option<
 /// Returns [`FetchError::Io`] if the file cannot be read.
 /// Returns [`FetchError::SafetensorsHeader`] if the header is malformed.
 pub fn inspect_safetensors_local(path: &Path) -> Result<SafetensorsHeaderInfo, FetchError> {
-    use std::io::Read;
-
     let file_size = std::fs::metadata(path)
         .map_err(|e| FetchError::Io {
             path: path.to_path_buf(),
@@ -291,43 +289,62 @@ pub fn inspect_safetensors_local(path: &Path) -> Result<SafetensorsHeaderInfo, F
         |n| n.to_string_lossy().to_string(),
     );
 
-    let mut file = std::fs::File::open(path).map_err(|e| FetchError::Io {
+    let file = std::fs::File::open(path).map_err(|e| FetchError::Io {
         path: path.to_path_buf(),
         source: e,
     })?;
 
-    // Read 8-byte header length prefix (little-endian u64).
-    let mut len_buf = [0u8; 8];
-    file.read_exact(&mut len_buf).map_err(|e| FetchError::Io {
-        path: path.to_path_buf(),
-        source: e,
+    // Cache-hit path delegates to anamnesis (v0.10.3 Phase B commit 4):
+    // single source of truth for safetensors layout. The reader variant
+    // reads the 8-byte u64 prefix + the JSON header bytes from the `Read`
+    // impl itself, *without* requiring the data section to be present
+    // (it bypasses `safetensors::SafeTensors::read_metadata` for exactly
+    // this reason). Anamnesis caps the declared header length at 100 MiB
+    // internally so the worst-case allocation is bounded.
+    //
+    // The remote path's `fetch_header_bytes` + `parse_header_json` chain
+    // stays bespoke until v0.11.1, when anamnesis's reader variant adapts
+    // to an HTTP Range source.
+    let header = anamnesis::parse_safetensors_header_from_reader(file).map_err(|e| {
+        FetchError::SafetensorsHeader {
+            // BORROW: explicit .clone() for the error variant's owned String field
+            filename: filename.clone(),
+            reason: format!("failed to parse safetensors header: {e}"),
+        }
     })?;
-    let header_size = u64::from_le_bytes(len_buf);
+    // CAST: usize → u64, anamnesis caps header_size at 100 MiB so it always fits in u64
+    #[allow(clippy::as_conversions)]
+    let header_size = header.header_size as u64;
 
-    // Sanity check: header cannot be larger than the file.
-    if header_size.saturating_add(8) > file_size {
-        return Err(FetchError::SafetensorsHeader {
-            filename,
-            reason: format!("header length {header_size} exceeds file size {file_size}"),
-        });
-    }
+    let mut tensors: Vec<TensorInfo> = header
+        .tensors
+        .into_iter()
+        .map(|t| {
+            // CAST: usize → u64, header data_offsets fit in u64 by definition (file size is u64)
+            #[allow(clippy::as_conversions)]
+            let start = t.data_offsets.0 as u64;
+            // CAST: usize → u64, same rationale as above
+            #[allow(clippy::as_conversions)]
+            let end = t.data_offsets.1 as u64;
+            TensorInfo {
+                name: t.name,
+                // BORROW: explicit .to_string() — anamnesis `Dtype` enum → owned `String`
+                dtype: t.dtype.to_string(),
+                shape: t.shape,
+                data_offsets: (start, end),
+            }
+        })
+        .collect();
 
-    // Read the JSON header.
-    // CAST: u64 → usize, header size bounded by file size (checked above)
-    #[allow(clippy::cast_possible_truncation, clippy::as_conversions)]
-    let json_len = header_size as usize;
-    let mut json_buf = vec![0u8; json_len];
-    file.read_exact(&mut json_buf).map_err(|e| FetchError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-
-    // BORROW: explicit .as_str() instead of Deref coercion
-    let (tensors, metadata) = parse_header_json(&json_buf, filename.as_str())?;
+    // Preserve hf-fm's v0.10.2 sort order. Anamnesis returns tensors sorted
+    // alphabetically by name; hf-fm's inspect table has always been
+    // file-ordered (sorted by start offset) so users can spot first/last
+    // tensors per shard at a glance.
+    tensors.sort_by_key(|t| t.data_offsets.0);
 
     Ok(SafetensorsHeaderInfo {
         tensors,
-        metadata,
+        metadata: header.metadata,
         header_size,
         file_size: Some(file_size),
     })
