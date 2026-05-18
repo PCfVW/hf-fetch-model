@@ -1036,11 +1036,15 @@ fn inspect_cached_metadata_present() {
         stdout.contains("Metadata:"),
         "output should contain Metadata: line by default, got:\n{stdout}"
     );
-    // Metadata line should contain key=value pairs.
-    let meta_line = stdout.lines().find(|l| l.contains("Metadata:")).unwrap();
+    // Output should contain at least one `key=value` pair. v0.10.3's render
+    // polish switched metadata blocks with >6 keys to a tabular form where
+    // the `Metadata:` line is just the header and `key=value` pairs live on
+    // subsequent indented lines — so we check across all lines, not just the
+    // header line itself.
+    let has_kv = stdout.lines().any(|l| l.contains('='));
     assert!(
-        meta_line.contains('='),
-        "Metadata line should contain key=value pairs, got: {meta_line}"
+        has_kv,
+        "should contain at least one key=value pair, got:\n{stdout}"
     );
 }
 

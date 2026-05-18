@@ -2155,6 +2155,101 @@ fn looks_like_default_template(body: &str) -> bool {
     comment_count.saturating_mul(100) > lines.len().saturating_mul(30)
 }
 
+/// Renders the `inspect` summary's first size line (the one immediately
+/// after `Source:`).
+///
+/// For safetensors (`is_gguf == false`), preserves the v0.10.2 wording:
+/// `Header: <header_size> (JSON), <total> total` (or just
+/// `Header: <header_size> (JSON)` when the total isn't known). The `(JSON)`
+/// suffix is accurate because safetensors *does* start with a length-prefixed
+/// JSON header.
+///
+/// For GGUF (`is_gguf == true`), drops the safetensors-flavoured `(JSON)`
+/// suffix and the `0 B` prefix — GGUF has no length-prefixed JSON header, so
+/// the v0.10.2 wording printed a meaningless `0 B (JSON)` for every GGUF
+/// invocation. The replacement surfaces the total file size under a `Size:`
+/// label (note: `File:` is already used by the preceding filename line, so
+/// we cannot reuse it here).
+///
+/// The two-space indent is the caller's responsibility — this helper returns
+/// the label-and-value line without leading whitespace.
+#[must_use]
+fn format_header_line(header_size: u64, file_size: Option<u64>, is_gguf: bool) -> String {
+    if is_gguf {
+        match file_size {
+            Some(fs) => format!("Size:     {}", format_size(fs)),
+            // BORROW: explicit .to_owned() for &str → owned String
+            None => "Size:     (size unknown)".to_owned(),
+        }
+    } else {
+        let hd = format_size(header_size);
+        match file_size {
+            Some(fs) => format!("Header:   {hd} (JSON), {} total", format_size(fs)),
+            None => format!("Header:   {hd} (JSON)"),
+        }
+    }
+}
+
+/// Renders the `inspect` summary's `Metadata:` block as a vector of lines
+/// (without the leading 2-space indent; the caller prepends it on each line).
+///
+/// Sorts keys alphabetically and deterministically — eliminates the previous
+/// `HashMap` iteration non-determinism between runs, and clusters keys sharing
+/// a prefix (`general.*`, `<arch>.*`, `tokenizer.*`, `gguf.*`) automatically.
+/// When the metadata has at most `TABULAR_THRESHOLD` keys, returns the v0.10.2
+/// single-line form (`Metadata: k=v, k=v, …`). Above the threshold, switches
+/// to a tabular block — one `key=value` per indented line — which keeps GGUF's
+/// typical 30+ keys readable.
+///
+/// Values containing newlines (e.g. `tokenizer.chat_template`'s Jinja
+/// templates) get a `key=` header line followed by each value-line on its own
+/// indented continuation line, instead of wrapping awkwardly inline.
+///
+/// Returns an empty `Vec` when `meta` is empty so the caller skips the
+/// `println!` entirely (preserving the v0.10.2 "no metadata, no line" behavior).
+#[must_use]
+fn format_metadata_lines(meta: &HashMap<String, String>) -> Vec<String> {
+    /// Threshold above which the renderer switches to a tabular block.
+    /// Picked so that typical safetensors `__metadata__` (which carries 3–6
+    /// quantization keys) keeps the v0.10.2 inline form, while typical GGUF
+    /// metadata (30+ scalar keys) gets the tabular form.
+    const TABULAR_THRESHOLD: usize = 6;
+
+    if meta.is_empty() {
+        return Vec::new();
+    }
+
+    // BORROW: explicit .as_str() — sorted projection onto &str borrows
+    let mut keys: Vec<&str> = meta.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+
+    if keys.len() <= TABULAR_THRESHOLD {
+        let entries: Vec<String> = keys
+            .iter()
+            // BORROW: explicit .map_or("", String::as_str) for Option<&String> → &str
+            .map(|k| format!("{k}={}", meta.get(*k).map_or("", String::as_str)))
+            .collect();
+        return vec![format!("Metadata: {}", entries.join(", "))];
+    }
+
+    let mut lines: Vec<String> = Vec::with_capacity(keys.len() + 1);
+    // BORROW: explicit .to_owned() for &str → owned String
+    lines.push("Metadata:".to_owned());
+    for k in &keys {
+        // BORROW: explicit .map_or("", String::as_str) for Option<&String> → &str
+        let v = meta.get(*k).map_or("", String::as_str);
+        if v.contains('\n') {
+            lines.push(format!("  {k}="));
+            for value_line in v.lines() {
+                lines.push(format!("    {value_line}"));
+            }
+        } else {
+            lines.push(format!("  {k}={v}"));
+        }
+    }
+    lines
+}
+
 fn run_status_all() -> Result<(), FetchError> {
     let cache_dir = cache::hf_cache_dir()?;
     let summaries = cache::cache_summary()?;
@@ -5222,21 +5317,16 @@ fn run_inspect_single(
     println!("  File:     {filename}");
     println!("  Source:   {source_label}");
 
-    let header_display = format_size(info.header_size);
-    if let Some(fs) = info.file_size {
-        println!(
-            "  Header:   {header_display} (JSON), {} total",
-            format_size(fs)
-        );
-    } else {
-        println!("  Header:   {header_display} (JSON)");
-    }
+    println!(
+        "  {}",
+        format_header_line(info.header_size, info.file_size, is_gguf)
+    );
 
     if !no_metadata {
         if let Some(ref meta) = info.metadata {
-            let entries: Vec<String> = meta.iter().map(|(k, v)| format!("{k}={v}")).collect();
-            // BORROW: explicit .join() on slice
-            println!("  Metadata: {}", entries.join(", "));
+            for line in format_metadata_lines(meta) {
+                println!("  {line}");
+            }
         }
     }
 
@@ -7618,5 +7708,184 @@ More content.
 More content.
 ";
         assert!(looks_like_default_template(body));
+    }
+
+    // ---------- format_header_line ----------
+
+    #[test]
+    fn format_header_line_safetensors_with_total() {
+        let line = format_header_line(64_768, Some(1_073_741_824), false);
+        assert!(line.starts_with("Header:"), "got: {line}");
+        assert!(
+            line.contains("(JSON)"),
+            "safetensors line should keep `(JSON)` suffix, got: {line}"
+        );
+        assert!(
+            line.contains("total"),
+            "safetensors line with file_size should include `total`, got: {line}"
+        );
+    }
+
+    #[test]
+    fn format_header_line_safetensors_without_total() {
+        let line = format_header_line(64_768, None, false);
+        assert!(line.starts_with("Header:"), "got: {line}");
+        assert!(line.contains("(JSON)"), "got: {line}");
+        assert!(
+            !line.contains("total"),
+            "no file_size → no `total` clause, got: {line}"
+        );
+    }
+
+    #[test]
+    fn format_header_line_gguf_with_total() {
+        let line = format_header_line(0, Some(3_705_032_704), true);
+        assert!(
+            line.starts_with("Size:"),
+            "GGUF line should use `Size:` label, got: {line}"
+        );
+        assert!(
+            !line.contains("(JSON)"),
+            "GGUF line must not have safetensors-flavoured `(JSON)`, got: {line}"
+        );
+        assert!(
+            !line.contains(" 0 B "),
+            "GGUF line must not show the meaningless `0 B` prefix, got: {line}"
+        );
+    }
+
+    #[test]
+    fn format_header_line_gguf_without_total() {
+        let line = format_header_line(0, None, true);
+        assert_eq!(line, "Size:     (size unknown)");
+    }
+
+    // ---------- format_metadata_lines ----------
+
+    #[test]
+    fn format_metadata_lines_empty_returns_empty_vec() {
+        let meta: HashMap<String, String> = HashMap::new();
+        let lines = format_metadata_lines(&meta);
+        assert!(
+            lines.is_empty(),
+            "empty metadata → no lines, got: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_lines_inline_under_threshold() {
+        let mut meta: HashMap<String, String> = HashMap::new();
+        meta.insert("quant_method".to_owned(), "gptq".to_owned());
+        meta.insert("bits".to_owned(), "4".to_owned());
+        meta.insert("group_size".to_owned(), "128".to_owned());
+        let lines = format_metadata_lines(&meta);
+        assert_eq!(
+            lines.len(),
+            1,
+            "≤ 6 keys → single inline line, got: {lines:?}"
+        );
+        let line = &lines[0];
+        assert!(
+            line.starts_with("Metadata: "),
+            "inline form starts with `Metadata: `, got: {line}"
+        );
+        // All three k=v pairs must appear; ordering is alphabetical-sorted so deterministic.
+        assert!(line.contains("bits=4"), "got: {line}");
+        assert!(line.contains("group_size=128"), "got: {line}");
+        assert!(line.contains("quant_method=gptq"), "got: {line}");
+        // Sort check: `bits` < `group_size` < `quant_method` alphabetically.
+        let bits_pos = line.find("bits=").expect("bits=");
+        let group_pos = line.find("group_size=").expect("group_size=");
+        let quant_pos = line.find("quant_method=").expect("quant_method=");
+        assert!(bits_pos < group_pos, "expected alphabetical order");
+        assert!(group_pos < quant_pos, "expected alphabetical order");
+    }
+
+    #[test]
+    fn format_metadata_lines_tabular_over_threshold() {
+        // 7 keys → above the threshold; switches to tabular block.
+        let mut meta: HashMap<String, String> = HashMap::new();
+        meta.insert("general.architecture".to_owned(), "llama".to_owned());
+        meta.insert("general.name".to_owned(), "Mistral-7B".to_owned());
+        meta.insert("general.quantization".to_owned(), "Q4_K_M".to_owned());
+        meta.insert("llama.context_length".to_owned(), "32768".to_owned());
+        meta.insert("llama.head_count".to_owned(), "32".to_owned());
+        meta.insert("tokenizer.ggml.bos_token_id".to_owned(), "1".to_owned());
+        meta.insert("gguf.version".to_owned(), "3".to_owned());
+
+        let lines = format_metadata_lines(&meta);
+        assert!(lines.len() > 1, "> 6 keys → tabular block, got: {lines:?}");
+        assert_eq!(
+            lines[0], "Metadata:",
+            "first line is the `Metadata:` header"
+        );
+        // Sort clusters by prefix automatically: `general.*` then `gguf.*` then `llama.*` then `tokenizer.*`.
+        let body = lines[1..].join("\n");
+        let arch_pos = body
+            .find("general.architecture=")
+            .expect("general.architecture");
+        let name_pos = body.find("general.name=").expect("general.name");
+        let gguf_pos = body.find("gguf.version=").expect("gguf.version");
+        let llama_pos = body
+            .find("llama.context_length=")
+            .expect("llama.context_length");
+        let tok_pos = body
+            .find("tokenizer.ggml.bos_token_id=")
+            .expect("tokenizer.*");
+        assert!(arch_pos < name_pos, "alphabetical within `general.*`");
+        assert!(name_pos < gguf_pos, "`general.*` precedes `gguf.*`");
+        assert!(gguf_pos < llama_pos, "`gguf.*` precedes `llama.*`");
+        assert!(llama_pos < tok_pos, "`llama.*` precedes `tokenizer.*`");
+        // Every key line has the two-space indent.
+        for line in &lines[1..] {
+            assert!(
+                line.starts_with("  "),
+                "tabular value line must be indented, got: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_metadata_lines_multiline_value_renders_as_block() {
+        // ≥ 7 keys so we're in tabular mode; one value contains newlines.
+        let chat_template = "{%- for message in messages %}\n{{- '<|im_start|>' + message['role'] + '\\n' }}\n{%- endfor -%}";
+        let mut meta: HashMap<String, String> = HashMap::new();
+        meta.insert("a".to_owned(), "1".to_owned());
+        meta.insert("b".to_owned(), "2".to_owned());
+        meta.insert("c".to_owned(), "3".to_owned());
+        meta.insert("d".to_owned(), "4".to_owned());
+        meta.insert("e".to_owned(), "5".to_owned());
+        meta.insert("f".to_owned(), "6".to_owned());
+        meta.insert("z_chat_template".to_owned(), chat_template.to_owned());
+
+        let lines = format_metadata_lines(&meta);
+        // The multi-line key should appear as `  z_chat_template=` (no value on the same line)
+        // followed by indented continuation lines.
+        let key_line_idx = lines
+            .iter()
+            .position(|l| l == "  z_chat_template=")
+            .expect("multi-line key gets its own header line");
+        let next = lines
+            .get(key_line_idx + 1)
+            .expect("at least one continuation line");
+        assert!(
+            next.starts_with("    "),
+            "continuation lines have 4-space indent, got: {next:?}"
+        );
+        assert!(
+            next.contains("for message"),
+            "first continuation line carries the value, got: {next:?}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_lines_sort_is_deterministic() {
+        let mut meta: HashMap<String, String> = HashMap::new();
+        for i in 0..10 {
+            meta.insert(format!("key_{i:02}"), format!("value_{i}"));
+        }
+        let first = format_metadata_lines(&meta);
+        let second = format_metadata_lines(&meta);
+        assert_eq!(first, second, "sort must be deterministic across runs");
     }
 }
