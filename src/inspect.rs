@@ -86,8 +86,47 @@ impl TensorInfo {
     }
 }
 
-/// Parsed `.safetensors` header metadata.
+/// Quantization scheme + size estimates for a cached `.safetensors` file.
+///
+/// Populated by [`inspect_safetensors_local`] (the cache-hit path) via
+/// `anamnesis::InspectInfo::from(&header)`. Absent (`None`) when:
+/// - the safetensors file has no detected quantization (`QuantScheme::Unquantized`),
+/// - the inspect ran over HTTP Range (the remote path's bespoke parser
+///   doesn't go through anamnesis until v0.11.1), or
+/// - the file format isn't safetensors (`GGUF` / `NPZ` / `PTH` carry no
+///   quant-method metadata).
+///
+/// Decoupled from `anamnesis::QuantScheme` (a `#[non_exhaustive]` enum) so
+/// downstream library consumers (`candle-mi`, `anamnesis`) aren't forced to
+/// match every variant. The `scheme` field stores `QuantScheme`'s `Display`
+/// output (`"FineGrainedFp8"`, `"Bnb4"`, `"Gptq"`, `"Awq"`, …); consumers
+/// that need to match exact variants should call
+/// `anamnesis::parse_safetensors_header` themselves.
 #[derive(Debug, Clone, Serialize)]
+pub struct QuantInfo {
+    /// Detected quantization scheme as the `Display` form of
+    /// `anamnesis::QuantScheme` (e.g. `"FineGrainedFp8"`, `"Bnb4"`).
+    pub scheme: String,
+    /// Bytes stored on disk for tensor data (header excluded).
+    pub stored_bytes: u64,
+    /// Estimated bytes after dequantising to `BF16`. For `BnB-NF4`/`FP4`
+    /// (`U8`-packed nibbles), this is `stored_bytes × 4`; for `FP8` / `GPTQ` /
+    /// `AWQ` / `BnB-INT8` it's `num_elements × 2` summed over weight
+    /// tensors, plus passthrough tensors copied as-is. The formula lives
+    /// in `anamnesis::InspectInfo::from(&SafetensorsHeader)` — hf-fm just
+    /// reads the result.
+    pub dequantized_bytes: u64,
+}
+
+/// Parsed safetensors header metadata.
+///
+/// Marked `#[non_exhaustive]` (since v0.10.3) — the struct has been
+/// growing through v0.10.x (the `quant_info` field landed in Phase C)
+/// and will keep growing in v0.11.x. External library consumers should
+/// pattern-match with `..` or use field reads, not exhaustive struct
+/// literals.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct SafetensorsHeaderInfo {
     /// All tensors in the header, in the order they appear in the JSON.
     pub tensors: Vec<TensorInfo>,
@@ -106,6 +145,14 @@ pub struct SafetensorsHeaderInfo {
     /// the first request (`bytes 0-7/TOTAL` → `TOTAL`). This is free — no
     /// extra request needed.
     pub file_size: Option<u64>,
+    /// Quantization scheme + size estimates (cached safetensors only).
+    ///
+    /// Populated by [`inspect_safetensors_local`] when a non-`Unquantized`
+    /// `QuantScheme` is detected. `None` for unquantized safetensors,
+    /// `GGUF` / `NPZ` / `PTH` files, and the remote safetensors path
+    /// (until v0.11.1 migrates that path to anamnesis).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quant_info: Option<QuantInfo>,
 }
 
 impl SafetensorsHeaderInfo {
@@ -126,6 +173,33 @@ impl SafetensorsHeaderInfo {
             // BORROW: explicit .as_str() instead of Deref coercion
             .filter(|t| t.dtype.as_str() == dtype)
             .collect()
+    }
+
+    /// Constructs a new [`SafetensorsHeaderInfo`] from its core fields.
+    ///
+    /// Since v0.10.3 the struct is `#[non_exhaustive]` — this constructor is
+    /// the canonical way to build one from outside the `hf-fetch-model` lib
+    /// crate (e.g. the `hf-fm` binary crate, downstream consumers like
+    /// `candle-mi`). Inside the lib crate, struct-literal syntax stays
+    /// available for the inspect entry points.
+    ///
+    /// `quant_info` is typically `None`; populated only by
+    /// [`inspect_safetensors_local`] for cached, quantized safetensors files.
+    #[must_use]
+    pub fn new(
+        tensors: Vec<TensorInfo>,
+        metadata: Option<HashMap<String, String>>,
+        header_size: u64,
+        file_size: Option<u64>,
+        quant_info: Option<QuantInfo>,
+    ) -> Self {
+        Self {
+            tensors,
+            metadata,
+            header_size,
+            file_size,
+            quant_info,
+        }
     }
 }
 
@@ -316,6 +390,23 @@ pub fn inspect_safetensors_local(path: &Path) -> Result<SafetensorsHeaderInfo, F
     #[allow(clippy::as_conversions)]
     let header_size = header.header_size as u64;
 
+    // Phase C: derive `quant_info` before the `header.tensors` move below.
+    // `anamnesis::InspectInfo::from(&header)` iterates the already-parsed
+    // tensors and aggregates per-role byte sums — pure computation, no I/O.
+    // Unquantized models produce no `quant_info` so the renderer suppresses
+    // the new `Format:` / `Size:` lines (absence communicates full precision).
+    let quant_info = if header.scheme == anamnesis::QuantScheme::Unquantized {
+        None
+    } else {
+        let info = anamnesis::InspectInfo::from(&header);
+        Some(QuantInfo {
+            // BORROW: explicit .to_string() — anamnesis `QuantScheme` → owned `String`
+            scheme: info.format.to_string(),
+            stored_bytes: info.current_size,
+            dequantized_bytes: info.dequantized_size,
+        })
+    };
+
     let mut tensors: Vec<TensorInfo> = header
         .tensors
         .into_iter()
@@ -347,6 +438,7 @@ pub fn inspect_safetensors_local(path: &Path) -> Result<SafetensorsHeaderInfo, F
         metadata: header.metadata,
         header_size,
         file_size: Some(file_size),
+        quant_info,
     })
 }
 
@@ -494,6 +586,11 @@ pub async fn inspect_safetensors(
             metadata,
             header_size,
             file_size,
+            // Remote path doesn't go through anamnesis yet; quant detection
+            // arrives in v0.11.1 when this path migrates to
+            // `anamnesis::parse_safetensors_header_from_reader` over an
+            // HTTP Range adapter.
+            quant_info: None,
         },
         InspectSource::Remote,
     ))
@@ -629,6 +726,9 @@ pub fn inspect_gguf_cached(
         // `gguf.alignment` keys surface the equivalent format-level info.
         header_size: 0,
         file_size,
+        // GGUF quant info (Q4_K_M etc.) is implicit in per-tensor dtypes;
+        // the v0.10.3 Phase C `Format:` / `Size:` lines are safetensors-only.
+        quant_info: None,
     })
 }
 
@@ -710,6 +810,8 @@ pub fn inspect_npz_cached(
         metadata: None,
         header_size: 0,
         file_size,
+        // NPZ has no quant-method metadata; quant_info stays None.
+        quant_info: None,
     })
 }
 
@@ -795,6 +897,8 @@ pub fn inspect_pth_cached(
         metadata: None,
         header_size: 0,
         file_size,
+        // PTH has no quant-method metadata; quant_info stays None.
+        quant_info: None,
     })
 }
 

@@ -2250,6 +2250,30 @@ fn format_metadata_lines(meta: &HashMap<String, String>) -> Vec<String> {
     lines
 }
 
+/// Renders the optional `Format:` + `Size:` block in the `inspect` summary
+/// for quantized safetensors files. Returns `Vec::new()` (and the caller
+/// skips the `println!`s) when `quant_info` is `None` — i.e. for
+/// unquantized safetensors, all `GGUF` / `NPZ` / `PTH` paths, and the
+/// remote safetensors path (until v0.11.1 lifts it to anamnesis).
+///
+/// The two-line `Format: …` + `Size: <stored> stored -> <deq> (BF16)` form
+/// matches `anamnesis::InspectInfo`'s `Display` idiom while preserving the
+/// explicit `Format:` label called out in the v0.10.3 roadmap.
+#[must_use]
+fn format_quant_lines(quant_info: Option<&inspect::QuantInfo>) -> Vec<String> {
+    let Some(q) = quant_info else {
+        return Vec::new();
+    };
+    vec![
+        format!("Format:    {}", q.scheme),
+        format!(
+            "Size:      {} stored -> {} (BF16)",
+            format_size(q.stored_bytes),
+            format_size(q.dequantized_bytes),
+        ),
+    ]
+}
+
 fn run_status_all() -> Result<(), FetchError> {
     let cache_dir = cache::hf_cache_dir()?;
     let summaries = cache::cache_summary()?;
@@ -5338,6 +5362,13 @@ fn run_inspect_single(
         format_header_line(info.header_size, info.file_size, is_gguf)
     );
 
+    // v0.10.3 Phase C: surface quantization scheme + dequantised-size
+    // estimate when present. Empty for unquantized safetensors and all
+    // non-safetensors formats; the absence communicates full precision.
+    for line in format_quant_lines(info.quant_info.as_ref()) {
+        println!("  {line}");
+    }
+
     if !no_metadata {
         if let Some(ref meta) = info.metadata {
             for line in format_metadata_lines(meta) {
@@ -6141,12 +6172,18 @@ fn print_multi_file_json(
                 }
                 Some((
                     name.clone(), // BORROW: explicit .clone() for owned String
-                    inspect::SafetensorsHeaderInfo {
-                        tensors: matching,
-                        metadata: info.metadata.clone(),
-                        header_size: info.header_size,
-                        file_size: info.file_size,
-                    },
+                    // `SafetensorsHeaderInfo` is `#[non_exhaustive]` since
+                    // v0.10.3 — use the public `new()` constructor instead
+                    // of struct-literal syntax. Quant info is preserved
+                    // across the filter (it summarises the whole file,
+                    // independent of which tensor subset we're rendering).
+                    inspect::SafetensorsHeaderInfo::new(
+                        matching,
+                        info.metadata.clone(),
+                        info.header_size,
+                        info.file_size,
+                        info.quant_info.clone(),
+                    ),
                 ))
             })
             .collect();
@@ -6199,12 +6236,15 @@ fn print_multi_file_json_with_gpu_check(
                 }
                 Some((
                     name.clone(),
-                    inspect::SafetensorsHeaderInfo {
-                        tensors: matching,
-                        metadata: info.metadata.clone(),
-                        header_size: info.header_size,
-                        file_size: info.file_size,
-                    },
+                    // `SafetensorsHeaderInfo` is `#[non_exhaustive]` since
+                    // v0.10.3 — use the public `new()` constructor.
+                    inspect::SafetensorsHeaderInfo::new(
+                        matching,
+                        info.metadata.clone(),
+                        info.header_size,
+                        info.file_size,
+                        info.quant_info.clone(),
+                    ),
                 ))
             })
             .collect()
@@ -7903,5 +7943,62 @@ More content.
         let first = format_metadata_lines(&meta);
         let second = format_metadata_lines(&meta);
         assert_eq!(first, second, "sort must be deterministic across runs");
+    }
+
+    // ---------- format_quant_lines ----------
+
+    #[test]
+    fn format_quant_lines_returns_empty_for_none() {
+        let lines = format_quant_lines(None);
+        assert!(lines.is_empty(), "None input → no lines, got: {lines:?}");
+    }
+
+    #[test]
+    fn format_quant_lines_returns_two_lines_for_some() {
+        let q = inspect::QuantInfo {
+            scheme: "Bnb4".to_owned(),
+            stored_bytes: 4_400_000_000,      // ~4.10 GiB
+            dequantized_bytes: 8_810_000_000, // ~8.21 GiB
+        };
+        let lines = format_quant_lines(Some(&q));
+        assert_eq!(
+            lines.len(),
+            2,
+            "Some input → exactly two lines, got: {lines:?}"
+        );
+        assert!(
+            lines[0].starts_with("Format:"),
+            "first line is the Format: header, got: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("Bnb4"),
+            "Format line carries the scheme string, got: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].starts_with("Size:"),
+            "second line is the Size: header, got: {}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn format_quant_lines_size_uses_stored_arrow_dequantised() {
+        let q = inspect::QuantInfo {
+            scheme: "FineGrainedFp8".to_owned(),
+            stored_bytes: 4_400_000_000,
+            dequantized_bytes: 8_810_000_000,
+        };
+        let lines = format_quant_lines(Some(&q));
+        let size_line = &lines[1];
+        assert!(
+            size_line.contains(" stored -> "),
+            "Size line must use the `stored -> ` arrow separator, got: {size_line}"
+        );
+        assert!(
+            size_line.ends_with("(BF16)"),
+            "Size line must annotate the dequantised side with `(BF16)`, got: {size_line}"
+        );
     }
 }

@@ -1384,6 +1384,46 @@ fn inspect_cached_pth_renders() {
 }
 
 #[test]
+fn inspect_cached_quantized_renders_format_line() {
+    // v0.10.3 Phase C: confirm the `Format:` + `Size: <stored> stored -> <deq> (BF16)`
+    // lines appear on quantized safetensors. `find_cached_safetensors_with_metadata`
+    // locates a `__metadata__`-bearing file (typical for GPTQ/AWQ/BnB-quantized
+    // models); any returned file may or may not be detected as quantized by
+    // anamnesis (unquantized files with __metadata__ exist), so we only assert
+    // that IF the Format: line appears, it's paired with a Size: line carrying
+    // the `stored -> … (BF16)` shape.
+    let Some((repo_id, filename)) = find_cached_safetensors_with_metadata() else {
+        eprintln!("SKIP: no cached safetensors file with __metadata__ found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args(["inspect", &repo_id, &filename, "--cached"]));
+    assert!(
+        success,
+        "inspect --cached on metadata-bearing safetensors should succeed: {stderr}"
+    );
+    if stdout
+        .lines()
+        .any(|l| l.trim_start().starts_with("Format:"))
+    {
+        // Quantization was detected — the paired Size: line MUST follow the
+        // anamnesis-flavoured `stored -> ... (BF16)` shape.
+        let has_size_line = stdout
+            .lines()
+            .any(|l| l.contains(" stored -> ") && l.contains("(BF16)"));
+        assert!(
+            has_size_line,
+            "Format: line present but no `Size: <stored> stored -> <deq> (BF16)` companion, got:\n{stdout}"
+        );
+    } else {
+        eprintln!(
+            "SKIP-DETAIL: quantization not detected on {repo_id}/{filename}; \
+             cannot exercise the Format/Size pair (file may be unquantized \
+             despite carrying __metadata__)."
+        );
+    }
+}
+
+#[test]
 fn inspect_cached_sharded_dtypes_json_aggregates() {
     let Some(repo_id) = find_cached_sharded_repo() else {
         eprintln!("SKIP: no cached sharded safetensors model found");
