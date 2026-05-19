@@ -2,9 +2,9 @@
 
 *Read tensor metadata over HTTP Range — no weight data downloaded — and decide whether the model is worth the bandwidth.*
 
-*~1,560 words · about 6 min read*
+*~1,650 words · about 7 min read*
 
-<!-- Last updated: 2026-05-12, hf-fm v0.10.1 -->
+<!-- Last updated: 2026-05-19, hf-fm v0.10.3 -->
 
 <!--
 STYLE CONVENTIONS for editing this tutorial — keep growth consistent.
@@ -323,5 +323,7 @@ You went from "15 GiB I can't use" to "5 GiB that fits with room to spare" witho
 - **`--revision <sha>`** pins every command above to a specific commit so notes stay reproducible.
 
 Total bytes downloaded to learn all of that: less than a megabyte. Every command above is also valid input to library callers — see [`examples/candle_inspect.rs`](../../examples/candle_inspect.rs) for the embeddable equivalent.
+
+The companion path — **inspect after you download** — already exists today via `--cached` on `.gguf` files (since v0.10.2) and `.npz` / `.pth` files plus quantization detection on cached safetensors (since v0.10.3).
 
 For details on every flag in `inspect`, see the [CLI reference](../cli-reference.md). For common follow-up questions, the [FAQ](../FAQ.md) covers gating, cache layout, and the quirks of partial downloads.
