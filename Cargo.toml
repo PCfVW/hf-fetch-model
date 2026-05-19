@@ -18,9 +18,14 @@ indicatif = ["dep:indicatif"]
 cli = ["dep:clap", "dep:tracing-subscriber", "indicatif"]
 
 [dependencies]
-# `gguf` feature enables anamnesis's GGUF metadata parser (used by the
-# upcoming `inspect <repo> file.gguf --cached` dispatch path in v0.10.2).
-anamnesis = { version = "0.5.0", features = ["gguf", "npz", "pth"] }
+# Format-parser features enable anamnesis's metadata parsers for the
+# `inspect <repo> file.<ext> --cached` dispatch paths. The `bnb` / `gptq`
+# / `awq` flags also unlock anamnesis's tensor-name classification for
+# those quantization families, so the v0.10.3 Phase C `Format:` / `Size:`
+# lines fire on cached BnB / GPTQ / AWQ safetensors (without them the
+# tensors classify as `Passthrough` and `detect_scheme` returns
+# `Unquantized` — silently no-op for the families the feature targets).
+anamnesis = { version = "0.5.0", features = ["gguf", "npz", "pth", "bnb", "gptq", "awq"] }
 clap = { version = "4", features = ["derive"], optional = true }
 dirs = "6"
 fs2 = "0.4"

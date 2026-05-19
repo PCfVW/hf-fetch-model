@@ -1056,6 +1056,89 @@ fn find_cached_safetensors_with_metadata() -> Option<(String, String)> {
     None
 }
 
+/// Finds a cached `.safetensors` file whose header contains BnB-quantized
+/// tensor names — the positive signals anamnesis keys on for
+/// `QuantScheme::Bnb4` / `BnbInt8` detection (`.weight.quant_map`,
+/// `.weight.absmax`, `.SCB`).
+///
+/// Stronger than `find_cached_safetensors_with_metadata`: that helper only
+/// requires the universal `__metadata__` block, which is present on
+/// every transformers safetensors export regardless of quantization. The
+/// `BnB` markers below only appear on actually-bitsandbytes-quantized files,
+/// so a test built on this helper can ASSERT the Format/Size lines
+/// instead of conditionally checking them — closing the regression gap
+/// where the v0.10.3 Phase C feature shipped silently no-op for `BnB`
+/// because hf-fm's `anamnesis` dep was missing `features = ["bnb"]`.
+fn find_cached_bnb_safetensors_repo() -> Option<(String, String)> {
+    use std::io::Read;
+
+    let cache_dir = dirs::home_dir()?.join(".cache/huggingface/hub");
+    if !cache_dir.exists() {
+        return None;
+    }
+    for entry in std::fs::read_dir(&cache_dir).ok()? {
+        let entry = entry.ok()?;
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let Some(repo_part) = dir_name.strip_prefix("models--") else {
+            continue;
+        };
+        let repo_id = match repo_part.find("--") {
+            Some(pos) => {
+                let (org, name_with_sep) = repo_part.split_at(pos);
+                let name = name_with_sep.get(2..).unwrap_or_default();
+                format!("{org}/{name}")
+            }
+            None => continue,
+        };
+        let snapshots_dir = entry.path().join("snapshots");
+        let Ok(snapshots) = std::fs::read_dir(&snapshots_dir) else {
+            continue;
+        };
+        for snap in snapshots.flatten() {
+            if !snap.path().is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(snap.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let fname = file.file_name().to_string_lossy().to_string();
+                if !fname.ends_with(".safetensors") {
+                    continue;
+                }
+                let Ok(mut f) = std::fs::File::open(file.path()) else {
+                    continue;
+                };
+                let mut len_buf = [0u8; 8];
+                if f.read_exact(&mut len_buf).is_err() {
+                    continue;
+                }
+                let Ok(header_size) = usize::try_from(u64::from_le_bytes(len_buf)) else {
+                    continue;
+                };
+                if header_size > 10_000_000 {
+                    continue;
+                }
+                let mut json_buf = vec![0u8; header_size];
+                if f.read_exact(&mut json_buf).is_err() {
+                    continue;
+                }
+                if let Ok(text) = std::str::from_utf8(&json_buf) {
+                    // Match against tensor-name markers anamnesis classifies
+                    // as BnB (NF4/FP4: `.weight.quant_map`; INT8: `.SCB`).
+                    // `.weight.absmax` would also work but `.weight.quant_map`
+                    // is the definitive NF4/FP4 marker per
+                    // anamnesis::parse::safetensors::detect_scheme.
+                    if text.contains(".weight.quant_map") || text.contains(".SCB\"") {
+                        return Some((repo_id, fname));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Finds a cached repo that has a `model.safetensors.index.json` (sharded model).
 fn find_cached_sharded_repo() -> Option<String> {
     let cache_dir = dirs::home_dir()?.join(".cache/huggingface/hub");
@@ -1421,6 +1504,69 @@ fn inspect_cached_quantized_renders_format_line() {
              despite carrying __metadata__)."
         );
     }
+}
+
+#[test]
+fn inspect_cached_bnb_renders_format_and_size_lines() {
+    // Regression guard for the v0.10.3 → unreleased fix: prior to enabling
+    // the `bnb` feature on the `anamnesis` dep, this exact invocation
+    // returned no Format:/Size: lines and `quant_info: None` in JSON for
+    // every BnB-quantized cached file — silently. Unlike
+    // `inspect_cached_quantized_renders_format_line` (which conditionally
+    // checks the lines IF present), this test asserts they MUST be present
+    // when the source file's header contains BnB tensor-name markers.
+    let Some((repo_id, filename)) = find_cached_bnb_safetensors_repo() else {
+        eprintln!("SKIP: no cached BnB-quantized safetensors file found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, &filename, "--cached", "--limit", "1"]));
+    assert!(
+        success,
+        "inspect --cached on BnB safetensors should succeed: {stderr}"
+    );
+    let has_format_line = stdout
+        .lines()
+        .any(|l| l.trim_start().starts_with("Format:") && l.contains("BitsAndBytes"));
+    assert!(
+        has_format_line,
+        "BnB-quantized {repo_id}/{filename} must render a `Format: BitsAndBytes …` line \
+         (regression guard: missing `bnb` feature on the anamnesis dep silently \
+         disables this), got:\n{stdout}"
+    );
+    let has_size_line = stdout
+        .lines()
+        .any(|l| l.contains(" stored -> ") && l.contains("(BF16)"));
+    assert!(
+        has_size_line,
+        "BnB-quantized {repo_id}/{filename} must render a `Size: <stored> stored -> <deq> (BF16)` \
+         line companion to Format:, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_bnb_json_carries_quant_info() {
+    // JSON-shape sibling of the above. The `quant_info` field is gated
+    // `#[serde(skip_serializing_if = "Option::is_none")]` so its absence
+    // on a known-BnB file is the exact JSON-side signature of the
+    // missing-feature-flag regression this guards against.
+    let Some((repo_id, filename)) = find_cached_bnb_safetensors_repo() else {
+        eprintln!("SKIP: no cached BnB-quantized safetensors file found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args([
+        "inspect", &repo_id, &filename, "--cached", "--json", "--limit", "1",
+    ]));
+    assert!(
+        success,
+        "inspect --cached --json on BnB safetensors should succeed: {stderr}"
+    );
+    assert!(
+        stdout.contains("\"quant_info\""),
+        "BnB-quantized {repo_id}/{filename} JSON output must carry the `quant_info` \
+         field (regression guard: silent `None` on BnB indicated missing `bnb` feature \
+         on the anamnesis dep), got:\n{stdout}"
+    );
 }
 
 #[test]

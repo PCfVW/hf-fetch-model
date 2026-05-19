@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **v0.10.3 Phase C `Format:` / `Size:` lines now fire on cached BnB / GPTQ / AWQ safetensors** — the `anamnesis` dependency in [Cargo.toml](Cargo.toml) was missing the `bnb`, `gptq`, and `awq` features, so anamnesis's tensor-name classifier (`classify_tensor` in `anamnesis::parse::safetensors`) routed `.qweight`, `.scales`, `.quant_map`, `.absmax`, `.SCB` etc. to `TensorRole::Passthrough`, `detect_scheme` returned `Unquantized`, and the Phase C renderer skipped the new lines. Surfaced empirically: `inspect medmekk/Llama-3.2-1B-Instruct-bnb-nf4-double-quant model.safetensors --cached` showed no Format/Size lines and `--json` returned `quant_info: None`, while the FP8 path (dtype-driven, no feature gate) worked correctly. Fix is purely additive on hf-fm's side — the three feature flags are pure code-gates in `anamnesis` (no extra transitive deps) — and unlocks the four schemes the changelog listed under v0.10.3 Phase C (`Bnb4`, `BnbInt8`, `Gptq`, `Awq`). Surfaced while validating v0.10.3 against the anamnesis Phase 5 Step 1c double-quant fixture set; the BnB DQ candidate-hunt workflow that motivated Phase C is now answerable in one inspect command (Format line + `nested_absmax` filter) instead of requiring tensor-table grepping.
+
 ## [0.10.3] — Cached-file format coverage
 
 ### Added
