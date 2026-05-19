@@ -7,7 +7,7 @@
 //!
 //! This module is the single source of truth for cache directory structure.
 //! When `hf-hub` bumps, update this module and rerun the
-//! `cache_layout_matches_hf_hub` integration test.
+//! `cache_layout_matches_hf_hub` integration test in `tests/integration.rs`.
 
 use std::path::{Path, PathBuf};
 
