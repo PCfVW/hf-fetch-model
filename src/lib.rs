@@ -73,6 +73,46 @@
 //! — depend on `hypomnesis` directly if you need the device-info numbers
 //! from library code.
 //!
+//! ## Cached-file Inspection
+//!
+//! Beyond the remote-or-cached `.safetensors` path above,
+//! [`inspect::inspect_gguf_cached`] (v0.10.2),
+//! [`inspect::inspect_npz_cached`], and [`inspect::inspect_pth_cached`]
+//! (both v0.10.3) extend inspect to `GGUF` / `NumPy` `.npz` / `PyTorch`
+//! `.pth` files in the local cache via the `anamnesis` parser crate. All
+//! four formats return the same format-agnostic
+//! [`inspect::SafetensorsHeaderInfo`] shape, so downstream pipeline steps
+//! (filter, tree, dtypes aggregation) work uniformly across formats.
+//!
+//! For cached `.safetensors` files, v0.10.3 also surfaces quantization
+//! detection. When [`inspect::inspect_safetensors_local`] sees a quantized
+//! header (`FP8` variants, `GPTQ`, `AWQ`, `BnB-NF4`, `BnB-INT8`), it
+//! populates the new [`inspect::QuantInfo`] field with the scheme name and
+//! both stored + dequantised byte sizes. Unquantized safetensors and
+//! non-safetensors formats leave `quant_info` as `None`.
+//!
+//! ```rust,no_run
+//! # fn example() -> Result<(), hf_fetch_model::FetchError> {
+//! use hf_fetch_model::inspect;
+//! use std::path::Path;
+//!
+//! let header = inspect::inspect_safetensors_local(
+//!     Path::new("/path/to/cached/file.safetensors"),
+//! )?;
+//! if let Some(q) = &header.quant_info {
+//!     println!(
+//!         "Quantized as {}: {} stored -> {} dequantised",
+//!         q.scheme, q.stored_bytes, q.dequantized_bytes,
+//!     );
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Remote inspect for `GGUF` / `NPZ` / `PTH` (via HTTP Range, without
+//! going through the cache) is planned for v0.11; until then those formats
+//! error early with a "pass --cached after downloading" recovery hint.
+//!
 //! ## `HuggingFace` Cache
 //!
 //! Downloaded files are stored in the standard `HuggingFace` cache directory
