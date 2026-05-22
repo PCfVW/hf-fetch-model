@@ -389,19 +389,18 @@ The eight feature-table items above land in three phases. Each phase is independ
 - If commit 6 (PTH) hits anamnesis-side friction: ship 1–5 + 7 (re-scoped to name only the three formats actually supported in this release) as v0.10.3. PTH + Phase C defer to v0.10.4.
 - If commit 8 (quant-scheme) hits unexpected `InspectInfo` API friction: ship 1–7 as v0.10.3 (full four-format `--cached` coverage minus the polish line). Quant-scheme defers to v0.10.4.
 
-### v0.10.4 — `--check-gpu` follow-ups (multi-GPU + KV-cache & hybrid-Mamba budgeting)
+### v0.10.4 — `--check-gpu` follow-ups (KV-cache & hybrid-Mamba budgeting)
 
 | Feature | Scope |
 |---------|-------|
-| `inspect --check-gpu all` | Multi-GPU verdict. Iterates over `hypomnesis::device_count()`, prints one `GPU N:` line per visible device with its own free/used numbers, and picks the device with the most free VRAM for the `Fit:` summary line. The `all` token is parsed via clap's `value_parser`: a bare `--check-gpu` keeps the v0.10.1 single-device default, `--check-gpu N` keeps single-device targeting, `--check-gpu all` enables the iteration. JSON path gains a `devices: [...]` array under `gpu_check` and the existing `device` key becomes an alias for the auto-picked entry. Closes the "I have a 5060 Ti and a 5090 in the same box" case without breaking the v0.10.1 single-device default. |
 | `inspect --check-gpu --context N` (transformer KV) | KV-cache budgeting for standard transformer architectures. Computes KV bytes from the model's `num_key_value_heads × head_dim × dtype_bytes × 2 (K+V) × num_hidden_layers × context` against the user-supplied context length, adds it to the weight bytes, and reports a *real* fit verdict instead of the v0.10.1 "weights only" disclaimer. Reads `config.json` from cache / API for the architectural parameters (already on the cache-first path used by `inspect`); falls back to a clear error when the config is missing or doesn't expose the GQA-related keys. Replaces the v0.10.1 closing note (`Note: reports weights only…`) with a `KV cache @ ctx=N: X.YZ GiB` line and a precise `Total: W + KV = X.YZ GiB` rollup. |
 | `inspect --check-gpu --context N` (hybrid Mamba + attention) | Same flag, hybrid-architecture branch. When `config.json` flags a hybrid model (Qwen3-Next, Nemotron-H, Jamba family — detected via `model_type` / `architectures` / the presence of Mamba-specific keys like `mamba_d_state`), the budget includes **both** the KV bytes for the attention layers (as above, but counting only `num_attention_layers`, not all layers) **and** the SSM/Mamba state bytes (`mamba_d_state × hidden_size × mamba_expand × num_ssm_layers × dtype_bytes`, approximated per the model's specific SSM variant). Output adds a `Mamba state: X.YZ GiB` line alongside `KV cache: X.YZ GiB` and rolls into `Total: W + KV + Mamba = X.YZ GiB`. **Direct response to the [candle #3530](../issues/candle-3530-p2.md) investigation**: that case identified the bug locus as a KV-allocator cap on Spark / SM121 that doesn't grow into available UMA pages, but only *after* establishing that the model + KV + Mamba state + runtime accounted cleanly for the observed memory pressure. Letting users predict KV + Mamba budgets *before* launching vllm-rs / candle would catch this class of crash at design time instead of inference time. |
 
 *(The `GpuDeviceInfo::name_or_unknown()` adoption originally scheduled here was pulled forward to v0.10.2 — see that section.)*
 
-**Theme: extending `--check-gpu` with multi-GPU and hybrid-aware memory budgeting.** v0.10.1 shipped single-device, weights-only `--check-gpu`; v0.10.4 spends the hypomnesis dependency on the three features users will ask for once they have used `--check-gpu` on real boxes: multi-GPU iteration, transformer KV budgeting at a user-supplied context length, and hybrid-Mamba state budgeting for the Qwen3-Next / Nemotron-H / Jamba class of models. The hybrid branch is motivated by the [candle #3530](../issues/candle-3530-p2.md) case study: predicting the KV + Mamba memory budget *before* a long-context launch is the diagnostic that would have surfaced sempervictus's KV-pool exhaustion at design time. Lands after the anamnesis-driven v0.10.2 / v0.10.3 patches because both KV-cache branches want the same config-aware infrastructure those patches are building (the cache-first `config.json` read in particular).
+**Theme: extending `--check-gpu` with hybrid-aware memory budgeting.** v0.10.1 shipped single-device, weights-only `--check-gpu`; v0.10.4 spends the hypomnesis dependency on the two features users will ask for once they have used `--check-gpu` on real boxes: transformer KV budgeting at a user-supplied context length, and hybrid-Mamba state budgeting for the Qwen3-Next / Nemotron-H / Jamba class of models. The hybrid branch is motivated by the [candle #3530](../issues/candle-3530-p2.md) case study: predicting the KV + Mamba memory budget *before* a long-context launch is the diagnostic that would have surfaced sempervictus's KV-pool exhaustion at design time. Lands after the anamnesis-driven v0.10.2 / v0.10.3 patches because both KV-cache branches want the same config-aware infrastructure those patches are building (the cache-first `config.json` read in particular).
 
-**Out of scope for v0.10.4 (still deferred):** AMD ROCm support (waits on hypomnesis's `rocm-smi` backend, planned in hypomnesis 0.3); Apple Metal (likewise, future hypomnesis backend); multi-context "fit profile" sweep (e.g., printing fit at 4 K / 16 K / 64 K context in a table); `--print-arch` flag surfacing the full `config.json` architectural-parameters block (one for users who want to do the KV / Mamba math by hand or sanity-check hf-fm's numbers — natural v0.10.5 follow-on once the cache-first config read lands); `diff-config <REPO_A> <REPO_B>` for architectural comparison between scaled-sibling pairs (v0.11 scope, complements `diff --dtypes`). All five are reasonable v0.10.5 / v0.11 extensions.
+**Out of scope for v0.10.4 (still deferred):** Multi-GPU `--check-gpu all` and the multi-context "fit profile" sweep — both lifted into v0.12.0 below, where they ship together as the *"matrix verdicts"* family; AMD ROCm support (waits on hypomnesis's `rocm-smi` backend, planned in hypomnesis 0.3); Apple Metal (likewise, future hypomnesis backend); `--print-arch` flag surfacing the full `config.json` architectural-parameters block (one for users who want to do the KV / Mamba math by hand or sanity-check hf-fm's numbers — natural v0.10.5 follow-on once the cache-first config read lands); `diff-config <REPO_A> <REPO_B>` for architectural comparison between scaled-sibling pairs (v0.11 scope, complements `diff --dtypes`). All are reasonable later-release extensions.
 
 ### v0.10.5 — `inspect --pick` (interactive file selection)
 
@@ -477,3 +476,72 @@ The v0.11 minor is dedicated to **remote inspection**. v0.11.0 builds an `HttpRa
 | `inspect <repo> file.pth` (no `--cached`) | Wire the PTH dispatch path through `HttpRangeReader`. |
 
 **Closes the matrix.** Every tensor format anamnesis supports is now remotely inspectable via the same `HttpRangeReader` substrate. After v0.11.3, `hf-fm inspect <repo> <any-tensor-file>` works uniformly — cached or remote, regardless of format.
+
+---
+
+### v0.12.0 — Multi-GPU + multi-context `--check-gpu` matrix
+
+| Feature | Scope |
+|---------|-------|
+| `inspect --check-gpu all` | Multi-GPU verdict. Iterates over `hypomnesis::device_count()`, prints one `GPU N:` line per visible device with its own free/used numbers, and picks the device with the most free VRAM for the `Fit:` summary line. The `all` token is parsed via clap's `value_parser`: a bare `--check-gpu` keeps the v0.10.1 single-device default, `--check-gpu N` keeps single-device targeting, `--check-gpu all` enables the iteration. JSON path gains a `devices: [...]` array under `gpu_check` and the existing `device` key becomes an alias for the auto-picked entry. Closes the "I have a 5060 Ti and a 5050 in the same box" case without breaking the v0.10.1 single-device default. |
+| `inspect --check-gpu --context-sweep` | Multi-context fit-profile sweep. Prints a table of `Total = W + KV [+ Mamba]` and Fit verdicts at a representative set of context lengths (e.g. 4 K / 16 K / 64 K / 128 K) instead of a single context number. Composes with `--check-gpu N` and `--check-gpu all`, so the matrix can be one-GPU-many-contexts or many-GPUs-many-contexts. Reuses v0.10.4's KV + Mamba budgeting math at each cell. Natural companion to `--check-gpu all` — both are *"show me a matrix of verdicts"* — which is why they ship together. |
+
+**Theme: broaden `--check-gpu` from a single verdict to a matrix.** v0.10.1 introduced single-device, weights-only `--check-gpu`; v0.10.4 added KV-cache and hybrid-Mamba budgeting at a user-supplied context. v0.12.0 closes out the family: instead of one device × one context giving one verdict, the user can ask for all devices × a context-length sweep and read off a table. Deferred to v0.12.0 because both features want real multi-GPU hardware to validate (the iteration ordering, the auto-pick heuristic, and the per-GPU sweep all need an actual second device on the box).
+
+**Why v0.12 and not v0.11.x.** The v0.11 line is dedicated to remote-inspect framework work (`HttpRangeReader` + format coverage). Stitching multi-GPU into v0.11 would dilute that focus; saving it for a fresh minor keeps the v0.11 → v0.12 boundary clean: *v0.11 = format reach, v0.12 = GPU reach*.
+
+**Hardware prerequisite.** Maintainer's box gains a second GPU (5050 8GiB alongside the 5060 Ti 16GiB) before this lands — the multi-GPU iteration ordering, the auto-pick heuristic, and the per-device sweep numbers all want a real second device to be exercised against, not a mock.
+
+---
+
+#### Reference — RTX 5050 8 GB in PCIEX2 on the B550 GAMING X V2
+
+> Compatibility analysis verifying that the **Hardware prerequisite** above is feasible: can a second NVIDIA GPU (specifically an RTX 5050 8 GB) be added to the maintainer's existing system (B550 GAMING X V2 + RTX 5060 Ti 16 GB) in the PCIEX2 slot? Conducted 2026-05-19; source: GIGABYTE *B550 GAMING X V2 User's Manual* rev. 1301, §1-2 *Product Specifications* (p. 6), §1-5 *Installing an Expansion Card* (p. 10), and motherboard layout (p. 4).
+
+**Verdict.** The slot will physically and electrically accept the RTX 5050 8 GB, with three qualifications: PCIe 3.0 ×2 wiring (one-sixteenth the card's native bandwidth), physical clearance below the primary GPU must be verified, and the slot delivers only 75 W (rest from PSU).
+
+**Slot spec — verbatim from the manual** (§1-2, p. 6):
+
+> *"1 x PCI Express x16 slot (PCIEX2), integrated in the Chipset: Supporting PCIe 3.0 x2 mode"*
+
+| Attribute | Value | Implication |
+|---|---|---|
+| Physical connector | x16 (full-length) | Any PCIe card width (x1/x2/x4/x8/x16) fits mechanically. |
+| Electrical lanes | x2 (only 2 of 16 wired) | Card runs in compatibility mode at 2-lane width regardless of native width. |
+| PCIe generation | 3.0 | Card auto-negotiates down from its native generation (PCIe 5.0 on Blackwell). |
+| Lane source | Chipset (AMD B550), not CPU | Routes via the B550 chipset → CPU link (PCIe 4.0 ×4 on Ryzen 5000), shared with M.2 SB, SATA, other chipset slots/USB. |
+
+**Compatibility — three dimensions.**
+
+1. *Electrical / PCIe protocol — fully compatible.* PCIe is backward-compatible across generations and width-down-negotiable. RTX 5050 (PCIe 5.0 ×8 native) in this slot runs as PCIe 3.0 ×2 effective ≈ 1.97 GB/s peak unidirectional. Nothing in the manual prohibits or restricts which GPU goes here.
+
+2. *Physical clearance — verify against the primary GPU.* Motherboard layout (manual p. 4) shows slot order top-to-bottom: `PCIEX16 → PCIEX1_1 → PCIEX1_2 → PCIEX2 → PCIEX1_3`. PCIEX2 sits ~3 slot pitches (≈ 6 cm) below PCIEX16. The risk is the existing 5060 Ti's cooler shroud overhanging the PCIEX2 area:
+
+   | 5060 Ti slot width | Vertical occupation | Clearance to PCIEX2 |
+   |---|---|---|
+   | 2 slots | ~40 mm | ~20 mm headroom ✓ |
+   | 2.5 slots | ~50 mm | ~10 mm headroom ✓ |
+   | 3 slots | ~60 mm | Marginal — verify with calipers |
+   | 3.5+ slots | ~70+ mm | Blocked ✗ |
+
+   RTX 5050 8 GB is almost universally a 2-slot card, so it fits *into* PCIEX2 without issue; the only open question is whether the primary 5060 Ti's cooler overhangs it.
+
+3. *Power.* The slot supplies the standard PCIe 75 W. RTX 5050 8 GB TDP ≈ 130 W → needs an external 8-pin (or 6+2) PCIe power cable from the PSU. The 850 W PSU has ample cables.
+
+**Performance implications for the v0.12.0 pipeline-parallel use case.** For PP-style serving where the second GPU receives intermediate activations across a layer boundary:
+
+| Operation | Data per event | Time at PCIe 3.0 ×2 (~2 GB/s) | Acceptable? |
+|---|---|---|---|
+| One-time model load (~6 GiB worth of weights to Cuda(1)) | 6 GiB | ~3 s | ✓ once per session |
+| Prefill: per-layer-boundary activation transfer (seq=2048, hidden=4096, BF16) | 16 MiB | ~8 ms | ✓ |
+| Incremental decode: per-layer-boundary transfer (seq=1) | 8 KiB | ~4 µs | ✓ trivial |
+| KV cache transfer (KV lives on each layer's device — no cross-device transfer required) | n/a | n/a | n/a |
+
+For autoregressive inference the PCIe 3.0 ×2 wiring is fine. Prefill on long sequences incurs ~8 ms per layer boundary (≈ 16 ms per token in an 18/14 split with both forward boundaries); decode is bandwidth-trivial.
+
+**Two things the manual doesn't address but are worth knowing.**
+
+1. *Chipset-link contention.* All chipset PCIe traffic shares one PCIe 4.0 ×4 link to the CPU (≈ 8 GB/s aggregate). Heavy concurrent M.2 SSD reads + GPU on PCIEX2 + USB traffic could in principle contend; for inference workloads this won't bite — 2 GB/s GPU + ≈ 1 GB/s M.2 reads at startup is well under the ceiling.
+2. *No BIOS configuration required.* §1 and §2 of the manual mention no disabling or sharing of PCIEX2 lanes. The slot is hardwired ×2 from the chipset regardless of which other slots are populated. Both GPUs will appear in `nvidia-smi` and in `hypomnesis::device_count()` automatically — which is exactly what `inspect --check-gpu all` needs.
+
+**Conclusion.** Hardware plan is viable for the v0.12.0 work. Only material risk before purchase is **physical clearance with the existing 5060 Ti's cooler** — measure first. PSU, power delivery, BIOS, and chipset routing are all fine.
