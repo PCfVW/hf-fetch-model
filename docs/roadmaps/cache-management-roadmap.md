@@ -395,10 +395,14 @@ The eight feature-table items above land in three phases. Each phase is independ
 |---------|-------|
 | `inspect --check-gpu --context N` (transformer KV) | KV-cache budgeting for standard transformer architectures. Computes KV bytes from the model's `num_key_value_heads × head_dim × dtype_bytes × 2 (K+V) × num_hidden_layers × context` against the user-supplied context length, adds it to the weight bytes, and reports a *real* fit verdict instead of the v0.10.1 "weights only" disclaimer. Reads `config.json` from cache / API for the architectural parameters (already on the cache-first path used by `inspect`); falls back to a clear error when the config is missing or doesn't expose the GQA-related keys. Replaces the v0.10.1 closing note (`Note: reports weights only…`) with a `KV cache @ ctx=N: X.YZ GiB` line and a precise `Total: W + KV = X.YZ GiB` rollup. |
 | `inspect --check-gpu --context N` (hybrid Mamba + attention) | Same flag, hybrid-architecture branch. When `config.json` flags a hybrid model (Qwen3-Next, Nemotron-H, Jamba family — detected via `model_type` / `architectures` / the presence of Mamba-specific keys like `mamba_d_state`), the budget includes **both** the KV bytes for the attention layers (as above, but counting only `num_attention_layers`, not all layers) **and** the SSM/Mamba state bytes (`mamba_d_state × hidden_size × mamba_expand × num_ssm_layers × dtype_bytes`, approximated per the model's specific SSM variant). Output adds a `Mamba state: X.YZ GiB` line alongside `KV cache: X.YZ GiB` and rolls into `Total: W + KV + Mamba = X.YZ GiB`. **Direct response to the [candle #3530](../issues/candle-3530-p2.md) investigation**: that case identified the bug locus as a KV-allocator cap on Spark / SM121 that doesn't grow into available UMA pages, but only *after* establishing that the model + KV + Mamba state + runtime accounted cleanly for the observed memory pressure. Letting users predict KV + Mamba budgets *before* launching vllm-rs / candle would catch this class of crash at design time instead of inference time. |
+| `inspect <repo>` discoverability hint (no FILE) | A bare `inspect <repo>` with no rendering flag resolves to the per-file rollup ([`print_multi_file_summary`](../../src/bin/main.rs)), which prints only `File / Tensors / Params` columns plus the `N files, N tensors, … params` summary — no tensor names, and no nudge toward the per-tensor views that *do* exist (`--tree`, `--dtypes`, a literal `<filename>`, or the v0.9.7 numeric index). Add a one-line footer hint after the summary pointing at those, special-cased for the common single-`.safetensors` repo where the rollup is least informative (one row, a param count, and nothing else). Pure render-path addition; no new dispatch path. **Dogfooding origin:** the mdlm-owt `inspect` session (2026-05-29) — the user landed on the bare rollup (`131 tensors, 169.6M params`), saw no tensor names, and had to already know to append `--tree` or a filename to get per-tensor detail. |
+| `inspect` repo-level `Source:` label accuracy | The network repo-inspect path hardcodes `Source: mixed` ([src/bin/main.rs:5643](../../src/bin/main.rs#L5643)) regardless of provenance: the per-file source returned by `inspect_repo_safetensors` is discarded at the `.map(\|(name, info, _source)\| (name, info))` site ([src/bin/main.rs:5624](../../src/bin/main.rs#L5624)), so `mixed` is a constant masquerading as computed state — it prints even when every file was range-fetched remotely. Thread the discarded `_source` through and compute the label honestly: `cached` (all local), `remote` (all range-fetched), or `mixed (N cached, M remote)` for a genuine split. Brings the repo-level header into line with the per-file `inspect`, whose `cached` / `remote (2 HTTP requests)` label ([src/bin/main.rs:5351-5355](../../src/bin/main.rs#L5351)) is already accurate. **Dogfooding origin:** same mdlm-owt session — `Source: mixed` read as opaque, and investigation confirmed it is not even derived from the actual cached/remote mix. |
 
 *(The `GpuDeviceInfo::name_or_unknown()` adoption originally scheduled here was pulled forward to v0.10.2 — see that section.)*
 
 **Theme: extending `--check-gpu` with hybrid-aware memory budgeting.** v0.10.1 shipped single-device, weights-only `--check-gpu`; v0.10.4 spends the hypomnesis dependency on the two features users will ask for once they have used `--check-gpu` on real boxes: transformer KV budgeting at a user-supplied context length, and hybrid-Mamba state budgeting for the Qwen3-Next / Nemotron-H / Jamba class of models. The hybrid branch is motivated by the [candle #3530](../issues/candle-3530-p2.md) case study: predicting the KV + Mamba memory budget *before* a long-context launch is the diagnostic that would have surfaced sempervictus's KV-pool exhaustion at design time. Lands after the anamnesis-driven v0.10.2 / v0.10.3 patches because both KV-cache branches want the same config-aware infrastructure those patches are building (the cache-first `config.json` read in particular).
+
+**Dogfooding polish (secondary thread).** Alongside the `--check-gpu` budgeting work, v0.10.4 picks up two small `inspect`-output fixes surfaced by the mdlm-owt dogfooding session (2026-05-29, full report in [`docs/dogfooding-feedbacks/hf-fm-dogfooding-mdlm-owt-session.md`](../dogfooding-feedbacks/hf-fm-dogfooding-mdlm-owt-session.md)): a discoverability hint on the bare `inspect <repo>` rollup, and an honest repo-level `Source:` label to replace the hardcoded `mixed`. Both are render-path-only, ship independently of the GPU work, and can land first as low-risk warm-up commits if the KV / Mamba branches need more time. The third finding from that session — a `cat`-style stdout view for small text files — is **not** added here: it is already the v0.11.4 `peek` feature (below), which this session independently corroborates.
 
 **Out of scope for v0.10.4 (still deferred):** Multi-GPU `--check-gpu all` and the multi-context "fit profile" sweep — both lifted into v0.12.0 below, where they ship together as the *"matrix verdicts"* family; AMD ROCm support (waits on hypomnesis's `rocm-smi` backend, planned in hypomnesis 0.3); Apple Metal (likewise, future hypomnesis backend); `--print-arch` flag surfacing the full `config.json` architectural-parameters block (one for users who want to do the KV / Mamba math by hand or sanity-check hf-fm's numbers — natural v0.10.5 follow-on once the cache-first config read lands); `diff-config <REPO_A> <REPO_B>` for architectural comparison between scaled-sibling pairs (v0.11 scope, complements `diff --dtypes`). All are reasonable later-release extensions.
 
@@ -438,7 +442,7 @@ Resolving to transformer/demonCORESFWNSFW_fluxV13.safetensors
 
 ---
 
-The v0.11 minor is dedicated to **remote inspection**. v0.11.0 builds an `HttpRangeReader: Read + Seek` adapter once over `reqwest` Range requests; each subsequent patch wires one more tensor format through the same adapter. anamnesis owns format knowledge; hf-fm owns HTTP plumbing. Format order is risk-ascending: NPZ (anamnesis primitive already shipped in v0.4.3) → safetensors (small library work, retires the bespoke parser) → GGUF (medium library work, the originally-promised v0.11.0 feature) → PTH (largest library work, lowest demand).
+The v0.11 minor is dedicated to **remote inspection**. v0.11.0 builds an `HttpRangeReader: Read + Seek` adapter once over `reqwest` Range requests; each subsequent patch wires one more tensor format through the same adapter. anamnesis owns format knowledge; hf-fm owns HTTP plumbing. Format order is risk-ascending: NPZ (anamnesis primitive already shipped in v0.4.3) → safetensors (small library work, retires the bespoke parser) → GGUF (medium library work, the originally-promised v0.11.0 feature) → PTH (largest library work, lowest demand). v0.11.4 then generalises the substrate **beyond the tensor-format matrix** — `peek` reuses `HttpRangeReader` for arbitrary small text / config / `.gz`-compressed sidecar files (`config.yaml`, `README.md`, `index.json.gz`), with no anamnesis dispatch.
 
 ### v0.11.0 — Remote inspect framework + NPZ remote
 
@@ -476,6 +480,44 @@ The v0.11 minor is dedicated to **remote inspection**. v0.11.0 builds an `HttpRa
 | `inspect <repo> file.pth` (no `--cached`) | Wire the PTH dispatch path through `HttpRangeReader`. |
 
 **Closes the matrix.** Every tensor format anamnesis supports is now remotely inspectable via the same `HttpRangeReader` substrate. After v0.11.3, `hf-fm inspect <repo> <any-tensor-file>` works uniformly — cached or remote, regardless of format.
+
+### v0.11.4 — `hf-fm peek` (arbitrary small-file fetch, no anamnesis dispatch)
+
+| Feature | Scope |
+|---------|-------|
+| `hf-fm peek <repo> <file> [--head N \| --tail N] [--bytes] [--gunzip \| --no-gunzip] [--max <SIZE>]` | Small-file inspection **outside the tensor-format matrix**. Reuses the v0.11.0 `HttpRangeReader` substrate to fetch up to a configurable cap (default `--max 10MiB`) of any file in the repo and stream it to stdout. **No anamnesis dispatch** — peek is format-agnostic and explicitly does not parse tensor headers (use `inspect` for that). With no `--head` / `--tail` flag, behaves like `cat` over the substrate — stream up to the cap and stop. |
+| `--head N` / `--tail N` (default: lines) | Standard POSIX-style line counts; `--bytes` switches to byte counts. `--head` is cheap (sequential read until N newlines or N bytes); `--tail` issues a Range request from the end (`--bytes`) or chunked end-scan reading ~4 KiB blocks backward until N newlines are seen (`--lines`, the default). Worst-case bounded by the file's longest-line length. |
+| `--gunzip` / `--no-gunzip` | Transparent gzip decoding via `flate2::read::GzDecoder<HttpRangeReader>`. Default ON when the URL ends in `.gz`; can be forced via the explicit flag or disabled with `--no-gunzip`. Streaming decoder integrates with `--head` (decode-and-count) but **not** with `--tail` (gzip is sequential; the combination errors at clap parse time pointing at the alternative of `peek file.gz --gunzip --max <SIZE>` followed by `\| tail`). |
+| `--max <SIZE>` size cap | The footgun guard — accidentally peeking `model.safetensors` with no flags is rejected with a clear error pointing at `inspect` for tensor formats and at raising `--max` for genuine large-text cases. Default 10 MiB keeps `peek` honest. |
+| `--cached` not provided | Peek is remote-only by design. The cached equivalent is `cat $(hf-fm cache path <repo>)/<file>` (or `Get-Content` on PowerShell); adding a `--cached` flag would duplicate that pattern with worse ergonomics. |
+
+Sample sessions:
+
+```
+$ hf-fm peek bluelightai/clt-qwen3-1.7b-base-20k config.yaml
+features_per_layer: 20480
+num_layers: 28
+base_model: Qwen/Qwen3-1.7B-Base
+quant: bf16
+activation: jump_relu
+
+$ hf-fm peek bluelightai/clt-qwen3-1.7b-base-20k features/index.json.gz --gunzip --head 5 --bytes
+{"version":"1.0","format":"variable_chunks","0":{"filename":"layer_0.bin","offsets":[0,15
+[truncated at --head 5 bytes shown above; pass --max <SIZE> to read more, then pipe through jq]
+```
+
+**Theme: generalising the v0.11.x remote-inspect substrate beyond tensor formats.** v0.11.0–v0.11.3 wired the four anamnesis-supported tensor formats through `HttpRangeReader`; v0.11.4 reuses the same adapter for **everything else** — `config.yaml`, `README.md`, `index.json.gz`, license texts, generation configs, and any small text/JSON sidecar a repo ships. No new library work in anamnesis (peek deliberately does not invoke any parser); the entire feature is hf-fm-side HTTP plumbing on top of the existing adapter.
+
+**Concrete dogfooding origin.** Surfaced during the candle-mi v0.1.11 / COLM 2026 rebuttal investigation: needed to peek at `bluelightai/clt-qwen3-1.7b-base-20k`'s `features/index.json.gz` (a 2.33 MiB gzipped JSON sidecar containing per-feature top-token offsets used by the `circuit-tracer` dashboard) to decide whether the BlueLightAI CLT vocabulary scan could bypass running Qwen3 forward passes through candle-mi's transformer arm. `inspect` rejected the file (correct — it's not a tensor format); `download-file --output-dir <cache>` worked but persisted a non-standard cache copy. `peek <repo> features/index.json.gz --gunzip` would have answered the question in one command with no cache pollution. A second, independent dogfooding session (mdlm-owt, 2026-05-29) corroborates the same gap from the opposite direction: `download-file` writes small config / modeling-source files to disk only to be `Read` back, with no stdout dump for the common inspect-before-build case — precisely what `peek` provides.
+
+**Out of scope for v0.11.4 (deferred):**
+
+- **Binary file rendering.** Output for non-text formats is garbage and the tool does not hexdump. `inspect` covers tensor formats; arbitrary binary peek would need its own subcommand.
+- **Search / grep semantics.** `peek <repo> <file> --gunzip \| rg pattern` is the composition; baking grep into peek expands the surface for "did you mean to use ripgrep?" confusion.
+- **Cached file path.** Already covered by `cat $(hf-fm cache path <repo>)/<file>` (see `--cached` row above).
+- **Range across multiple files.** Single-file scope. Multi-file scans are `hf-fm list-files` + a shell loop.
+
+~50 LOC + tests on top of v0.11.0's `HttpRangeReader`. `flate2` is the only new candidate direct dep; first check whether it's already transitively present via `reqwest` (for `Content-Encoding: gzip`) or `zip` (the `.zip` decompression path used by NPZ / PTH) before adding it explicitly. If transitive, no Cargo.toml change beyond the new subcommand wiring.
 
 ---
 
