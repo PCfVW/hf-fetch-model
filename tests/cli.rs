@@ -1221,6 +1221,102 @@ fn inspect_cached_json_output() {
 }
 
 #[test]
+fn inspect_check_gpu_context_renders_kv_line() {
+    // The KV-cache line prints before the GPU probe, so this assertion is
+    // GPU-agnostic: it holds whether the device is present, absent, or the
+    // config is unavailable (the line then reads "unavailable"/"skipped").
+    let Some((repo_id, filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args([
+        "inspect",
+        &repo_id,
+        &filename,
+        "--cached",
+        "--check-gpu",
+        "--context",
+        "8192",
+    ]));
+    // `--check-gpu` is informational and never gates — always exit 0.
+    assert!(
+        success,
+        "inspect --check-gpu --context should succeed: {stderr}"
+    );
+    assert!(
+        stdout.contains("KV cache"),
+        "should render a KV cache line, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_context_requires_check_gpu() {
+    // `--context` without `--check-gpu` is rejected at parse time (clap
+    // `requires`), before any network/cache access — so a placeholder repo is
+    // fine and no cache is needed.
+    let (_stdout, stderr, success) = run(hf_fm().args([
+        "inspect",
+        "kvtest/placeholder",
+        "--cached",
+        "--context",
+        "4096",
+    ]));
+    assert!(!success, "missing --check-gpu should fail at parse time");
+    assert!(
+        stderr.contains("--check-gpu"),
+        "error should name the required --check-gpu flag, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn inspect_check_gpu_context_json_has_kv_cache() {
+    // With `--context`, the JSON verdict always carries a `kv_cache` object
+    // (computed, skipped, or unavailable) — independent of GPU presence.
+    let Some((repo_id, filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args([
+        "inspect",
+        &repo_id,
+        &filename,
+        "--cached",
+        "--check-gpu",
+        "--context",
+        "4096",
+        "--json",
+    ]));
+    assert!(
+        success,
+        "inspect --check-gpu --context --json should succeed: {stderr}"
+    );
+    assert!(
+        stdout.contains("\"kv_cache\""),
+        "JSON should contain a kv_cache object, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_check_gpu_without_context_omits_kv() {
+    // Regression: without `--context`, no KV/Total lines appear (GPU-agnostic —
+    // both print before the GPU probe). Guards the byte-identical legacy path.
+    let Some((repo_id, filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, &filename, "--cached", "--check-gpu"]));
+    assert!(success, "inspect --check-gpu should succeed: {stderr}");
+    // The `Total:` line and the `KV cache @ ctx=` line are unique to the
+    // `--context` path. (The plain weights-only note legitimately mentions
+    // "KV cache", so we discriminate on these markers, not the bare phrase.)
+    assert!(
+        !stdout.contains("Total:") && !stdout.contains("KV cache @"),
+        "no-context output must omit the KV/Total lines, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn inspect_cached_no_metadata() {
     let Some((repo_id, filename)) = find_cached_safetensors_repo() else {
         eprintln!("SKIP: no cached safetensors repo found");

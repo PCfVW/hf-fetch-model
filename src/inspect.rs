@@ -86,6 +86,26 @@ impl TensorInfo {
     }
 }
 
+/// Bytes per element for a model's activation dtype, as spelled in a
+/// `config.json` `torch_dtype` field.
+///
+/// Distinct from [`TensorInfo::dtype_bytes`], which maps the *safetensors*
+/// header spellings (`"BF16"`, `"F16"`, …); `config.json` uses the `PyTorch`
+/// spellings (`"bfloat16"`, `"float16"`, `"float32"`, `"float8_e4m3fn"`).
+/// Used to size the KV cache, whose element dtype tracks the model's
+/// activations (typically `bf16` / `fp16`) independently of weight
+/// quantization. Defaults to `2` when the dtype is absent or unrecognized —
+/// the modern inference default and the safe assumption for KV sizing.
+#[must_use]
+pub fn torch_dtype_bytes(torch_dtype: Option<&str>) -> u8 {
+    match torch_dtype {
+        Some("float32" | "float") => 4,
+        Some("float8_e4m3fn" | "float8_e5m2") => 1,
+        // `bf16` / `fp16`, and any unknown or absent dtype: 2-byte activations.
+        _ => 2,
+    }
+}
+
 /// Quantization scheme + size estimates for a cached `.safetensors` file.
 ///
 /// Populated by [`inspect_safetensors_local`] (the cache-hit path) via
@@ -243,6 +263,55 @@ pub struct AdapterConfig {
     pub target_modules: Vec<String>,
     /// Task type the adapter was trained for (e.g., `"CAUSAL_LM"`).
     pub task_type: Option<String>,
+}
+
+/// Attention- and cache-relevant fields parsed from a model's `config.json`.
+///
+/// Every field is [`Option`] because configs vary across architecture
+/// families; the KV-cache estimator decides which combinations are
+/// computable and which fall back to an "unavailable" verdict. Legacy
+/// `n_layer` / `n_head` / `n_head_kv` spellings are absorbed by serde aliases
+/// on the private deserialization struct. Drives KV-cache budgeting for
+/// `inspect --check-gpu --context`.
+#[derive(Debug, Clone, Default, Serialize)]
+#[non_exhaustive]
+pub struct ModelConfig {
+    /// Architecture tag (e.g. `"llama"`, `"qwen3"`, `"gemma2"`, `"deepseek_v2"`).
+    pub model_type: Option<String>,
+    /// Number of transformer layers (`num_hidden_layers` / `n_layer`).
+    pub num_hidden_layers: Option<u32>,
+    /// Number of query attention heads (`num_attention_heads` / `n_head`).
+    pub num_attention_heads: Option<u32>,
+    /// Number of key/value heads for `GQA` (`num_key_value_heads` /
+    /// `num_kv_heads` / `n_head_kv`). Absent ⇒ `MHA` (equals
+    /// `num_attention_heads`).
+    pub num_key_value_heads: Option<u32>,
+    /// Explicit per-head dimension when stated (Gemma = 256, Qwen3 = 128).
+    /// Absent ⇒ derived as `hidden_size / num_attention_heads`.
+    pub head_dim: Option<u32>,
+    /// Model hidden size, used to derive `head_dim` when it is not explicit.
+    pub hidden_size: Option<u32>,
+    /// Activation dtype spelling (`"bfloat16"`, `"float16"`, …); sizes the
+    /// KV-cache element via [`torch_dtype_bytes`].
+    pub torch_dtype: Option<String>,
+    /// Sliding-window span in tokens when the model uses windowed attention.
+    /// `null` / absent ⇒ full attention.
+    pub sliding_window: Option<u32>,
+    /// Global-attention period for mixed local/global layouts (Gemma-3:
+    /// every `N`-th layer is a full-attention layer).
+    pub sliding_window_pattern: Option<u32>,
+    /// Explicit on/off switch for sliding-window attention — Qwen2/3 ship a
+    /// `sliding_window` value but disable it with `false`.
+    pub use_sliding_window: Option<bool>,
+    /// `MLA` latent-KV rank (`DeepSeek`). Presence marks multi-head latent
+    /// attention, where the naive KV formula does not apply.
+    pub kv_lora_rank: Option<u32>,
+    /// `MLA` decoupled-`RoPE` key dimension (`DeepSeek`); part of the latent-KV
+    /// size used by the documented `MLA` estimate.
+    pub qk_rope_head_dim: Option<u32>,
+    /// Per-layer kind tags for hybrid models (`"attention"` / `"mamba"` / …);
+    /// reserved for hybrid-Mamba budgeting (v0.10.4 follow-up).
+    pub layer_types: Option<Vec<String>>,
 }
 
 // -----------------------------------------------------------------------
@@ -1454,4 +1523,170 @@ fn parse_adapter_config_json(content: &str, repo_id: &str) -> Result<AdapterConf
         target_modules,
         task_type: raw.task_type,
     })
+}
+
+/// Raw JSON structure of `config.json` (only the fields hf-fm reads for
+/// KV-cache budgeting).
+///
+/// Serde aliases absorb the legacy GPT-NeoX / Falcon spellings. `text_config`
+/// holds the nested language-model config of multimodal repos (Gemma-3) and
+/// is used as a fallback when the attention dims are absent at top level.
+#[derive(serde::Deserialize)]
+struct RawModelConfig {
+    #[serde(default)]
+    model_type: Option<String>,
+    #[serde(default, alias = "n_layer")]
+    num_hidden_layers: Option<u32>,
+    #[serde(default, alias = "n_head")]
+    num_attention_heads: Option<u32>,
+    #[serde(default, alias = "num_kv_heads", alias = "n_head_kv")]
+    num_key_value_heads: Option<u32>,
+    #[serde(default)]
+    head_dim: Option<u32>,
+    #[serde(default)]
+    hidden_size: Option<u32>,
+    #[serde(default)]
+    torch_dtype: Option<String>,
+    #[serde(default)]
+    sliding_window: Option<u32>,
+    #[serde(default)]
+    sliding_window_pattern: Option<u32>,
+    #[serde(default)]
+    use_sliding_window: Option<bool>,
+    #[serde(default)]
+    kv_lora_rank: Option<u32>,
+    #[serde(default)]
+    qk_rope_head_dim: Option<u32>,
+    #[serde(default)]
+    layer_types: Option<Vec<String>>,
+    #[serde(default)]
+    text_config: Option<Box<RawModelConfig>>,
+}
+
+/// Lowers a [`RawModelConfig`] into the public [`ModelConfig`].
+///
+/// Multimodal configs (Gemma-3) nest the language-model dims under
+/// `text_config`; when the top level carries no attention dims, this recurses
+/// into that nested config so the KV estimator sees the real numbers.
+fn model_config_from_raw(raw: RawModelConfig) -> ModelConfig {
+    if raw.num_hidden_layers.is_none()
+        && raw.num_attention_heads.is_none()
+        && raw.hidden_size.is_none()
+    {
+        if let Some(text) = raw.text_config {
+            return model_config_from_raw(*text);
+        }
+    }
+
+    ModelConfig {
+        model_type: raw.model_type,
+        num_hidden_layers: raw.num_hidden_layers,
+        num_attention_heads: raw.num_attention_heads,
+        num_key_value_heads: raw.num_key_value_heads,
+        head_dim: raw.head_dim,
+        hidden_size: raw.hidden_size,
+        torch_dtype: raw.torch_dtype,
+        sliding_window: raw.sliding_window,
+        sliding_window_pattern: raw.sliding_window_pattern,
+        use_sliding_window: raw.use_sliding_window,
+        kv_lora_rank: raw.kv_lora_rank,
+        qk_rope_head_dim: raw.qk_rope_head_dim,
+        layer_types: raw.layer_types,
+    }
+}
+
+/// Parses `config.json` content into a [`ModelConfig`].
+fn parse_model_config_json(content: &str, repo_id: &str) -> Result<ModelConfig, FetchError> {
+    let raw: RawModelConfig =
+        serde_json::from_str(content).map_err(|e| FetchError::SafetensorsHeader {
+            filename: "config.json".to_owned(),
+            reason: format!("failed to parse model config for {repo_id}: {e}"),
+        })?;
+
+    Ok(model_config_from_raw(raw))
+}
+
+/// Fetches and parses a model's `config.json` (cache-first, then HTTP).
+///
+/// Returns `Ok(None)` when the repository has no `config.json` (HTTP 404) —
+/// e.g. a non-model repo or a raw-weights upload.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`] if the request fails (other than 404).
+/// Returns [`FetchError::Io`] if a cached `config.json` cannot be read.
+/// Returns [`FetchError::SafetensorsHeader`] if the JSON is malformed.
+pub async fn fetch_model_config(
+    repo_id: &str,
+    token: Option<&str>,
+    revision: Option<&str>,
+) -> Result<Option<ModelConfig>, FetchError> {
+    let rev = revision.unwrap_or("main");
+    let config_filename = "config.json";
+
+    // Try local cache first.
+    if let Some(cached_path) = resolve_cached_path(repo_id, rev, config_filename) {
+        let content = std::fs::read_to_string(&cached_path).map_err(|e| FetchError::Io {
+            path: cached_path,
+            source: e,
+        })?;
+        let config = parse_model_config_json(&content, repo_id)?;
+        return Ok(Some(config));
+    }
+
+    // Fall back to HTTP.
+    let client = chunked::build_client(token)?;
+    let url = chunked::build_download_url(repo_id, rev, config_filename);
+
+    // BORROW: explicit .as_str() instead of Deref coercion
+    let response = client.get(url.as_str()).send().await.map_err(|e| {
+        FetchError::Http(format!("failed to fetch model config for {repo_id}: {e}"))
+    })?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    if !response.status().is_success() {
+        return Err(FetchError::Http(format!(
+            "model config request for {repo_id} returned status {}",
+            response.status()
+        )));
+    }
+
+    let content = response
+        .text()
+        .await
+        .map_err(|e| FetchError::Http(format!("failed to read model config for {repo_id}: {e}")))?;
+
+    let config = parse_model_config_json(&content, repo_id)?;
+    Ok(Some(config))
+}
+
+/// Fetches a model's `config.json` from the local cache only (no network).
+///
+/// Returns `Ok(None)` if the file is not cached.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the cached file cannot be read.
+/// Returns [`FetchError::SafetensorsHeader`] if the JSON is malformed.
+pub fn fetch_model_config_cached(
+    repo_id: &str,
+    revision: Option<&str>,
+) -> Result<Option<ModelConfig>, FetchError> {
+    let rev = revision.unwrap_or("main");
+    let config_filename = "config.json";
+
+    let Some(cached_path) = resolve_cached_path(repo_id, rev, config_filename) else {
+        return Ok(None);
+    };
+
+    let content = std::fs::read_to_string(&cached_path).map_err(|e| FetchError::Io {
+        path: cached_path,
+        source: e,
+    })?;
+
+    let config = parse_model_config_json(&content, repo_id)?;
+    Ok(Some(config))
 }

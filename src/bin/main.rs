@@ -453,6 +453,17 @@ See also: hf-fm list-families, hf-fm discover")]
             conflicts_with = "list"
         )]
         check_gpu: Option<u32>,
+        /// KV-cache context length to fold into the `--check-gpu` verdict.
+        ///
+        /// Reads the model's `config.json` for the attention dimensions and
+        /// estimates KV-cache bytes at this sequence length, then reports a
+        /// real fit verdict against `weights + KV` instead of weights alone.
+        /// Requires `--check-gpu`. Sliding-window models (Gemma, Mistral) are
+        /// capped at their window; multi-head latent attention (`DeepSeek`) is
+        /// skipped with a note. The KV element size tracks the model's
+        /// activation dtype (`bf16` / `fp16`), independent of weight quant.
+        #[arg(long, value_name = "N", requires = "check_gpu")]
+        context: Option<u32>,
     },
     /// List files in a remote `HuggingFace` repository (no download).
     ListFiles {
@@ -872,6 +883,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             limit,
             tree,
             check_gpu,
+            context,
         }) => run_inspect(
             repo_id.as_str(),
             filename.as_deref(),
@@ -886,6 +898,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             limit,
             tree,
             check_gpu,
+            context,
         ),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::ListFiles {
@@ -4382,6 +4395,7 @@ fn run_inspect(
     limit: Option<usize>,
     tree: bool,
     check_gpu: Option<u32>,
+    context: Option<u32>,
 ) -> Result<(), FetchError> {
     if list {
         return run_inspect_list(repo_id, revision, token, cached);
@@ -4403,10 +4417,11 @@ fn run_inspect(
                 limit,
                 tree,
                 check_gpu,
+                context,
             )
         }
         None => run_inspect_repo(
-            repo_id, revision, token, cached, json, filter, dtypes, limit, tree, check_gpu,
+            repo_id, revision, token, cached, json, filter, dtypes, limit, tree, check_gpu, context,
         ),
     }
 }
@@ -5201,6 +5216,7 @@ fn run_inspect_single(
     limit: Option<usize>,
     tree: bool,
     check_gpu: Option<u32>,
+    context: Option<u32>,
 ) -> Result<(), FetchError> {
     // Classify extension once; v0.10.3 dispatches across .safetensors (remote
     // or cached) and .gguf / .npz / .pth (cached only — remote inspect for
@@ -5279,6 +5295,7 @@ fn run_inspect_single(
         weight_bytes: gpu_check::sum_tensor_bytes(&info.tensors),
         dtype_label: gpu_check::dominant_dtype_label(&info.tensors),
         total_params: info.total_params(),
+        kv: compute_kv_inputs(repo_id, revision, token, cached, context),
     });
 
     // Apply tensor name filter.
@@ -5305,7 +5322,13 @@ fn run_inspect_single(
         .as_ref()
         .map(|i| gpu_check::query_gpu(i.device_index));
     let gpu_check_value = gpu_inputs.as_ref().zip(gpu_result.as_ref()).map(|(i, r)| {
-        gpu_check::gpu_check_json(r, i.weight_bytes, i.dtype_label.as_str(), i.total_params)
+        gpu_check::gpu_check_json(
+            r,
+            i.weight_bytes,
+            i.dtype_label.as_str(),
+            i.total_params,
+            i.kv.as_ref(),
+        )
     });
 
     // `--tree --json`: hierarchical tree as JSON (distinct schema from plain --json).
@@ -5495,6 +5518,8 @@ struct GpuCheckInputs {
     dtype_label: String,
     /// Total parameter count across every tensor in the model (unfiltered).
     total_params: u64,
+    /// KV-cache budget from `--context N`, or `None` when not requested.
+    kv: Option<gpu_check::KvComputed>,
 }
 
 /// Renders the `--check-gpu` verdict block when both inputs are present.
@@ -5513,8 +5538,88 @@ fn maybe_print_gpu_check(
             i.weight_bytes,
             i.dtype_label.as_str(),
             i.total_params,
+            i.kv.as_ref(),
         );
     }
+}
+
+/// Display label for the KV-cache element dtype shown on the `KV cache` line.
+///
+/// Derived from the model's `config.json` `torch_dtype`; defaults to `"BF16"`
+/// for unknown / absent dtypes, matching [`inspect::torch_dtype_bytes`]'s
+/// 2-byte default.
+fn torch_dtype_label(torch_dtype: Option<&str>) -> &'static str {
+    match torch_dtype {
+        Some("float16") => "FP16",
+        Some("float32" | "float") => "FP32",
+        Some("float8_e4m3fn" | "float8_e5m2") => "FP8",
+        // bfloat16 and any unknown or absent dtype.
+        _ => "BF16",
+    }
+}
+
+/// Fetches a model's `config.json` for KV budgeting — cache-only under
+/// `--cached`, else cache-first with an HTTP fallback.
+///
+/// Best-effort: returns `None` on any miss or error (the caller renders an
+/// "unavailable" KV line). KV budgeting never fails the inspect command.
+fn fetch_model_config_for_inspect(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+) -> Option<inspect::ModelConfig> {
+    if cached {
+        return inspect::fetch_model_config_cached(repo_id, revision)
+            .ok()
+            .flatten();
+    }
+    let rt = tokio::runtime::Runtime::new().ok()?;
+    rt.block_on(inspect::fetch_model_config(repo_id, token, revision))
+        .ok()
+        .flatten()
+}
+
+/// Builds the KV-cache verdict bundle for `--check-gpu --context N`.
+///
+/// Returns `None` when `--context` was not requested. When it was, always
+/// returns `Some`: an unreadable or dimension-less `config.json` yields an
+/// [`gpu_check::KvCachePath::Unavailable`] bundle so the verdict can say so
+/// without gating the command.
+fn compute_kv_inputs(
+    repo_id: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+    context: Option<u32>,
+) -> Option<gpu_check::KvComputed> {
+    let ctx = context?;
+
+    let Some(cfg) = fetch_model_config_for_inspect(repo_id, revision, token, cached) else {
+        return Some(gpu_check::KvComputed {
+            context: ctx,
+            elem_bytes: 0,
+            dtype_label: String::new(),
+            bytes: None,
+            path: gpu_check::KvCachePath::Unavailable {
+                reason: "no config.json in repo",
+            },
+        });
+    };
+
+    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+    let elem_bytes = inspect::torch_dtype_bytes(cfg.torch_dtype.as_deref());
+    // BORROW: explicit .as_deref()/.to_owned() for the dtype display label
+    let dtype_label = torch_dtype_label(cfg.torch_dtype.as_deref()).to_owned();
+    let (bytes, path) = gpu_check::kv_cache_bytes(&cfg, u64::from(ctx), elem_bytes);
+
+    Some(gpu_check::KvComputed {
+        context: ctx,
+        elem_bytes,
+        dtype_label,
+        bytes,
+        path,
+    })
 }
 
 /// Inspects all `.safetensors` files in a repository (summary or per-file).
@@ -5539,12 +5644,18 @@ fn run_inspect_repo(
     limit: Option<usize>,
     tree: bool,
     check_gpu: Option<u32>,
+    context: Option<u32>,
 ) -> Result<(), FetchError> {
     // When the user asked for tensor-level aggregation, every shard's header
     // must be read; the shard-index file alone has no dtype or shape data.
     // `--check-gpu` also needs per-tensor data to sum weight bytes precisely
     // across shards, so it forces the aggregation path too.
     let needs_aggregation = dtypes || tree || limit.is_some() || check_gpu.is_some();
+
+    // KV bundle for `--context` (None when not requested, so no I/O on the
+    // non-aggregation fast paths). Computed once and shared by both the cached
+    // and network aggregation paths below.
+    let kv = compute_kv_inputs(repo_id, revision, token, cached, context);
 
     if cached {
         // Cache-only: try shard index first, then walk snapshot.
@@ -5565,7 +5676,15 @@ fn run_inspect_repo(
 
         if needs_aggregation {
             run_inspect_repo_aggregated(
-                repo_id, &results, json, filter, dtypes, limit, tree, check_gpu,
+                repo_id,
+                &results,
+                json,
+                filter,
+                dtypes,
+                limit,
+                tree,
+                check_gpu,
+                kv.as_ref(),
             )?;
             print_adapter_config_if_present(repo_id, revision, None, true, json);
             return Ok(());
@@ -5634,7 +5753,15 @@ fn run_inspect_repo(
 
     if needs_aggregation {
         run_inspect_repo_aggregated(
-            repo_id, &mapped, json, filter, dtypes, limit, tree, check_gpu,
+            repo_id,
+            &mapped,
+            json,
+            filter,
+            dtypes,
+            limit,
+            tree,
+            check_gpu,
+            kv.as_ref(),
         )?;
         print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, json);
         return Ok(());
@@ -5677,6 +5804,7 @@ fn run_inspect_repo_aggregated(
     limit: Option<usize>,
     tree: bool,
     check_gpu: Option<u32>,
+    kv: Option<&gpu_check::KvComputed>,
 ) -> Result<(), FetchError> {
     // Flatten tensors across all shards. `(filename, &TensorInfo)` lets the
     // table renderer attribute each tensor to its source shard.
@@ -5709,6 +5837,7 @@ fn run_inspect_repo_aggregated(
             weight_bytes: gpu_check::sum_tensor_bytes(&owned_unfiltered),
             dtype_label: gpu_check::dominant_dtype_label(&owned_unfiltered),
             total_params,
+            kv: kv.cloned(),
         }
     });
 
@@ -5736,7 +5865,13 @@ fn run_inspect_repo_aggregated(
         .as_ref()
         .map(|i| gpu_check::query_gpu(i.device_index));
     let gpu_check_value = gpu_inputs.as_ref().zip(gpu_result.as_ref()).map(|(i, r)| {
-        gpu_check::gpu_check_json(r, i.weight_bytes, i.dtype_label.as_str(), i.total_params)
+        gpu_check::gpu_check_json(
+            r,
+            i.weight_bytes,
+            i.dtype_label.as_str(),
+            i.total_params,
+            i.kv.as_ref(),
+        )
     });
 
     // `--tree --json`: tagged-enum tree schema (matches run_inspect_single).

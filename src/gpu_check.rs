@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use hf_fetch_model::inspect::TensorInfo;
+use hf_fetch_model::inspect::{ModelConfig, TensorInfo};
 use hypomnesis::GpuDeviceInfo;
 
 use crate::format::format_size;
@@ -153,6 +153,247 @@ pub fn dominant_dtype_label(tensors: &[TensorInfo]) -> String {
     }
 }
 
+/// How a KV-cache estimate was derived — drives the rendered caveat and the
+/// `--json` `kv_cache.path` tag.
+///
+/// `#[non_exhaustive]` because the hybrid-Mamba budgeting follow-up adds a
+/// variant; all current match sites live in this module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KvCachePath {
+    /// Standard full-attention `MHA` / `GQA` estimate.
+    Exact,
+    /// Uniform sliding window: every layer's effective length is capped at
+    /// `window` (only used when the requested context exceeds it).
+    SlidingWindowCapped {
+        /// Sliding-window span in tokens.
+        window: u32,
+    },
+    /// Mixed local/global layers (Gemma-2 1:1, Gemma-3 5:1): a blended
+    /// estimate counting `local_layers` at the capped length and
+    /// `global_layers` at the full context. Approximate — the exact global
+    /// layer positions are not modelled, only their count.
+    SlidingWindowPartial {
+        /// Number of windowed (local-attention) layers.
+        local_layers: u32,
+        /// Number of full-attention (global) layers.
+        global_layers: u32,
+        /// Sliding-window span in tokens.
+        window: u32,
+    },
+    /// Multi-head latent attention (`DeepSeek`): the naive formula overestimates
+    /// by roughly 10×, so the estimate is skipped. The latent-KV size is
+    /// approximately `num_layers × (kv_lora_rank + qk_rope_head_dim) ×
+    /// seq_len × elem_bytes` (no head multiply, no K/V doubling) — recorded
+    /// here for a future `--mla-estimate`.
+    MlaSkipped,
+    /// The estimate could not be computed; `reason` is the user-facing wording.
+    Unavailable {
+        /// Short human-readable explanation (no config, missing dims, …).
+        reason: &'static str,
+    },
+}
+
+impl KvCachePath {
+    /// Stable `snake_case` tag for the `--json` `kv_cache.path` field.
+    #[must_use]
+    pub fn json_tag(&self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::SlidingWindowCapped { .. } => "sliding_window_capped",
+            Self::SlidingWindowPartial { .. } => "sliding_window_partial",
+            Self::MlaSkipped => "mla_skipped",
+            Self::Unavailable { .. } => "unavailable",
+        }
+    }
+}
+
+/// Global-attention period for a mixed local/global sliding-window layout, or
+/// `None` for a uniform sliding window.
+///
+/// Gemma-3 states the period directly via `sliding_window_pattern` (6 ⇒ every
+/// 6th layer is global). Gemma-2 alternates 1:1 with no explicit key, so it is
+/// recognized by `model_type` and treated as period 2.
+fn sliding_window_period(cfg: &ModelConfig) -> Option<u32> {
+    if let Some(p) = cfg.sliding_window_pattern {
+        if p >= 2 {
+            return Some(p);
+        }
+    }
+    // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+    if cfg.model_type.as_deref() == Some("gemma2") {
+        return Some(2);
+    }
+    None
+}
+
+/// Estimates KV-cache bytes for a transformer at context length `seq_len`.
+///
+/// Pure — no I/O. Returns `(Some(bytes), path)` for a computable estimate and
+/// `(None, path)` when it is skipped ([`KvCachePath::MlaSkipped`]) or
+/// unavailable ([`KvCachePath::Unavailable`]); failure is encoded in the path
+/// rather than an error so `--check-gpu` never gates.
+///
+/// The standard estimate is the well-established
+/// `2 × num_hidden_layers × num_key_value_heads × head_dim × seq_len ×
+/// kv_elem_bytes` (the `2` covers K and V, batch size 1). `kv_elem_bytes` is
+/// the KV element size — the model's activation dtype, **independent of weight
+/// quantization** (the caller derives it from the config's `torch_dtype`).
+///
+/// Limitations: multi-head latent attention (`DeepSeek` `MLA`) is skipped, and
+/// mixed local/global sliding-window layouts are approximated by layer count
+/// (within a few percent). Both are reported via the returned [`KvCachePath`].
+#[must_use]
+pub fn kv_cache_bytes(
+    cfg: &ModelConfig,
+    seq_len: u64,
+    kv_elem_bytes: u8,
+) -> (Option<u64>, KvCachePath) {
+    // MLA: latent attention compresses K/V; the naive formula does not apply.
+    if cfg.kv_lora_rank.is_some() {
+        return (None, KvCachePath::MlaSkipped);
+    }
+
+    let unavailable = KvCachePath::Unavailable {
+        reason: "config.json missing attention dims",
+    };
+
+    // The standard formula needs the layer count and the query-head count
+    // (the latter both for the GQA fallback and the head_dim derivation).
+    let (Some(layers), Some(attn_heads)) = (cfg.num_hidden_layers, cfg.num_attention_heads) else {
+        return (None, unavailable);
+    };
+
+    let kv_heads = cfg.num_key_value_heads.unwrap_or(attn_heads);
+
+    let head_dim = match cfg.head_dim {
+        Some(h) => h,
+        // Derive from hidden size when not stated explicitly.
+        None => match cfg.hidden_size {
+            Some(hidden) if attn_heads > 0 => hidden / attn_heads,
+            _ => return (None, unavailable),
+        },
+    };
+
+    if layers == 0 || kv_heads == 0 || head_dim == 0 {
+        return (None, unavailable);
+    }
+
+    // Per-layer, per-token bytes for K and V together. `u64::from` is lossless,
+    // so no `as` casts are needed.
+    let per_layer_per_token = 2u64
+        .saturating_mul(u64::from(kv_heads))
+        .saturating_mul(u64::from(head_dim))
+        .saturating_mul(u64::from(kv_elem_bytes));
+
+    // Sliding window binds only when present, enabled, and shorter than N.
+    let window_binds = cfg.use_sliding_window != Some(false)
+        && cfg
+            .sliding_window
+            .is_some_and(|w| w > 0 && seq_len > u64::from(w));
+
+    if window_binds {
+        // `is_some_and` above guarantees `Some(w)`; recover it.
+        let window = cfg.sliding_window.unwrap_or(0);
+        let capped = u64::from(window);
+
+        if let Some(period) = sliding_window_period(cfg) {
+            // Mixed local/global: a full-attention layer every `period`-th.
+            let global_layers = layers / period;
+            let local_layers = layers.saturating_sub(global_layers);
+            let local_bytes = u64::from(local_layers).saturating_mul(capped);
+            let global_bytes = u64::from(global_layers).saturating_mul(seq_len);
+            let bytes =
+                per_layer_per_token.saturating_mul(local_bytes.saturating_add(global_bytes));
+            return (
+                Some(bytes),
+                KvCachePath::SlidingWindowPartial {
+                    local_layers,
+                    global_layers,
+                    window,
+                },
+            );
+        }
+
+        // Uniform sliding window: every layer capped at the window.
+        let bytes = per_layer_per_token
+            .saturating_mul(u64::from(layers))
+            .saturating_mul(capped);
+        return (Some(bytes), KvCachePath::SlidingWindowCapped { window });
+    }
+
+    // Standard full attention (MHA / GQA).
+    let bytes = per_layer_per_token
+        .saturating_mul(u64::from(layers))
+        .saturating_mul(seq_len);
+    (Some(bytes), KvCachePath::Exact)
+}
+
+/// KV-cache figures for the `--check-gpu --context` verdict, computed by the
+/// caller from the model's `config.json` and folded into both the text and
+/// `--json` renderers.
+#[derive(Debug, Clone)]
+#[allow(clippy::exhaustive_structs)] // EXHAUSTIVE: crate-private; binary owns all construction sites
+pub struct KvComputed {
+    /// Requested context length (`--context N`).
+    pub context: u32,
+    /// KV element size in bytes (the activation dtype). `0` when unavailable.
+    pub elem_bytes: u8,
+    /// Display label for the KV element dtype (e.g. `"BF16"`).
+    pub dtype_label: String,
+    /// Estimated KV-cache bytes, or `None` when skipped / unavailable.
+    pub bytes: Option<u64>,
+    /// How the estimate was derived; drives the caveat and the `--json` tag.
+    pub path: KvCachePath,
+}
+
+/// Prints the `KV cache …` line for the verdict block.
+///
+/// A computable estimate prints `KV cache @ ctx=N: X (DTYPE)` plus a
+/// path-specific caveat; a skipped / unavailable estimate prints a one-line
+/// reason.
+fn print_kv_line(kv: &KvComputed) {
+    let Some(bytes) = kv.bytes else {
+        match &kv.path {
+            KvCachePath::MlaSkipped => println!(
+                "  KV cache:       skipped (MLA / latent attention \u{2014} naive estimate unreliable)"
+            ),
+            KvCachePath::Unavailable { reason } => {
+                println!("  KV cache:       unavailable ({reason})");
+            }
+            // EXPLICIT: these paths always carry Some(bytes); defensive fallback.
+            KvCachePath::Exact
+            | KvCachePath::SlidingWindowCapped { .. }
+            | KvCachePath::SlidingWindowPartial { .. } => {
+                println!("  KV cache:       unavailable");
+            }
+        }
+        return;
+    };
+
+    let caveat = match &kv.path {
+        KvCachePath::SlidingWindowCapped { window } => {
+            format!("  (capped at sliding_window={window})")
+        }
+        KvCachePath::SlidingWindowPartial {
+            local_layers,
+            global_layers,
+            ..
+        } => format!("  (approx; {local_layers} local + {global_layers} global layers)"),
+        // Exact needs no caveat; the None-bytes variants never reach here.
+        KvCachePath::Exact | KvCachePath::MlaSkipped | KvCachePath::Unavailable { .. } => {
+            String::new()
+        }
+    };
+
+    println!(
+        "  KV cache @ ctx={}:  {}  ({}){caveat}",
+        kv.context,
+        format_size(bytes),
+        kv.dtype_label,
+    );
+}
+
 /// Renders the verdict block to stdout — four to seven lines depending on
 /// whether the GPU probe succeeded.
 ///
@@ -170,11 +411,18 @@ pub fn dominant_dtype_label(tensors: &[TensorInfo]) -> String {
 ///
 /// On failure the `GPU N:` line carries the friendly error from [`query_gpu`]
 /// and the `Fit:` / note lines are omitted.
+///
+/// With `kv` set (`--check-gpu --context N`), a `KV cache @ ctx=N` line and a
+/// `Total: weights + KV` line are added, and the `Fit:` verdict is measured
+/// against the total rather than the weights alone; the weights-only note is
+/// dropped. When the KV estimate is skipped or unavailable, the caveat line is
+/// printed but the verdict falls back to weights-only.
 pub fn print_gpu_check(
     result: &GpuCheckResult,
     weight_bytes: u64,
     dtype_label: &str,
     total_params: u64,
+    kv: Option<&KvComputed>,
 ) {
     println!();
     println!(
@@ -182,6 +430,23 @@ pub fn print_gpu_check(
         format_size(weight_bytes),
         format_params(total_params),
     );
+
+    // KV-cache + Total lines (only with `--context`). `total_bytes` is what the
+    // Fit verdict is measured against — weights alone when KV is absent or
+    // could not be computed.
+    let mut total_bytes = weight_bytes;
+    let mut kv_counted = false;
+    if let Some(kv) = kv {
+        print_kv_line(kv);
+        if let Some(kv_bytes) = kv.bytes {
+            total_bytes = weight_bytes.saturating_add(kv_bytes);
+            kv_counted = true;
+            println!(
+                "  Total:          {}  (weights + KV)",
+                format_size(total_bytes),
+            );
+        }
+    }
 
     let Some(ref dev) = result.device else {
         // BORROW: explicit .as_deref() for Option<String> → Option<&str>
@@ -208,25 +473,104 @@ pub fn print_gpu_check(
         format_size(dev.used_bytes),
     );
 
-    if dev.free_bytes >= weight_bytes {
-        let headroom = dev.free_bytes - weight_bytes;
-        println!(
-            "  Fit:            \u{2713} {} headroom for weights + KV cache + runtime",
-            format_size(headroom),
-        );
+    if dev.free_bytes >= total_bytes {
+        let headroom = dev.free_bytes - total_bytes;
+        if kv_counted {
+            println!(
+                "  Fit:            \u{2713} {} headroom (weights + KV; runtime extra)",
+                format_size(headroom),
+            );
+        } else {
+            println!(
+                "  Fit:            \u{2713} {} headroom for weights + KV cache + runtime",
+                format_size(headroom),
+            );
+        }
     } else {
-        let short = weight_bytes - dev.free_bytes;
-        println!(
-            "  Fit:            \u{2717} short by {} for the weights alone",
-            format_size(short),
-        );
+        let short = total_bytes - dev.free_bytes;
+        if kv_counted {
+            println!(
+                "  Fit:            \u{2717} short by {} for weights + KV",
+                format_size(short),
+            );
+        } else {
+            println!(
+                "  Fit:            \u{2717} short by {} for the weights alone",
+                format_size(short),
+            );
+        }
     }
 
     println!();
-    println!(
-        "  Note: reports weights only. Large-context inference typically needs ~1.3\u{2013}1.5\u{00d7}"
+    if kv_counted {
+        println!(
+            "  Note: excludes activations and framework overhead (typically a few hundred MiB)."
+        );
+    } else {
+        println!(
+            "  Note: reports weights only. Large-context inference typically needs ~1.3\u{2013}1.5\u{00d7}"
+        );
+        println!("  weight size for KV cache and activations.");
+    }
+}
+
+/// Builds the `kv_cache` JSON object for the `--check-gpu --context` verdict.
+///
+/// `bytes` / `elem_bytes` are present only for a computable estimate; `window`
+/// (+ `local_layers` / `global_layers`) accompany the sliding-window paths;
+/// `reason` accompanies the unavailable path. `path` is always present.
+fn kv_cache_json(kv: &KvComputed) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "context".to_owned(),
+        serde_json::Value::Number(kv.context.into()),
     );
-    println!("  weight size for KV cache and activations.");
+    obj.insert(
+        "path".to_owned(),
+        serde_json::Value::String(kv.path.json_tag().to_owned()),
+    );
+    if let Some(bytes) = kv.bytes {
+        obj.insert(
+            "elem_bytes".to_owned(),
+            serde_json::Value::Number(kv.elem_bytes.into()),
+        );
+        obj.insert("bytes".to_owned(), serde_json::Value::Number(bytes.into()));
+    }
+    match &kv.path {
+        KvCachePath::SlidingWindowCapped { window } => {
+            obj.insert(
+                "window".to_owned(),
+                serde_json::Value::Number((*window).into()),
+            );
+        }
+        KvCachePath::SlidingWindowPartial {
+            window,
+            local_layers,
+            global_layers,
+        } => {
+            obj.insert(
+                "window".to_owned(),
+                serde_json::Value::Number((*window).into()),
+            );
+            obj.insert(
+                "local_layers".to_owned(),
+                serde_json::Value::Number((*local_layers).into()),
+            );
+            obj.insert(
+                "global_layers".to_owned(),
+                serde_json::Value::Number((*global_layers).into()),
+            );
+        }
+        KvCachePath::Unavailable { reason } => {
+            obj.insert(
+                "reason".to_owned(),
+                serde_json::Value::String((*reason).to_owned()),
+            );
+        }
+        // EXPLICIT: Exact / MlaSkipped carry no extra JSON fields.
+        KvCachePath::Exact | KvCachePath::MlaSkipped => {}
+    }
+    serde_json::Value::Object(obj)
 }
 
 /// Same verdict, expressed as a [`serde_json::Value`] for the `--json` path.
@@ -247,7 +591,16 @@ pub fn print_gpu_check(
 ///   "model": {                                                          // always present
 ///     "weight_bytes": 10240671744,
 ///     "dtype_label": "BF16",
-///     "total_params": 5120000000
+///     "total_params": 5120000000,
+///     "total_bytes": 11314153472                                        // with `--context`, computable: weights + KV
+///   },
+///   "kv_cache": {                                                       // with `--context` only
+///     "context": 8192,
+///     "path": "exact",                                                  // exact | sliding_window_capped | sliding_window_partial | mla_skipped | unavailable
+///     "elem_bytes": 2,                                                  // computable only
+///     "bytes": 1073741824,                                              // computable only
+///     "window": 4096,                                                   // sliding_window_* only
+///     "reason": "no config.json in repo"                                // unavailable only
 ///   },
 ///   "fits": true,                                                       // success only
 ///   "headroom_bytes": 4500000000,                                       // success + `fits == true`
@@ -258,19 +611,28 @@ pub fn print_gpu_check(
 /// `device` / `fits` / `headroom_bytes` / `short_bytes` are present only when
 /// the probe succeeded ([`GpuCheckResult::device`] is `Some`); `error` is
 /// present only when the probe failed. `headroom_bytes` and `short_bytes`
-/// are mutually exclusive — exactly one of them appears alongside `fits`.
+/// are mutually exclusive. With a computable KV estimate, `fits` / headroom /
+/// short are measured against `model.total_bytes` (weights + KV); otherwise
+/// against `weight_bytes` alone. Without `--context`, `kv_cache` and
+/// `total_bytes` are absent and the schema is identical to prior releases.
 #[must_use]
 pub fn gpu_check_json(
     result: &GpuCheckResult,
     weight_bytes: u64,
     dtype_label: &str,
     total_params: u64,
+    kv: Option<&KvComputed>,
 ) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert(
         "device_index".to_owned(),
         serde_json::Value::Number(result.device_index.into()),
     );
+
+    // The footprint the fit verdict is measured against: weights + KV when a
+    // computable estimate is present, weights alone otherwise.
+    let kv_bytes = kv.and_then(|k| k.bytes);
+    let total_bytes = kv_bytes.map_or(weight_bytes, |b| weight_bytes.saturating_add(b));
 
     if let Some(ref dev) = result.device {
         let mut dev_obj = serde_json::Map::new();
@@ -291,17 +653,17 @@ pub fn gpu_check_json(
         );
         out.insert("device".to_owned(), serde_json::Value::Object(dev_obj));
 
-        let fits = dev.free_bytes >= weight_bytes;
+        let fits = dev.free_bytes >= total_bytes;
         out.insert("fits".to_owned(), serde_json::Value::Bool(fits));
         if fits {
             out.insert(
                 "headroom_bytes".to_owned(),
-                serde_json::Value::Number((dev.free_bytes - weight_bytes).into()),
+                serde_json::Value::Number((dev.free_bytes - total_bytes).into()),
             );
         } else {
             out.insert(
                 "short_bytes".to_owned(),
-                serde_json::Value::Number((weight_bytes - dev.free_bytes).into()),
+                serde_json::Value::Number((total_bytes - dev.free_bytes).into()),
             );
         }
     }
@@ -323,7 +685,17 @@ pub fn gpu_check_json(
         "total_params".to_owned(),
         serde_json::Value::Number(total_params.into()),
     );
+    if kv_bytes.is_some() {
+        model.insert(
+            "total_bytes".to_owned(),
+            serde_json::Value::Number(total_bytes.into()),
+        );
+    }
     out.insert("model".to_owned(), serde_json::Value::Object(model));
+
+    if let Some(kv) = kv {
+        out.insert("kv_cache".to_owned(), kv_cache_json(kv));
+    }
 
     serde_json::Value::Object(out)
 }
@@ -374,9 +746,10 @@ mod tests {
     )]
 
     use super::{
-        dominant_dtype_label, format_params, gpu_check_json, sum_tensor_bytes, GpuCheckResult,
+        dominant_dtype_label, format_params, gpu_check_json, kv_cache_bytes, sum_tensor_bytes,
+        GpuCheckResult, KvCachePath, KvComputed,
     };
-    use hf_fetch_model::inspect::TensorInfo;
+    use hf_fetch_model::inspect::{torch_dtype_bytes, ModelConfig, TensorInfo};
     use hypomnesis::GpuDeviceInfo;
 
     fn make_tensor(name: &str, dtype: &str, shape: Vec<usize>, byte_len: u64) -> TensorInfo {
@@ -386,6 +759,192 @@ mod tests {
             shape,
             data_offsets: (0, byte_len),
         }
+    }
+
+    /// Builds a `ModelConfig` for the KV tests. `ModelConfig` is
+    /// `#[non_exhaustive]` (it lives in the library crate), so struct-literal
+    /// construction is unavailable here — fields are set on a `default()`
+    /// instance instead.
+    #[allow(clippy::field_reassign_with_default)] // EXPLICIT: non_exhaustive struct, literal unavailable
+    fn model(layers: u32, attn: u32, kv: Option<u32>, head_dim: Option<u32>) -> ModelConfig {
+        let mut c = ModelConfig::default();
+        c.num_hidden_layers = Some(layers);
+        c.num_attention_heads = Some(attn);
+        c.num_key_value_heads = kv;
+        c.head_dim = head_dim;
+        c
+    }
+
+    // ---------- kv_cache_bytes ----------
+
+    #[test]
+    fn kv_exact_gqa_llama3_8b() {
+        // Llama-3-8B: 32 layers, 32 attn heads, 8 KV heads, head_dim 128.
+        // @ ctx 8192, bf16 (2 B): 2*32*8*128*8192*2 = 1 GiB exactly.
+        let c = model(32, 32, Some(8), Some(128));
+        let (bytes, path) = kv_cache_bytes(&c, 8192, 2);
+        assert_eq!(bytes, Some(1024 * 1024 * 1024));
+        assert_eq!(path, KvCachePath::Exact);
+    }
+
+    #[test]
+    fn kv_mha_falls_back_to_attn_heads() {
+        // No num_key_value_heads ⇒ MHA: kv_heads == attn_heads.
+        // ppt = 2*4*64*2 = 1024; * 2 layers * 16 ctx = 32768.
+        let c = model(2, 4, None, Some(64));
+        let (bytes, path) = kv_cache_bytes(&c, 16, 2);
+        assert_eq!(bytes, Some(32_768));
+        assert_eq!(path, KvCachePath::Exact);
+    }
+
+    #[test]
+    fn kv_derives_head_dim_from_hidden() {
+        // head_dim absent ⇒ hidden_size / attn_heads = 256/8 = 32.
+        // ppt = 2*8*32*2 = 1024; * 1 layer * 10 ctx = 10240.
+        let mut c = model(1, 8, Some(8), None);
+        c.hidden_size = Some(256);
+        let (bytes, path) = kv_cache_bytes(&c, 10, 2);
+        assert_eq!(bytes, Some(10_240));
+        assert_eq!(path, KvCachePath::Exact);
+    }
+
+    #[test]
+    fn kv_explicit_head_dim_preferred_over_derived() {
+        // Gemma-2-style: explicit head_dim 256 ≠ hidden/heads (3584/16 = 224).
+        // ppt = 2*8*256*2 = 8192; * 1 layer * 4 ctx = 32768 (uses 256, not 224).
+        let mut c = model(1, 16, Some(8), Some(256));
+        c.hidden_size = Some(3584);
+        let (bytes, _) = kv_cache_bytes(&c, 4, 2);
+        assert_eq!(bytes, Some(32_768));
+    }
+
+    #[test]
+    fn kv_sliding_window_capped_when_context_exceeds() {
+        // Uniform window 100; ctx 1000 > 100 ⇒ capped at 100.
+        // ppt = 2*4*64*2 = 1024; * 2 layers * 100 = 204800.
+        let mut c = model(2, 4, Some(4), Some(64));
+        c.model_type = Some("mistral".to_owned());
+        c.sliding_window = Some(100);
+        let (bytes, path) = kv_cache_bytes(&c, 1000, 2);
+        assert_eq!(bytes, Some(204_800));
+        assert_eq!(path, KvCachePath::SlidingWindowCapped { window: 100 });
+    }
+
+    #[test]
+    fn kv_sliding_window_below_does_not_cap() {
+        // ctx 50 < window 100 ⇒ window doesn't bind ⇒ Exact.
+        // ppt = 1024; * 2 layers * 50 = 102400.
+        let mut c = model(2, 4, Some(4), Some(64));
+        c.model_type = Some("mistral".to_owned());
+        c.sliding_window = Some(100);
+        let (bytes, path) = kv_cache_bytes(&c, 50, 2);
+        assert_eq!(bytes, Some(102_400));
+        assert_eq!(path, KvCachePath::Exact);
+    }
+
+    #[test]
+    fn kv_sliding_window_partial_blend_gemma3() {
+        // 12 layers, pattern 6 ⇒ global every 6th: 2 global, 10 local.
+        // ppt = 1024; 1024 * (10*100 + 2*1000) = 1024 * 3000 = 3_072_000.
+        let mut c = model(12, 4, Some(4), Some(64));
+        c.model_type = Some("gemma3".to_owned());
+        c.sliding_window = Some(100);
+        c.sliding_window_pattern = Some(6);
+        let (bytes, path) = kv_cache_bytes(&c, 1000, 2);
+        assert_eq!(bytes, Some(3_072_000));
+        assert_eq!(
+            path,
+            KvCachePath::SlidingWindowPartial {
+                local_layers: 10,
+                global_layers: 2,
+                window: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn kv_gemma2_alternating_is_partial() {
+        // Gemma-2: no sliding_window_pattern, detected by model_type ⇒ period 2.
+        // 4 layers ⇒ global 2, local 2. ppt = 2*2*32*2 = 256.
+        // 256 * (2*50 + 2*500) = 256 * 1100 = 281_600.
+        let mut c = model(4, 2, Some(2), Some(32));
+        c.model_type = Some("gemma2".to_owned());
+        c.sliding_window = Some(50);
+        let (bytes, path) = kv_cache_bytes(&c, 500, 2);
+        assert_eq!(bytes, Some(281_600));
+        assert_eq!(
+            path,
+            KvCachePath::SlidingWindowPartial {
+                local_layers: 2,
+                global_layers: 2,
+                window: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn kv_use_sliding_window_false_is_full_attention() {
+        // Qwen2/3 ship a window but disable it ⇒ full attention.
+        // ppt = 1024; * 2 layers * 1000 = 2_048_000.
+        let mut c = model(2, 4, Some(4), Some(64));
+        c.sliding_window = Some(100);
+        c.use_sliding_window = Some(false);
+        let (bytes, path) = kv_cache_bytes(&c, 1000, 2);
+        assert_eq!(bytes, Some(2_048_000));
+        assert_eq!(path, KvCachePath::Exact);
+    }
+
+    #[test]
+    fn kv_mla_skipped() {
+        let mut c = model(27, 16, Some(16), None);
+        c.model_type = Some("deepseek_v2".to_owned());
+        c.kv_lora_rank = Some(512);
+        c.qk_rope_head_dim = Some(64);
+        let (bytes, path) = kv_cache_bytes(&c, 4096, 2);
+        assert_eq!(bytes, None);
+        assert_eq!(path, KvCachePath::MlaSkipped);
+    }
+
+    #[test]
+    fn kv_unavailable_missing_dims() {
+        let c = ModelConfig::default();
+        let (bytes, path) = kv_cache_bytes(&c, 4096, 2);
+        assert_eq!(bytes, None);
+        assert!(matches!(path, KvCachePath::Unavailable { .. }));
+    }
+
+    #[test]
+    fn kv_elem_bytes_scales_linearly() {
+        // fp8 KV halves the figure vs bf16.
+        let c = model(1, 1, Some(1), Some(1));
+        let (bf16, _) = kv_cache_bytes(&c, 100, 2);
+        let (fp8, _) = kv_cache_bytes(&c, 100, 1);
+        assert_eq!(bf16, Some(400)); // 2*1*1*2*1*100
+        assert_eq!(fp8, Some(200)); // half
+    }
+
+    #[test]
+    fn torch_dtype_bytes_mapping() {
+        assert_eq!(torch_dtype_bytes(Some("bfloat16")), 2);
+        assert_eq!(torch_dtype_bytes(Some("float16")), 2);
+        assert_eq!(torch_dtype_bytes(Some("float32")), 4);
+        assert_eq!(torch_dtype_bytes(Some("float8_e4m3fn")), 1);
+        assert_eq!(torch_dtype_bytes(Some("mystery")), 2);
+        assert_eq!(torch_dtype_bytes(None), 2);
+    }
+
+    #[test]
+    fn kv_cache_path_json_tags() {
+        assert_eq!(KvCachePath::Exact.json_tag(), "exact");
+        assert_eq!(KvCachePath::MlaSkipped.json_tag(), "mla_skipped");
+        assert_eq!(
+            KvCachePath::SlidingWindowCapped { window: 1 }.json_tag(),
+            "sliding_window_capped"
+        );
+        assert_eq!(
+            KvCachePath::Unavailable { reason: "x" }.json_tag(),
+            "unavailable"
+        );
     }
 
     #[test]
@@ -458,7 +1017,7 @@ mod tests {
             device: None,
             error: Some("index 3 out of range (have 1 device)".to_owned()),
         };
-        let v = gpu_check_json(&result, 1024, "BF16", 100);
+        let v = gpu_check_json(&result, 1024, "BF16", 100, None);
         assert_eq!(v.get("device_index"), Some(&serde_json::json!(3)));
         assert_eq!(
             v.get("error"),
@@ -488,7 +1047,7 @@ mod tests {
             error: None,
         };
         let weight_bytes: u64 = 10 * 1024 * 1024 * 1024;
-        let v = gpu_check_json(&result, weight_bytes, "BF16", 5_120_000_000);
+        let v = gpu_check_json(&result, weight_bytes, "BF16", 5_120_000_000, None);
 
         assert_eq!(v.get("device_index"), Some(&serde_json::json!(0)));
         assert!(v.get("error").is_none());
@@ -536,7 +1095,7 @@ mod tests {
             error: None,
         };
         let weight_bytes: u64 = 25 * 1024 * 1024 * 1024;
-        let v = gpu_check_json(&result, weight_bytes, "U8 + others", 23_910_000_000);
+        let v = gpu_check_json(&result, weight_bytes, "U8 + others", 23_910_000_000, None);
 
         assert_eq!(v.get("fits"), Some(&serde_json::json!(false)));
         assert!(v.get("headroom_bytes").is_none());
@@ -555,5 +1114,77 @@ mod tests {
             device_obj.get("total_bytes"),
             Some(&serde_json::json!(16u64 * 1024 * 1024 * 1024))
         );
+    }
+
+    #[test]
+    fn gpu_check_json_with_kv_fits_against_total() {
+        // Free 14 GiB; weights 10 GiB + KV 2 GiB = 12 GiB → fits, 2 GiB headroom.
+        let device = GpuDeviceInfo::builder()
+            .index(0)
+            .name(Some("Test GPU".to_owned()))
+            .total_bytes(16 * 1024 * 1024 * 1024)
+            .free_bytes(14 * 1024 * 1024 * 1024)
+            .used_bytes(2 * 1024 * 1024 * 1024)
+            .build();
+        let result = GpuCheckResult {
+            device_index: 0,
+            device: Some(device),
+            error: None,
+        };
+        let weight_bytes: u64 = 10 * 1024 * 1024 * 1024;
+        let kv = KvComputed {
+            context: 8192,
+            elem_bytes: 2,
+            dtype_label: "BF16".to_owned(),
+            bytes: Some(2 * 1024 * 1024 * 1024),
+            path: KvCachePath::Exact,
+        };
+        let v = gpu_check_json(&result, weight_bytes, "BF16", 5_000_000_000, Some(&kv));
+
+        // Fit is measured against weights + KV (12 GiB), not weights alone.
+        assert_eq!(v.get("fits"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            v.get("headroom_bytes"),
+            Some(&serde_json::json!(2u64 * 1024 * 1024 * 1024))
+        );
+        let model = v.get("model").expect("model present");
+        assert_eq!(
+            model.get("total_bytes"),
+            Some(&serde_json::json!(12u64 * 1024 * 1024 * 1024))
+        );
+        let kvc = v.get("kv_cache").expect("kv_cache present");
+        assert_eq!(kvc.get("path"), Some(&serde_json::json!("exact")));
+        assert_eq!(kvc.get("context"), Some(&serde_json::json!(8192)));
+        assert_eq!(
+            kvc.get("bytes"),
+            Some(&serde_json::json!(2u64 * 1024 * 1024 * 1024))
+        );
+    }
+
+    #[test]
+    fn gpu_check_json_without_kv_omits_kv_cache() {
+        // Without --context the schema is unchanged: no kv_cache, no total_bytes.
+        let device = GpuDeviceInfo::builder()
+            .index(0)
+            .name(None)
+            .total_bytes(16 * 1024 * 1024 * 1024)
+            .free_bytes(14 * 1024 * 1024 * 1024)
+            .used_bytes(2 * 1024 * 1024 * 1024)
+            .build();
+        let result = GpuCheckResult {
+            device_index: 0,
+            device: Some(device),
+            error: None,
+        };
+        let v = gpu_check_json(
+            &result,
+            10 * 1024 * 1024 * 1024,
+            "BF16",
+            5_000_000_000,
+            None,
+        );
+        assert!(v.get("kv_cache").is_none());
+        let model = v.get("model").expect("model present");
+        assert!(model.get("total_bytes").is_none());
     }
 }
