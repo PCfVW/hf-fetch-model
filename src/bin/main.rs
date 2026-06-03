@@ -5621,6 +5621,12 @@ fn run_inspect_repo(
         return Ok(());
     }
 
+    // Compute the repo-level Source label from the per-file provenance before
+    // `results` is consumed by the map below. The network path resolves each
+    // file cache-first, so a partially-cached repo genuinely mixes the two.
+    let sources: Vec<inspect::InspectSource> = results.iter().map(|(_, _, s)| *s).collect();
+    let source_label = multi_file_source_label(&sources);
+
     let mapped: Vec<(String, inspect::SafetensorsHeaderInfo)> = results
         .into_iter()
         .map(|(name, info, _source)| (name, info))
@@ -5640,7 +5646,8 @@ fn run_inspect_repo(
         return Ok(());
     }
 
-    print_multi_file_summary(repo_id, "mixed", &mapped, filter);
+    // BORROW: explicit .as_str() instead of Deref coercion
+    print_multi_file_summary(repo_id, source_label.as_str(), &mapped, filter);
     print_adapter_config_if_present(repo_id, revision, token.as_deref(), false, false);
     Ok(())
 }
@@ -6266,6 +6273,32 @@ fn print_multi_file_json_with_gpu_check(
         .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
     println!("{output}");
     Ok(())
+}
+
+/// Computes the repo-level `Source:` label for the multi-file inspect summary
+/// from the per-file [`inspect::InspectSource`] values.
+///
+/// Returns `"cached"` when every file was read from the local cache, `"remote"`
+/// when every file was fetched via HTTP Range, and `"mixed (N cached, M remote)"`
+/// for a genuine split — the network inspect path resolves each file
+/// cache-first (range request only on a miss), so a partially-cached repo
+/// legitimately mixes the two. An empty slice yields `"unknown"`: there are no
+/// files to classify.
+fn multi_file_source_label(sources: &[inspect::InspectSource]) -> String {
+    let cached = sources
+        .iter()
+        .filter(|s| matches!(s, inspect::InspectSource::Cached))
+        .count();
+    let remote = sources
+        .iter()
+        .filter(|s| matches!(s, inspect::InspectSource::Remote))
+        .count();
+    match (cached, remote) {
+        (0, 0) => "unknown".to_owned(),
+        (_, 0) => "cached".to_owned(),
+        (0, _) => "remote".to_owned(),
+        (c, r) => format!("mixed ({c} cached, {r} remote)"),
+    }
 }
 
 /// Prints multi-file inspection results as a human-readable summary.
@@ -7005,6 +7038,40 @@ fn format_downloads(n: u64) -> String {
 )]
 mod tests {
     use super::*;
+
+    // ---------- multi_file_source_label ----------
+
+    #[test]
+    fn multi_file_source_label_empty_is_unknown() {
+        assert_eq!(multi_file_source_label(&[]), "unknown");
+    }
+
+    #[test]
+    fn multi_file_source_label_all_cached() {
+        use inspect::InspectSource::Cached;
+        assert_eq!(multi_file_source_label(&[Cached, Cached]), "cached");
+    }
+
+    #[test]
+    fn multi_file_source_label_all_remote() {
+        use inspect::InspectSource::Remote;
+        assert_eq!(multi_file_source_label(&[Remote, Remote, Remote]), "remote");
+    }
+
+    #[test]
+    fn multi_file_source_label_mixed_reports_counts() {
+        use inspect::InspectSource::{Cached, Remote};
+        assert_eq!(
+            multi_file_source_label(&[Cached, Remote, Remote]),
+            "mixed (1 cached, 2 remote)"
+        );
+    }
+
+    #[test]
+    fn multi_file_source_label_single_cached() {
+        use inspect::InspectSource::Cached;
+        assert_eq!(multi_file_source_label(&[Cached]), "cached");
+    }
 
     // ---------- parse_size_arg ----------
 
