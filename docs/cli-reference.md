@@ -22,13 +22,16 @@ cargo install hf-fetch-model --features cli
 - [Cache commands](#cache-commands)
 - [Cache clean-partial flags](#cache-clean-partial-flags)
 - [Cache delete flags](#cache-delete-flags)
+- [Cache gc flags](#cache-gc-flags)
 - [Cache verify flags](#cache-verify-flags)
 - [Diff flags](#diff-flags)
 - [Download flags](#download-flags)
-- [Info flags](#info-flags)
-- [Inspect flags](#inspect-flags)
 - [List-files flags](#list-files-flags)
 - [Search flags](#search-flags)
+- [List-families flags](#list-families-flags)
+- [Status flags](#status-flags)
+- [Info flags](#info-flags)
+- [Inspect flags](#inspect-flags)
 - [General flags](#general-flags)
 
 ## Subcommands
@@ -45,7 +48,7 @@ cargo install hf-fetch-model --features cli
 | `cache delete <REPO_ID\|N>` | Delete a cached model (entire `models--org--name/` directory) |
 | `cache path <REPO_ID\|N>` | Print the snapshot directory path for scripting |
 | `cache verify <REPO_ID\|N>` | Re-verify SHA256 digests of cached files against HuggingFace LFS metadata |
-| `inspect <REPO_ID> [FILENAME]` | Inspect `.safetensors` file headers (remote or cached) or `.gguf` files (cached only, since v0.10.2) — tensor names, shapes, dtypes; auto-detects PEFT adapter config |
+| `inspect <REPO_ID> [FILENAME]` | Inspect `.safetensors` headers (remote or cached) and `.gguf` / `.npz` / `.pth` files (cached only) — tensor names, shapes, dtypes; auto-detects PEFT adapter config |
 | `list-families` | List model families (`model_type`) in local cache |
 | `list-files <REPO_ID>` | List files in a remote repo (filenames, sizes, SHA256) without downloading |
 | `search <QUERY>` | Search the HuggingFace Hub for models (by downloads) |
@@ -183,7 +186,7 @@ hf-fm info mistralai/Ministral-3-3B-Instruct-2512 --revision v1.0
 
 ## Inspect examples
 
-For a narrative walkthrough using a real 4-shard model, see the [Inspect tutorial](tutorials/inspect-before-downloading.md). `inspect` covers `.safetensors` (remote or cached) and `.gguf` (cached only as of v0.10.2; remote `.gguf` is planned for v0.11); other tensor formats are rejected with a clear error.
+For a narrative walkthrough using a real 4-shard model, see the [Inspect tutorial](tutorials/inspect-before-downloading.md). `inspect` covers `.safetensors` (remote or cached) plus `.gguf` (v0.10.2), `.npz`, and `.pth` (both v0.10.3) for **cached** files; remote inspect for those three is planned for v0.11. An unsupported extension is rejected with a clear error.
 
 ```sh
 # Inspect a single safetensors file (cache-first, falls back to HTTP Range requests)
@@ -461,7 +464,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--filter` | Include glob pattern (repeatable) | all files |
 | `--flat` | Copy files to flat layout: `{output-dir}/{filename}` | off |
 | `--output-dir` | Custom output directory (or flat copy target with `--flat`) | HF cache |
-| `--preset` | Filter preset: `safetensors`, `gguf`, `pth`, `config-only` | — |
+| `--preset` | Filter preset: `safetensors`, `gguf`, `npz`, `pth`, `config-only` | — |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
@@ -472,7 +475,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--exclude` | Exclude glob pattern (repeatable) | none |
 | `--filter` | Include glob pattern (repeatable) | all files |
 | `--no-checksum` | Suppress the SHA256 column | off |
-| `--preset` | Filter preset: `safetensors`, `gguf`, `pth`, `config-only` | — |
+| `--preset` | Filter preset: `safetensors`, `gguf`, `npz`, `pth`, `config-only` | — |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--show-cached` | Show cache status: complete (✓), partial, or missing (✗) | off |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |

@@ -21,7 +21,7 @@ A Rust library and CLI for downloading and inspecting HuggingFace models. Multi-
 - [License](#license)
 - [Development](#development)
 
-> **New to hf-fm?** Walk through [Inspect before you download](docs/tutorials/inspect-before-downloading.md) — a 6-minute tour of what the tool does without downloading a single weight byte. Common questions live in the [FAQ](docs/FAQ.md); every flag is in the [CLI Reference](docs/cli-reference.md).
+> **New to hf-fm?** Walk through [Inspect before you download](docs/tutorials/inspect-before-downloading.md) — a 7-minute tour of what the tool does without downloading a single weight byte. Common questions live in the [FAQ](docs/FAQ.md); every flag is in the [CLI Reference](docs/cli-reference.md).
 
 ## Install
 
@@ -60,7 +60,7 @@ Without `--force`, a stale local registry index can cause `cargo install` to exi
 | `hf-fm discover` | Find new model families on the Hub |
 | `hf-fm download-file <REPO_ID> <FILE>` | Download a single file (or glob pattern) |
 | `hf-fm du [REPO_ID\|N]` | Show cache disk usage (by name or `#` index) |
-| `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) without downloading weights; add `--check-gpu` for a one-line GPU-fit verdict |
+| `hf-fm inspect <REPO_ID> [FILE]` | Inspect safetensors headers (tensor names, shapes, dtypes) without downloading weights; add `--check-gpu [--context N]` for a GPU-fit verdict (with KV-cache budgeting) |
 | `hf-fm list-families` | List model families in local cache |
 | `hf-fm list-files <REPO_ID>` | List remote files (sizes, SHA256) without downloading |
 | `hf-fm search <QUERY>` | Search the HuggingFace Hub for models |
@@ -197,7 +197,7 @@ $ hf-fm inspect meta-llama/Llama-3.2-3B --cached --check-gpu --context 32768
   Fit:            ✓ 4.20 GiB headroom (weights + KV; runtime extra)
 ```
 
-Inspect reads tensor metadata via HTTP Range requests (2 requests per file) — no weight data downloaded. The `--tree` flag shows the hierarchical namespace with numeric sibling groups auto-collapsed to `[0..N]` for structural discovery. The `--check-gpu` flag adds a one-line GPU-fit verdict using [`hypomnesis`](https://crates.io/crates/hypomnesis) (NVML on Linux/Windows, DXGI on Windows); composes with `--json`. Add `--context N` to fold in the KV cache at a context length and get a real `weights + KV` verdict — the difference between "fits" and "OOM at token 8000" on a consumer card. The estimate is parameter-driven from the model's `config.json` (`GQA`, sliding-window, MLA, and hybrid Mamba/attention all handled); see the [FAQ entry on GPU fit](docs/FAQ.md#how-do-i-know-if-a-model-fits-on-my-gpu) for the formula and its limitations. Diff compares tensor names, dtypes, and shapes between any two models (remote or cached); `--dtypes` swaps the per-tensor body for a side-by-side per-dtype histogram with a signed Δ Size column — the high-leverage view for scaled-sibling pairs. See the [FAQ entry on comparing two models](docs/FAQ.md#how-do-i-compare-two-huggingface-models-structurally) for a `jq` recipe that uses the new `byte_count` field in `--json` output to collapse layer-indexed tensors by pattern.
+Inspect reads tensor metadata via HTTP Range requests (2 requests per file) — no weight data downloaded. The `--tree` flag shows the hierarchical namespace with numeric sibling groups auto-collapsed to `[0..N]` for structural discovery. The `--check-gpu` flag adds a one-line GPU-fit verdict using [`hypomnesis`](https://crates.io/crates/hypomnesis) (NVML on Linux/Windows, DXGI on Windows); composes with `--json`. Add `--context N` to fold in the KV cache at a context length and get a real `weights + KV` verdict — the difference between "fits" and "OOM at token 8000" on a consumer card. The estimate is parameter-driven from the model's `config.json` (`GQA`, sliding-window, and hybrid Mamba/attention all handled; `MLA` is detected and skipped); see the [FAQ entry on GPU fit](docs/FAQ.md#how-do-i-know-if-a-model-fits-on-my-gpu) for the formula and its limitations. Diff compares tensor names, dtypes, and shapes between any two models (remote or cached); `--dtypes` swaps the per-tensor body for a side-by-side per-dtype histogram with a signed Δ Size column — the high-leverage view for scaled-sibling pairs. See the [FAQ entry on comparing two models](docs/FAQ.md#how-do-i-compare-two-huggingface-models-structurally) for a `jq` recipe that uses the new `byte_count` field in `--json` output to collapse layer-indexed tensors by pattern.
 
 ## Disk usage
 
