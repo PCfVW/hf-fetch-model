@@ -251,7 +251,7 @@ hf-fm inspect zed-industries/zeta-2 \
   weight size for KV cache and activations.
 ```
 
-The verdict is short and clear: the weights are 1.77 GiB larger than what is actually free on this RTX 5060 Ti right now. The note at the bottom is the reminder that *weights alone* is the easy part — full-context inference adds 30–50% on top for KV cache and activations, which puts the real shortfall closer to 6–8 GiB. The next section is the practical pivot to a quant that fits.
+The verdict is short and clear: the weights are 1.77 GiB larger than what is actually free on this RTX 5060 Ti right now — and that is *before* the KV cache. Add `--context N` (v0.10.4) to fold the KV cache in at a chosen sequence length and get a real `weights + KV` verdict; it reads the architecture from `config.json`, so GQA, sliding-window, and hybrid Mamba models are all handled (see the [FAQ](../FAQ.md#how-do-i-know-if-a-model-fits-on-my-gpu) for the formula and its limitations). The next section is the practical pivot to a quant that fits.
 
 ## The verdict — and what to do when it doesn't fit
 
@@ -318,7 +318,7 @@ You went from "15 GiB I can't use" to "5 GiB that fits with room to spare" witho
 - **`inspect --dtypes`** answers how big and in what precision, aggregated across every shard.
 - **`inspect --tree`** answers what shape — architecture, layer count, GQA ratio, tied vs untied heads, vocabulary size.
 - **`inspect --filter` / `--limit`** answer "what does *this part* cost?" before you commit to anything.
-- **`inspect --check-gpu`** turns weight bytes vs. free VRAM into a one-line ✓ / ✗ verdict.
+- **`inspect --check-gpu`** turns weight bytes vs. free VRAM into a one-line ✓ / ✗ verdict — add **`--context N`** to fold in the KV cache and judge `weights + KV` at a real context length.
 - **`search --tag` + `list-files`** find community quantizations when the headline repo doesn't fit.
 - **`--revision <sha>`** pins every command above to a specific commit so notes stay reproducible.
 

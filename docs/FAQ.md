@@ -198,13 +198,38 @@ For a scaled-sibling pair this collapses `model.layers.0.self_attn.q_proj.weight
 
 ### How do I know if a model fits on my GPU?
 
-Pass `--check-gpu` to any `inspect` invocation:
+Pass `--check-gpu` for a weights-vs-VRAM verdict, and add `--context N` for the full picture including the KV cache:
 
 ```
-hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu
+hf-fm inspect meta-llama/Llama-3.2-3B --cached --check-gpu --context 32768
 ```
 
-hf-fm reads the device's total / free / used VRAM via [`hypomnesis`](https://crates.io/crates/hypomnesis) (NVML on Linux/Windows, DXGI on Windows; `nvidia-smi` fallback), sums the model's weight bytes across every shard, and prints a one-line verdict — `✓ X.YZ GiB headroom` if it fits, `✗ short by X.YZ GiB` if it doesn't. The verdict reports **weights only** — large-context inference typically needs another 30–50% on top for the KV cache and activations, which the closing note reminds you about. Default device is `0`; pass `--check-gpu 1` on a multi-GPU box. Works with `--cached` and the network path identically, and composes with `--json` (adds a `gpu_check` object alongside the existing header schema). On a system with no NVIDIA GPU detected, the verdict line reports `unavailable — <reason>` and the command still exits 0 — `--check-gpu` is informational, never a gate. A follow-up `--check-gpu --context N` will add KV-cache budgeting (see the [v0.10.4 roadmap line](roadmaps/cache-management-roadmap.md)); for now, the manual 1.3–1.5× rule of thumb is the right ceiling estimate.
+`--check-gpu` alone reads the device's total / free / used VRAM via [`hypomnesis`](https://crates.io/crates/hypomnesis) (NVML on Linux/Windows, DXGI on Windows; `nvidia-smi` fallback), sums the model's weight bytes across every shard, and prints a one-line `✓ X.YZ GiB headroom` / `✗ short by X.YZ GiB` verdict. Default device is `0`; pass `--check-gpu 1` on a multi-GPU box. Works on the cached and network paths identically. On a system with no NVIDIA GPU the verdict reports `unavailable — <reason>` and the command still exits 0 — `--check-gpu` is informational, never a gate.
+
+**`--context N` (v0.10.4) makes it real.** Weights are the easy part; on a consumer card the KV cache is what decides whether a long context fits. `--context N` reads the model's `config.json` and computes the KV bytes at sequence length `N`, then measures the fit against `weights + KV`:
+
+```
+  Model weights:  5.98 GiB  (BF16, 3.21B params)
+  KV cache @ ctx=32768:  3.50 GiB  (BF16)
+  Total:          9.48 GiB  (weights + KV)
+  Fit:            ✓ 4.20 GiB headroom (weights + KV; runtime extra)
+```
+
+The estimate is **parameter-driven, not a per-model lookup table** — it applies the universal formula `2 × layers × kv_heads × head_dim × N × dtype_bytes` to the model's actual architecture integers, so a model hf-fm has never seen computes correctly. It is architecture-aware where the simple formula breaks:
+
+- **GQA** (Llama-3, Mistral): uses `num_key_value_heads`, not the query-head count (often a 4×+ difference).
+- **Sliding window** (Mistral, Phi): KV caps at the window. Gemma-2 / Gemma-3 mix local and global layers, which are *blended* (global layers at full context + local layers at the window).
+- **Hybrid Mamba/attention** (Granite-4, Nemotron-H, Bamba, Qwen3-Next): KV applies only to the few attention layers, and a separate `Recurrent state` line reports the fixed Mamba2 state (which does **not** grow with context). This is why a hybrid fits far more context than a same-size transformer.
+- **MLA** (DeepSeek): the naive formula overestimates ~10×, so it is **skipped** with a note rather than printing a wrong number.
+
+`--context` requires `--check-gpu`, and composes with `--json` (the `gpu_check` object gains a `kv_cache` sub-object and `model.total_bytes`).
+
+**Known limitations** — all flagged in the output, none silent:
+
+- **MLA is skipped, not estimated.** DeepSeek-V2/V3 print `KV cache: skipped (MLA / latent attention)` and fall back to the weights-only verdict.
+- **Mixed sliding-window is approximate** (within a few percent): the Gemma blend models the *count* of local vs global layers, not their exact positions in the stack.
+- **KV dtype is assumed equal to the activation dtype.** The KV element size comes from the config's `torch_dtype` (bf16 / fp16 = 2 bytes), independent of weight quantization. If you run an FP8 / Q4 KV cache to fit more context, the true figure is smaller — a `--kv-dtype` override is planned.
+- **Non-Mamba2 recurrent state is excluded.** For Qwen3-Next (Gated DeltaNet) and Jamba (Mamba1) the *attention* KV is correct, but the recurrent state is labeled `excluded (small, constant)` rather than computed — it is tens of MiB and constant in context, so it never flips a consumer-GPU verdict.
 
 ### How do I list only the weight files in a repo, not the tokenizer and README?
 

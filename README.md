@@ -186,16 +186,18 @@ $ hf-fm diff openai/gpt-oss-20b openai/gpt-oss-120b --dtypes
   ──────────────────────────────────────────────────────────────
   A: 822 tensors, 25.63 GiB | B: 1230 tensors, 121.54 GiB | Δ: +408 tensors, +95.90 GiB
 
-$ hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu
+$ hf-fm inspect meta-llama/Llama-3.2-3B --cached --check-gpu --context 32768
   ...existing tensor table...
 
-  Model weights:  2.30 GiB  (BF16, 1.24B params)
+  Model weights:  5.98 GiB  (BF16, 3.21B params)
+  KV cache @ ctx=32768:  3.50 GiB  (BF16)
+  Total:          9.48 GiB  (weights + KV)
   GPU 0:          NVIDIA GeForce RTX 5060 Ti — 15.93 GiB VRAM
-                  free: 13.72 GiB, used: 2.21 GiB
-  Fit:            ✓ 11.41 GiB headroom for weights + KV cache + runtime
+                  free: 13.68 GiB, used: 2.25 GiB
+  Fit:            ✓ 4.20 GiB headroom (weights + KV; runtime extra)
 ```
 
-Inspect reads tensor metadata via HTTP Range requests (2 requests per file) — no weight data downloaded. The `--tree` flag shows the hierarchical namespace with numeric sibling groups auto-collapsed to `[0..N]` for structural discovery. The `--check-gpu` flag adds a one-line GPU-fit verdict using [`hypomnesis`](https://crates.io/crates/hypomnesis) (NVML on Linux/Windows, DXGI on Windows); composes with `--json`. Diff compares tensor names, dtypes, and shapes between any two models (remote or cached); `--dtypes` swaps the per-tensor body for a side-by-side per-dtype histogram with a signed Δ Size column — the high-leverage view for scaled-sibling pairs. See the [FAQ entry on comparing two models](docs/FAQ.md#how-do-i-compare-two-huggingface-models-structurally) for a `jq` recipe that uses the new `byte_count` field in `--json` output to collapse layer-indexed tensors by pattern.
+Inspect reads tensor metadata via HTTP Range requests (2 requests per file) — no weight data downloaded. The `--tree` flag shows the hierarchical namespace with numeric sibling groups auto-collapsed to `[0..N]` for structural discovery. The `--check-gpu` flag adds a one-line GPU-fit verdict using [`hypomnesis`](https://crates.io/crates/hypomnesis) (NVML on Linux/Windows, DXGI on Windows); composes with `--json`. Add `--context N` to fold in the KV cache at a context length and get a real `weights + KV` verdict — the difference between "fits" and "OOM at token 8000" on a consumer card. The estimate is parameter-driven from the model's `config.json` (`GQA`, sliding-window, MLA, and hybrid Mamba/attention all handled); see the [FAQ entry on GPU fit](docs/FAQ.md#how-do-i-know-if-a-model-fits-on-my-gpu) for the formula and its limitations. Diff compares tensor names, dtypes, and shapes between any two models (remote or cached); `--dtypes` swaps the per-tensor body for a side-by-side per-dtype histogram with a signed Δ Size column — the high-leverage view for scaled-sibling pairs. See the [FAQ entry on comparing two models](docs/FAQ.md#how-do-i-compare-two-huggingface-models-structurally) for a `jq` recipe that uses the new `byte_count` field in `--json` output to collapse layer-indexed tensors by pattern.
 
 ## Disk usage
 

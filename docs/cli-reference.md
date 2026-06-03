@@ -237,6 +237,9 @@ hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu 1
 # JSON composition: gpu_check rides alongside the existing header schema
 hf-fm inspect meta-llama/Llama-3.2-1B --cached --check-gpu --json
 
+# Will it fit *with* a 32K context? Folds the KV cache into the verdict (weights + KV)
+hf-fm inspect meta-llama/Llama-3.2-3B --cached --check-gpu --context 32768
+
 # Inspect a cached .gguf file (v0.10.2+, anamnesis-powered; remote .gguf planned for v0.11)
 hf-fm inspect bartowski/Mistral-7B-Instruct-v0.3-GGUF Mistral-7B-Instruct-v0.3-Q4_K_M.gguf --cached
 ```
@@ -515,6 +518,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 |------|-------------|---------|
 | `--cached` | Cache-only mode: fail if the file is not cached locally | off |
 | `--check-gpu [N]` | Append a one-line GPU-fit verdict comparing model weight bytes against free VRAM on device `N` (default `0`). Reads device info via [`hypomnesis`](https://crates.io/crates/hypomnesis) (NVML on Linux/Windows, DXGI on Windows; falls back to `nvidia-smi`). On systems with no NVIDIA GPU detected, prints `GPU N: unavailable — <reason>` and skips the verdict (exit code stays `0` — the command is informational, not a gate). Uses the **unfiltered** model totals (so `--filter` / `--limit` affect only the printed table). Composes with `--json`: a `gpu_check` object is added to the per-file schema, the `--tree --json` schema, and the `--dtypes --json` schema; the repo-level plain `--json` schema becomes `{"files": [...], "gpu_check": {...}}` when `--check-gpu` is passed (the array schema is preserved when it is absent). At the whole-repo level, forces shard aggregation so the verdict reflects the total weight bytes across every shard. Conflicts with `--list` (no headers are read in `--list` mode). | off |
+| `--context N` | KV-cache context length for the `--check-gpu` verdict (**requires `--check-gpu`**). Reads the model's `config.json`, computes the KV cache at sequence length `N`, and measures fit against `weights + KV` instead of weights alone — adding `KV cache @ ctx=N` and `Total` lines. Parameter-driven and architecture-aware: GQA, sliding-window (Gemma / Mistral, with mixed local/global blended), and hybrid Mamba/attention (Granite-4, Nemotron-H, Bamba, Qwen3-Next — a separate `Recurrent state` line for the Mamba2 state). MLA (DeepSeek) is **skipped** with a note; an absent / dimension-less `config.json` prints `KV cache: unavailable` and falls back to weights-only (exit code stays `0`). KV element size is the activation dtype (`torch_dtype`, bf16/fp16 = 2 B). Composes with `--json` (the `gpu_check` object gains a `kv_cache` sub-object and `model.total_bytes`). | — |
 | `--dtypes` | Show a per-dtype summary (tensor count, params, size) instead of individual tensors. Composes with `--json` to emit `{ dtypes: [...], total_tensors, total_params }`. | off |
 | `--filter` | Show only tensors whose name contains this substring | — |
 | `--json` | Output the full header as JSON instead of a human-readable table | off |
