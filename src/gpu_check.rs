@@ -156,8 +156,8 @@ pub fn dominant_dtype_label(tensors: &[TensorInfo]) -> String {
 /// How a KV-cache estimate was derived — drives the rendered caveat and the
 /// `--json` `kv_cache.path` tag.
 ///
-/// `#[non_exhaustive]` because the hybrid-Mamba budgeting follow-up adds a
-/// variant; all current match sites live in this module.
+/// `#[non_exhaustive]` so adding KV-path variants (e.g. a future `MLA`
+/// estimate) stays non-breaking; all current match sites live in this module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KvCachePath {
@@ -805,11 +805,15 @@ fn kv_cache_json(kv: &KvComputed) -> serde_json::Value {
 ///   },
 ///   "kv_cache": {                                                       // with `--context` only
 ///     "context": 8192,
-///     "path": "exact",                                                  // exact | sliding_window_capped | sliding_window_partial | mla_skipped | unavailable
+///     "path": "exact",                                                  // exact | sliding_window_capped | sliding_window_partial | mla_skipped | unavailable | hybrid
 ///     "elem_bytes": 2,                                                  // computable only
-///     "bytes": 1073741824,                                              // computable only
+///     "bytes": 1073741824,                                              // computable only (total: KV + recurrent for hybrid)
 ///     "window": 4096,                                                   // sliding_window_* only
-///     "reason": "no config.json in repo"                                // unavailable only
+///     "reason": "no config.json in repo",                              // unavailable only
+///     "attn_layers": 4,                                                 // hybrid only
+///     "recurrent_layers": 36,                                           // hybrid only
+///     "kv_bytes": 268435456,                                            // hybrid only (attention KV)
+///     "recurrent_bytes": 29270016                                       // hybrid only, Mamba2 (excluded for DeltaNet / Mamba1)
 ///   },
 ///   "fits": true,                                                       // success only
 ///   "headroom_bytes": 4500000000,                                       // success + `fits == true`
