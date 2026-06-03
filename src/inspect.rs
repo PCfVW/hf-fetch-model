@@ -309,9 +309,28 @@ pub struct ModelConfig {
     /// `MLA` decoupled-`RoPE` key dimension (`DeepSeek`); part of the latent-KV
     /// size used by the documented `MLA` estimate.
     pub qk_rope_head_dim: Option<u32>,
-    /// Per-layer kind tags for hybrid models (`"attention"` / `"mamba"` / …);
-    /// reserved for hybrid-Mamba budgeting (v0.10.4 follow-up).
+    /// Per-layer kind tags for hybrid models (`"attention"` / `"mamba"` /
+    /// `"linear_attention"` / …). Primary hybrid-layout signal (Granite-4).
     pub layer_types: Option<Vec<String>>,
+    /// Nemotron-H layer-layout string (`"M-M-M-M*-…"`: `*` = attention,
+    /// `M` = Mamba, `-` = FFN-only). Alternative hybrid-layout signal.
+    pub hybrid_override_pattern: Option<String>,
+    /// Explicit indices of the attention layers (Bamba). Alternative
+    /// hybrid-layout signal; the remaining layers are recurrent.
+    pub attn_layer_indices: Option<Vec<u32>>,
+    /// Period of full-attention layers — every `N`-th layer is attention, the
+    /// rest recurrent (Qwen3-Next). Alternative hybrid-layout signal.
+    pub full_attention_interval: Option<u32>,
+    /// Mamba2 SSM head count (`mamba_n_heads` / `mamba_num_heads`).
+    pub mamba_n_heads: Option<u32>,
+    /// Mamba2 SSM per-head dimension (`mamba_d_head` / `mamba_head_dim`).
+    pub mamba_d_head: Option<u32>,
+    /// Mamba2 SSM state size (`mamba_d_state` / `ssm_state_size`).
+    pub mamba_d_state: Option<u32>,
+    /// Mamba2 causal-convolution width (`mamba_d_conv` / `conv_kernel`).
+    pub mamba_d_conv: Option<u32>,
+    /// Mamba2 group count for the convolution (`mamba_n_groups` / `n_groups`).
+    pub mamba_n_groups: Option<u32>,
 }
 
 // -----------------------------------------------------------------------
@@ -1541,7 +1560,7 @@ struct RawModelConfig {
     num_attention_heads: Option<u32>,
     #[serde(default, alias = "num_kv_heads", alias = "n_head_kv")]
     num_key_value_heads: Option<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "attention_head_dim")]
     head_dim: Option<u32>,
     #[serde(default)]
     hidden_size: Option<u32>,
@@ -1559,6 +1578,22 @@ struct RawModelConfig {
     qk_rope_head_dim: Option<u32>,
     #[serde(default)]
     layer_types: Option<Vec<String>>,
+    #[serde(default)]
+    hybrid_override_pattern: Option<String>,
+    #[serde(default)]
+    attn_layer_indices: Option<Vec<u32>>,
+    #[serde(default)]
+    full_attention_interval: Option<u32>,
+    #[serde(default, alias = "mamba_num_heads")]
+    mamba_n_heads: Option<u32>,
+    #[serde(default, alias = "mamba_head_dim")]
+    mamba_d_head: Option<u32>,
+    #[serde(default, alias = "ssm_state_size")]
+    mamba_d_state: Option<u32>,
+    #[serde(default, alias = "conv_kernel")]
+    mamba_d_conv: Option<u32>,
+    #[serde(default, alias = "n_groups")]
+    mamba_n_groups: Option<u32>,
     #[serde(default)]
     text_config: Option<Box<RawModelConfig>>,
 }
@@ -1592,6 +1627,14 @@ fn model_config_from_raw(raw: RawModelConfig) -> ModelConfig {
         kv_lora_rank: raw.kv_lora_rank,
         qk_rope_head_dim: raw.qk_rope_head_dim,
         layer_types: raw.layer_types,
+        hybrid_override_pattern: raw.hybrid_override_pattern,
+        attn_layer_indices: raw.attn_layer_indices,
+        full_attention_interval: raw.full_attention_interval,
+        mamba_n_heads: raw.mamba_n_heads,
+        mamba_d_head: raw.mamba_d_head,
+        mamba_d_state: raw.mamba_d_state,
+        mamba_d_conv: raw.mamba_d_conv,
+        mamba_n_groups: raw.mamba_n_groups,
     }
 }
 

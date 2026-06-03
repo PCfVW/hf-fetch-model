@@ -192,6 +192,21 @@ pub enum KvCachePath {
         /// Short human-readable explanation (no config, missing dims, …).
         reason: &'static str,
     },
+    /// Hybrid Mamba/attention model (Granite-4, Nemotron-H, Bamba,
+    /// Qwen3-Next): KV is budgeted over the `attn_layers` attention layers
+    /// only (the recurrent layers hold no growing cache), plus a fixed
+    /// recurrent-state term that is constant in context length.
+    Hybrid {
+        /// Number of attention layers holding a context-growing KV cache.
+        attn_layers: u32,
+        /// Number of recurrent (Mamba / linear-attention) layers.
+        recurrent_layers: u32,
+        /// KV-cache bytes for the attention layers (grows with context).
+        kv_bytes: u64,
+        /// Fixed recurrent-state bytes (Mamba2), or `None` when the recurrent
+        /// type is not Mamba2 (Gated `DeltaNet`, Mamba1) — then excluded.
+        recurrent_bytes: Option<u64>,
+    },
 }
 
 impl KvCachePath {
@@ -204,6 +219,7 @@ impl KvCachePath {
             Self::SlidingWindowPartial { .. } => "sliding_window_partial",
             Self::MlaSkipped => "mla_skipped",
             Self::Unavailable { .. } => "unavailable",
+            Self::Hybrid { .. } => "hybrid",
         }
     }
 }
@@ -225,6 +241,112 @@ fn sliding_window_period(cfg: &ModelConfig) -> Option<u32> {
         return Some(2);
     }
     None
+}
+
+/// Attention vs recurrent layer counts for a hybrid Mamba/attention model.
+struct HybridLayers {
+    /// Layers using attention (and so a context-growing KV cache).
+    attn_layers: u32,
+    /// Layers using a recurrent operator (Mamba / linear attention).
+    recurrent_layers: u32,
+}
+
+/// Classifies a hybrid model's layers into attention vs recurrent counts, or
+/// `None` for a non-hybrid (pure transformer) model.
+///
+/// Tries four config signals in order: `layer_types` (Granite-4),
+/// `hybrid_override_pattern` (Nemotron-H: `*` = attention, `M` = Mamba,
+/// `-` = FFN-only), `attn_layer_indices` (Bamba), and `full_attention_interval`
+/// (Qwen3-Next: every `N`-th layer is attention). Returns `None` when no
+/// recurrent layers are found — a pure transformer that merely lists
+/// `layer_types` (e.g. Gemma-3's all-attention list) is not hybrid and falls
+/// through to the standard path.
+fn classify_hybrid_layers(cfg: &ModelConfig) -> Option<HybridLayers> {
+    // 1. layer_types: explicit per-layer kind list.
+    if let Some(types) = &cfg.layer_types {
+        let mut attn = 0u32;
+        let mut recurrent = 0u32;
+        for t in types {
+            match t.as_str() {
+                "mamba" | "mamba2" | "linear_attention" | "linear" | "recurrent" => recurrent += 1,
+                "attention" | "full_attention" | "sliding_attention" => attn += 1,
+                // EXPLICIT: unknown layer kinds (FFN-only, etc.) contribute to neither.
+                _ => {}
+            }
+        }
+        if recurrent > 0 {
+            return Some(HybridLayers {
+                attn_layers: attn,
+                recurrent_layers: recurrent,
+            });
+        }
+    }
+
+    // 2. hybrid_override_pattern: Nemotron-H char layout (`-` FFN layers ignored).
+    if let Some(pattern) = &cfg.hybrid_override_pattern {
+        let attn = u32::try_from(pattern.chars().filter(|c| *c == '*').count()).unwrap_or(0);
+        let recurrent = u32::try_from(pattern.chars().filter(|c| *c == 'M').count()).unwrap_or(0);
+        if recurrent > 0 {
+            return Some(HybridLayers {
+                attn_layers: attn,
+                recurrent_layers: recurrent,
+            });
+        }
+    }
+
+    // 3. attn_layer_indices: explicit attention-layer positions (Bamba); the
+    //    remaining layers are recurrent.
+    if let (Some(indices), Some(total)) = (&cfg.attn_layer_indices, cfg.num_hidden_layers) {
+        let attn = u32::try_from(indices.len()).unwrap_or(0);
+        if attn > 0 && attn < total {
+            return Some(HybridLayers {
+                attn_layers: attn,
+                recurrent_layers: total - attn,
+            });
+        }
+    }
+
+    // 4. full_attention_interval: every N-th layer is attention (Qwen3-Next).
+    if let (Some(interval), Some(total)) = (cfg.full_attention_interval, cfg.num_hidden_layers) {
+        if interval >= 2 {
+            let attn = total / interval;
+            if attn > 0 && attn < total {
+                return Some(HybridLayers {
+                    attn_layers: attn,
+                    recurrent_layers: total - attn,
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Fixed Mamba2 recurrent-state bytes for one layer, or `None` when the Mamba2
+/// dimensions are absent (Gated `DeltaNet` / Mamba1 / unknown recurrent type, for
+/// which the recurrent term is excluded).
+///
+/// `ssm_state = n_heads × d_head × d_state`; `conv_state = conv_dim × d_conv`
+/// with `conv_dim = n_heads·d_head + 2·n_groups·d_state` — the cache shapes of
+/// the HF `Mamba2Mixer`. Constant in context length. `u64::from` is lossless,
+/// so no `as` casts are needed.
+fn mamba2_state_bytes_per_layer(cfg: &ModelConfig, elem_bytes: u8) -> Option<u64> {
+    let n_heads = u64::from(cfg.mamba_n_heads?);
+    let d_head = u64::from(cfg.mamba_d_head?);
+    let d_state = u64::from(cfg.mamba_d_state?);
+    let d_conv = u64::from(cfg.mamba_d_conv?);
+    let n_groups = u64::from(cfg.mamba_n_groups.unwrap_or(1));
+
+    let inner = n_heads.saturating_mul(d_head);
+    let ssm_state = inner.saturating_mul(d_state);
+    let conv_dim = inner.saturating_add(2u64.saturating_mul(n_groups).saturating_mul(d_state));
+    let conv_state = conv_dim.saturating_mul(d_conv);
+
+    Some(
+        ssm_state
+            .saturating_add(conv_state)
+            .saturating_mul(u64::from(elem_bytes)),
+    )
 }
 
 /// Estimates KV-cache bytes for a transformer at context length `seq_len`.
@@ -285,6 +407,27 @@ pub fn kv_cache_bytes(
         .saturating_mul(u64::from(kv_heads))
         .saturating_mul(u64::from(head_dim))
         .saturating_mul(u64::from(kv_elem_bytes));
+
+    // Hybrid Mamba/attention: KV applies only to the attention layers (the
+    // recurrent layers hold a fixed state that does not grow with context),
+    // plus a Mamba2 recurrent-state term when its dims are present.
+    if let Some(h) = classify_hybrid_layers(cfg) {
+        let kv_bytes = per_layer_per_token
+            .saturating_mul(u64::from(h.attn_layers))
+            .saturating_mul(seq_len);
+        let recurrent_bytes = mamba2_state_bytes_per_layer(cfg, kv_elem_bytes)
+            .map(|per| per.saturating_mul(u64::from(h.recurrent_layers)));
+        let total = kv_bytes.saturating_add(recurrent_bytes.unwrap_or(0));
+        return (
+            Some(total),
+            KvCachePath::Hybrid {
+                attn_layers: h.attn_layers,
+                recurrent_layers: h.recurrent_layers,
+                kv_bytes,
+                recurrent_bytes,
+            },
+        );
+    }
 
     // Sliding window binds only when present, enabled, and shorter than N.
     let window_binds = cfg.use_sliding_window != Some(false)
@@ -353,6 +496,33 @@ pub struct KvComputed {
 /// path-specific caveat; a skipped / unavailable estimate prints a one-line
 /// reason.
 fn print_kv_line(kv: &KvComputed) {
+    // Hybrid prints two lines (attention KV + recurrent state) — handle it
+    // before the single-line paths.
+    if let KvCachePath::Hybrid {
+        attn_layers,
+        recurrent_layers,
+        kv_bytes,
+        recurrent_bytes,
+    } = &kv.path
+    {
+        println!(
+            "  KV cache @ ctx={}:  {}  ({}, {attn_layers} attn layers)",
+            kv.context,
+            format_size(*kv_bytes),
+            kv.dtype_label,
+        );
+        match recurrent_bytes {
+            Some(rb) => println!(
+                "  Recurrent state:   {}  ({recurrent_layers} Mamba2 layers, constant)",
+                format_size(*rb),
+            ),
+            None => {
+                println!("  Recurrent state:   excluded (small, constant; non-Mamba2 recurrent)");
+            }
+        }
+        return;
+    }
+
     let Some(bytes) = kv.bytes else {
         match &kv.path {
             KvCachePath::MlaSkipped => println!(
@@ -364,7 +534,8 @@ fn print_kv_line(kv: &KvComputed) {
             // EXPLICIT: these paths always carry Some(bytes); defensive fallback.
             KvCachePath::Exact
             | KvCachePath::SlidingWindowCapped { .. }
-            | KvCachePath::SlidingWindowPartial { .. } => {
+            | KvCachePath::SlidingWindowPartial { .. }
+            | KvCachePath::Hybrid { .. } => {
                 println!("  KV cache:       unavailable");
             }
         }
@@ -380,10 +551,11 @@ fn print_kv_line(kv: &KvComputed) {
             global_layers,
             ..
         } => format!("  (approx; {local_layers} local + {global_layers} global layers)"),
-        // Exact needs no caveat; the None-bytes variants never reach here.
-        KvCachePath::Exact | KvCachePath::MlaSkipped | KvCachePath::Unavailable { .. } => {
-            String::new()
-        }
+        // Exact needs no caveat; Hybrid returned above; None-bytes never reach here.
+        KvCachePath::Exact
+        | KvCachePath::MlaSkipped
+        | KvCachePath::Unavailable { .. }
+        | KvCachePath::Hybrid { .. } => String::new(),
     };
 
     println!(
@@ -434,17 +606,29 @@ pub fn print_gpu_check(
     // KV-cache + Total lines (only with `--context`). `total_bytes` is what the
     // Fit verdict is measured against — weights alone when KV is absent or
     // could not be computed.
+    // `fit_basis` is `Some(label)` when a computable KV estimate is counted —
+    // the label describes what `total_bytes` includes and is reused on the Fit
+    // line so the two stay consistent.
     let mut total_bytes = weight_bytes;
-    let mut kv_counted = false;
+    let mut fit_basis: Option<&str> = None;
     if let Some(kv) = kv {
         print_kv_line(kv);
         if let Some(kv_bytes) = kv.bytes {
             total_bytes = weight_bytes.saturating_add(kv_bytes);
-            kv_counted = true;
-            println!(
-                "  Total:          {}  (weights + KV)",
-                format_size(total_bytes),
-            );
+            // Hybrids with a Mamba2 term fold weights + KV + recurrent state.
+            let label = if matches!(
+                kv.path,
+                KvCachePath::Hybrid {
+                    recurrent_bytes: Some(_),
+                    ..
+                }
+            ) {
+                "weights + KV + state"
+            } else {
+                "weights + KV"
+            };
+            fit_basis = Some(label);
+            println!("  Total:          {}  ({label})", format_size(total_bytes));
         }
     }
 
@@ -475,9 +659,9 @@ pub fn print_gpu_check(
 
     if dev.free_bytes >= total_bytes {
         let headroom = dev.free_bytes - total_bytes;
-        if kv_counted {
+        if let Some(basis) = fit_basis {
             println!(
-                "  Fit:            \u{2713} {} headroom (weights + KV; runtime extra)",
+                "  Fit:            \u{2713} {} headroom ({basis}; runtime extra)",
                 format_size(headroom),
             );
         } else {
@@ -488,9 +672,9 @@ pub fn print_gpu_check(
         }
     } else {
         let short = total_bytes - dev.free_bytes;
-        if kv_counted {
+        if let Some(basis) = fit_basis {
             println!(
-                "  Fit:            \u{2717} short by {} for weights + KV",
+                "  Fit:            \u{2717} short by {} for {basis}",
                 format_size(short),
             );
         } else {
@@ -502,7 +686,7 @@ pub fn print_gpu_check(
     }
 
     println!();
-    if kv_counted {
+    if fit_basis.is_some() {
         println!(
             "  Note: excludes activations and framework overhead (typically a few hundred MiB)."
         );
@@ -566,6 +750,31 @@ fn kv_cache_json(kv: &KvComputed) -> serde_json::Value {
                 "reason".to_owned(),
                 serde_json::Value::String((*reason).to_owned()),
             );
+        }
+        KvCachePath::Hybrid {
+            attn_layers,
+            recurrent_layers,
+            kv_bytes,
+            recurrent_bytes,
+        } => {
+            obj.insert(
+                "attn_layers".to_owned(),
+                serde_json::Value::Number((*attn_layers).into()),
+            );
+            obj.insert(
+                "recurrent_layers".to_owned(),
+                serde_json::Value::Number((*recurrent_layers).into()),
+            );
+            obj.insert(
+                "kv_bytes".to_owned(),
+                serde_json::Value::Number((*kv_bytes).into()),
+            );
+            if let Some(rb) = recurrent_bytes {
+                obj.insert(
+                    "recurrent_bytes".to_owned(),
+                    serde_json::Value::Number((*rb).into()),
+                );
+            }
         }
         // EXPLICIT: Exact / MlaSkipped carry no extra JSON fields.
         KvCachePath::Exact | KvCachePath::MlaSkipped => {}
@@ -746,8 +955,9 @@ mod tests {
     )]
 
     use super::{
-        dominant_dtype_label, format_params, gpu_check_json, kv_cache_bytes, sum_tensor_bytes,
-        GpuCheckResult, KvCachePath, KvComputed,
+        classify_hybrid_layers, dominant_dtype_label, format_params, gpu_check_json,
+        kv_cache_bytes, mamba2_state_bytes_per_layer, sum_tensor_bytes, GpuCheckResult,
+        KvCachePath, KvComputed,
     };
     use hf_fetch_model::inspect::{torch_dtype_bytes, ModelConfig, TensorInfo};
     use hypomnesis::GpuDeviceInfo;
@@ -945,6 +1155,158 @@ mod tests {
             KvCachePath::Unavailable { reason: "x" }.json_tag(),
             "unavailable"
         );
+    }
+
+    // ---------- hybrid Mamba/attention ----------
+
+    #[test]
+    fn classify_hybrid_via_layer_types() {
+        let mut c = model(4, 8, Some(2), Some(64));
+        c.layer_types = Some(vec![
+            "mamba".to_owned(),
+            "attention".to_owned(),
+            "mamba".to_owned(),
+            "mamba".to_owned(),
+        ]);
+        let h = classify_hybrid_layers(&c).expect("hybrid");
+        assert_eq!(h.attn_layers, 1);
+        assert_eq!(h.recurrent_layers, 3);
+    }
+
+    #[test]
+    fn classify_hybrid_via_override_pattern() {
+        // Nemotron-H: '*' = attention, 'M' = mamba, '-' = FFN (ignored).
+        // "M-M-M*-M-M*-" has 5 'M' and 2 '*'.
+        let mut c = model(8, 32, Some(8), Some(128));
+        c.hybrid_override_pattern = Some("M-M-M*-M-M*-".to_owned());
+        let h = classify_hybrid_layers(&c).expect("hybrid");
+        assert_eq!(h.attn_layers, 2);
+        assert_eq!(h.recurrent_layers, 5);
+    }
+
+    #[test]
+    fn classify_hybrid_via_attn_indices() {
+        let mut c = model(32, 32, Some(8), Some(128));
+        c.attn_layer_indices = Some(vec![9, 18, 27]);
+        let h = classify_hybrid_layers(&c).expect("hybrid");
+        assert_eq!(h.attn_layers, 3);
+        assert_eq!(h.recurrent_layers, 29);
+    }
+
+    #[test]
+    fn classify_hybrid_via_full_attention_interval() {
+        let mut c = model(48, 16, Some(2), Some(256));
+        c.full_attention_interval = Some(4);
+        let h = classify_hybrid_layers(&c).expect("hybrid");
+        assert_eq!(h.attn_layers, 12);
+        assert_eq!(h.recurrent_layers, 36);
+    }
+
+    #[test]
+    fn classify_pure_transformer_layer_types_is_not_hybrid() {
+        // Gemma-3-style: layer_types all attention ⇒ not hybrid.
+        let mut c = model(4, 8, Some(2), Some(64));
+        c.layer_types = Some(vec![
+            "sliding_attention".to_owned(),
+            "full_attention".to_owned(),
+            "sliding_attention".to_owned(),
+            "full_attention".to_owned(),
+        ]);
+        assert!(classify_hybrid_layers(&c).is_none());
+    }
+
+    #[test]
+    fn classify_non_hybrid_is_none() {
+        let c = model(32, 32, Some(8), Some(128));
+        assert!(classify_hybrid_layers(&c).is_none());
+    }
+
+    #[test]
+    fn mamba2_state_granite_dims() {
+        // n_heads 48, d_head 64, d_state 128, d_conv 4, n_groups 1.
+        // inner = 3072; ssm = 393216; conv_dim = 3328; conv = 13312.
+        // (393216 + 13312) * 2 = 813056.
+        let mut c = ModelConfig::default();
+        c.mamba_n_heads = Some(48);
+        c.mamba_d_head = Some(64);
+        c.mamba_d_state = Some(128);
+        c.mamba_d_conv = Some(4);
+        c.mamba_n_groups = Some(1);
+        assert_eq!(mamba2_state_bytes_per_layer(&c, 2), Some(813_056));
+    }
+
+    #[test]
+    fn mamba2_state_missing_dims_is_none() {
+        // Qwen3-Next (no mamba keys) ⇒ None ⇒ recurrent excluded.
+        let c = ModelConfig::default();
+        assert_eq!(mamba2_state_bytes_per_layer(&c, 2), None);
+    }
+
+    #[test]
+    fn kv_hybrid_counts_attn_layers_only_plus_recurrent() {
+        // Granite-4-tiny-like: 40 layers (4 attention, 36 mamba), kv_heads 4,
+        // head_dim 128, ctx 8192, bf16.
+        let mut c = model(40, 12, Some(4), Some(128));
+        let mut types = vec!["mamba".to_owned(); 36];
+        types.extend(vec!["attention".to_owned(); 4]);
+        c.layer_types = Some(types);
+        c.mamba_n_heads = Some(48);
+        c.mamba_d_head = Some(64);
+        c.mamba_d_state = Some(128);
+        c.mamba_d_conv = Some(4);
+        c.mamba_n_groups = Some(1);
+        let (bytes, path) = kv_cache_bytes(&c, 8192, 2);
+        // KV: per_layer 2*4*128*2 = 2048; * 4 attn * 8192 = 67_108_864.
+        // recurrent: 813_056 * 36.
+        assert_eq!(bytes, Some(67_108_864 + 813_056 * 36));
+        let KvCachePath::Hybrid {
+            attn_layers,
+            recurrent_layers,
+            kv_bytes,
+            recurrent_bytes,
+        } = path
+        else {
+            panic!("expected Hybrid, got {path:?}");
+        };
+        assert_eq!(attn_layers, 4);
+        assert_eq!(recurrent_layers, 36);
+        assert_eq!(kv_bytes, 67_108_864);
+        assert_eq!(recurrent_bytes, Some(813_056 * 36));
+    }
+
+    #[test]
+    fn kv_hybrid_recurrent_excluded_when_not_mamba2() {
+        // Qwen3-Next-like: full_attention_interval 4 (12 attn / 36 linear), no
+        // mamba keys ⇒ recurrent excluded.
+        let mut c = model(48, 16, Some(2), Some(256));
+        c.full_attention_interval = Some(4);
+        let (bytes, path) = kv_cache_bytes(&c, 8192, 2);
+        // KV: per_layer 2*2*256*2 = 2048; * 12 attn * 8192 = 201_326_592.
+        assert_eq!(bytes, Some(201_326_592));
+        let KvCachePath::Hybrid {
+            attn_layers,
+            recurrent_layers,
+            kv_bytes,
+            recurrent_bytes,
+        } = path
+        else {
+            panic!("expected Hybrid, got {path:?}");
+        };
+        assert_eq!(attn_layers, 12);
+        assert_eq!(recurrent_layers, 36);
+        assert_eq!(kv_bytes, 201_326_592);
+        assert_eq!(recurrent_bytes, None);
+    }
+
+    #[test]
+    fn kv_cache_path_hybrid_json_tag() {
+        let path = KvCachePath::Hybrid {
+            attn_layers: 4,
+            recurrent_layers: 36,
+            kv_bytes: 1,
+            recurrent_bytes: None,
+        };
+        assert_eq!(path.json_tag(), "hybrid");
     }
 
     #[test]
