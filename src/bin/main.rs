@@ -6384,6 +6384,19 @@ fn print_multi_file_summary(
             inspect::format_params(total_params_filtered)
         );
     }
+
+    // Discoverability nudge: this rollup hides tensor names. For the common
+    // single-`.safetensors` repo it is least informative (one row, a param
+    // count, nothing else), so point the user at the per-tensor views. The
+    // tuple match gates on both no-`--filter` (a filtered view is already a
+    // deliberate drill-down) and exactly one file (the multi-shard rollup's
+    // per-file breakdown is itself the useful signal).
+    if let (None, [(name, _)]) = (filter, results) {
+        println!(
+            "  Hint: this rollup hides tensor names \u{2014} run \
+             `hf-fm inspect {repo_id} {name} --tree` (or `--dtypes`) for per-tensor detail."
+        );
+    }
 }
 
 #[allow(clippy::too_many_lines)]
