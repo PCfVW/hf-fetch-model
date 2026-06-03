@@ -9,6 +9,12 @@
 //! The primary types are [`TensorInfo`] (per-tensor metadata),
 //! [`SafetensorsHeaderInfo`] (parsed header), and [`ShardedIndex`]
 //! (shard-to-tensor mapping for sharded models).
+//!
+//! The module also reads small JSON sidecars from the same cache-first /
+//! HTTP-fallback path: [`AdapterConfig`] (`adapter_config.json`, for `PEFT`
+//! adapters) and [`ModelConfig`] (`config.json`, the architecture parameters
+//! that drive `inspect --check-gpu --context` KV-cache budgeting), via
+//! [`fetch_model_config`] / [`fetch_model_config_cached`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

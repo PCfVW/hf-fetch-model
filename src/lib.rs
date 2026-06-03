@@ -68,10 +68,18 @@
 //!
 //! The CLI also exposes `hf-fm inspect <repo> [FILE] --check-gpu [N]` (v0.10.1)
 //! to print a one-line GPU-fit verdict against device `N` (default 0) using
-//! the `hypomnesis` crate (NVML on Linux/Windows, DXGI on Windows). The
-//! verdict is a binary-only feature today; no library equivalent is exposed
-//! — depend on `hypomnesis` directly if you need the device-info numbers
-//! from library code.
+//! the `hypomnesis` crate (NVML on Linux/Windows, DXGI on Windows). Adding
+//! `--context N` (v0.10.4) folds in the KV cache at a context length and
+//! reports a real fit against `weights + KV` instead of weights alone — the
+//! difference between "fits" and "out-of-memory at token 8000" on a consumer
+//! card. The architecture parameters come from the model's `config.json`,
+//! parsed by the library API that v0.10.4 exposes for downstream reuse:
+//! [`inspect::ModelConfig`] plus [`inspect::fetch_model_config`] /
+//! [`inspect::fetch_model_config_cached`] (cache-first or cache-only) and the
+//! [`inspect::torch_dtype_bytes`] helper. The KV math itself — `GQA`,
+//! sliding-window, `MLA`-skip, and hybrid Mamba/attention layer counting —
+//! and the verdict rendering stay binary-only; depend on `hypomnesis`
+//! directly for the raw device-info numbers.
 //!
 //! ## Cached-file Inspection
 //!
@@ -210,7 +218,7 @@ pub use config::{
 pub use discover::{DiscoveredFamily, GateStatus, ModelCardMetadata, SearchResult};
 pub use download::DownloadOutcome;
 pub use error::{FetchError, FileFailure};
-pub use inspect::AdapterConfig;
+pub use inspect::{AdapterConfig, ModelConfig};
 pub use plan::{download_plan, DownloadPlan, FilePlan};
 pub use progress::{ProgressEvent, ProgressReceiver};
 
