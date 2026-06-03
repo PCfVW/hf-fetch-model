@@ -2,9 +2,9 @@
 
 *Read tensor metadata over HTTP Range — no weight data downloaded — and decide whether the model is worth the bandwidth.*
 
-*~1,650 words · about 7 min read*
+*~1,680 words · about 7 min read*
 
-<!-- Last updated: 2026-05-19, hf-fm v0.10.3 -->
+<!-- Last updated: 2026-06-03, hf-fm v0.10.4 -->
 
 <!--
 STYLE CONVENTIONS for editing this tutorial — keep growth consistent.
@@ -19,10 +19,11 @@ STYLE CONVENTIONS for editing this tutorial — keep growth consistent.
 3. Output blocks: paste exact output, do not paraphrase. Trim only when a
    block runs longer than ~20 lines and the trimmed lines are
    representative repetition (note the trim with `…`).
-4. Forward references: when v0.10.4 ships `--check-gpu --context N`,
-   compress §6's "30–50% on top" paragraph (the one immediately after
-   the `--check-gpu` output block) to a one-liner that points at the
-   new flag. Do not restructure.
+4. §6's verdict paragraph points at `--check-gpu --context N` (v0.10.4,
+   KV-cache budgeting) and links the FAQ for the formula + limitations;
+   keep that pointer and do not re-expand the old manual "30–50% on top"
+   math. The output block stays on `--check-gpu --dtypes` (no `--context`)
+   so its weights-only note is a faithful capture.
 5. Length budget: under 300 lines total, including embedded outputs.
    Update the word count + reading-time line at the top whenever the
    prose changes non-trivially (250 wpm).

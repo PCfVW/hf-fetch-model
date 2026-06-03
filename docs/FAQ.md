@@ -1,6 +1,6 @@
 # Frequently Asked Questions
 
-<!-- Last updated: 2026-05-04, hf-fm v0.10.0 (link to inspect tutorial) -->
+<!-- Last updated: 2026-06-03, hf-fm v0.10.4 (--check-gpu --context KV budgeting) -->
 
 <!--
 STYLE CONVENTIONS for editing this FAQ — keep growth consistent.
@@ -60,7 +60,7 @@ A living list of the questions we and our early users have actually run into. If
   - [Why does my download keep timing out, and how do I extend the budget?](#why-does-my-download-keep-timing-out-and-how-do-i-extend-the-budget)
   - [My download was interrupted — do I have to start over?](#my-download-was-interrupted--do-i-have-to-start-over)
 - [Errors and unexpected output](#errors-and-unexpected-output)
-  - [What does `hf-fm inspect supports .safetensors only (got .npz for …)` mean?](#what-does-hf-fm-inspect-supports-safetensors-only-got-npz-for--mean)
+  - [Which file formats can `inspect` read?](#which-file-formats-can-inspect-read)
   - [I got a `checksum mismatch` error — what do I do?](#i-got-a-checksum-mismatch-error--what-do-i-do)
   - [Why does `inspect` say `Source: remote (2 HTTP requests)`?](#why-does-inspect-say-source-remote-2-http-requests)
   - [Why didn't my pipeline catch a download failure?](#why-didnt-my-pipeline-catch-a-download-failure)
@@ -83,7 +83,7 @@ A living list of the questions we and our early users have actually run into. If
 
 1. `safetensors_explorer` is an interactive **TUI** that shines at exploring a model locally with the keyboard; `hf-fm inspect` is a **CLI** that produces printable output (pipeable into other tools, pasteable into bug reports),
 2. `safetensors_explorer` reads **local files only**; `hf-fm inspect` additionally reads the tensor metadata of a **remote** model via HTTP Range, before anything is downloaded,
-3. `safetensors_explorer` currently covers **safetensors and GGUF**; hf-fm covers safetensors today, with GGUF on the roadmap.
+3. `safetensors_explorer` currently covers **safetensors and GGUF**; hf-fm covers **safetensors** (remote or cached) plus **GGUF / NumPy `.npz` / PyTorch `.pth`** for cached files (since v0.10.2–v0.10.3), with remote inspect for those three on the roadmap (v0.11).
 
 Reach for `safetensors_explorer` when you want to sit at a TUI and explore a model locally; reach for `hf-fm inspect` when you want to preview a remote model before downloading, or when you want text output you can pipe and paste.
 
@@ -226,9 +226,9 @@ The estimate is **parameter-driven, not a per-model lookup table** — it applie
 
 **Known limitations** — all flagged in the output, none silent:
 
-- **MLA is skipped, not estimated.** DeepSeek-V2/V3 print `KV cache: skipped (MLA / latent attention)` and fall back to the weights-only verdict.
+- **MLA is skipped, not estimated.** DeepSeek-V2/V3 print `KV cache: skipped (MLA / latent attention — naive estimate unreliable)` and fall back to the weights-only verdict.
 - **Mixed sliding-window is approximate** (within a few percent): the Gemma blend models the *count* of local vs global layers, not their exact positions in the stack.
-- **KV dtype is assumed equal to the activation dtype.** The KV element size comes from the config's `torch_dtype` (bf16 / fp16 = 2 bytes), independent of weight quantization. If you run an FP8 / Q4 KV cache to fit more context, the true figure is smaller — a `--kv-dtype` override is planned.
+- **KV dtype is assumed equal to the activation dtype.** The KV element size comes from the config's `torch_dtype` (bf16 / fp16 = 2 bytes), independent of weight quantization. If you run an FP8 / Q4 KV cache to fit more context, the real figure is smaller — so treat the reported number as a safe upper bound.
 - **Non-Mamba2 recurrent state is excluded.** For Qwen3-Next (Gated DeltaNet) and Jamba (Mamba1) the *attention* KV is correct, but the recurrent state is labeled `excluded (small, constant)` rather than computed — it is tens of MiB and constant in context, so it never flips a consumer-GPU verdict.
 
 ### How do I list only the weight files in a repo, not the tokenizer and README?
@@ -287,9 +287,9 @@ No. As of v0.9.8, hf-fm preserves the partial `.chunked.part` file plus a small 
 
 ## Errors and unexpected output
 
-### What does `hf-fm inspect supports .safetensors only (got .npz for …)` mean?
+### Which file formats can `inspect` read?
 
-Exactly what it says: `inspect` currently parses safetensors headers only, and you passed a file with a different extension (likely `.npz`, `.gguf`, `.bin`, or `.pth`). This is not a corrupted file — hf-fm just does not know how to read that format yet. If you are on a NumPy-based repo like GemmaScope, use `hf-fm list-files <repo> --preset npz` to see what is available; GGUF inspection is on the roadmap for a future release.
+Four tensor formats: `.safetensors` (remote via HTTP Range, or cached) and `.gguf` / NumPy `.npz` / PyTorch `.pth` (cached only — pass `--cached` after downloading; remote inspect for these three is on the roadmap for v0.11). Two errors point at the edges of that support: an unsupported extension (`.bin`, etc.) gives `hf-fm inspect supports .safetensors, .gguf, .npz, or .pth (got .bin for …)`, and inspecting a `.gguf` / `.npz` / `.pth` *without* `--cached` gives `remote <FORMAT> inspect not yet supported (planned for v0.11): pass --cached after downloading`. On a repo you have not fetched yet, `hf-fm list-files <repo>` shows what is available first.
 
 ### I got a `checksum mismatch` error — what do I do?
 
