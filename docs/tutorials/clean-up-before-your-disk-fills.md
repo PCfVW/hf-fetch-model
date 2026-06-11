@@ -2,7 +2,7 @@
 
 *See what the HuggingFace cache holds, decide what to keep, and reclaim the rest — with a dry-run before anything is deleted.*
 
-*~1,500 words · about 6 min read*
+*~1,150 words · about 5 min read*
 
 <!-- Last updated: 2026-06-11, hf-fm v0.10.5 -->
 
@@ -242,7 +242,7 @@ Cache: C:\Users\Eric JACOPIN\.cache\huggingface\hub
 27 files: 1 SHA256 OK, 0 mismatch, 3 skipped, 23 missing
 ```
 
-Read the legend, not the row count: `✓` is a re-hashed match, `✗ MISMATCH` is real corruption (delete the repo and re-download), `—` marks small non-LFS files that have no upstream hash to check, and `!` `MISSING` simply means never downloaded — entirely normal in a quant repo like this one, where you fetched one variant out of 27 files. The one number that should always be 0 is `mismatch`.
+Read the legend, not the row count: `✓` is a re-hashed match, `✗ SHA256 MISMATCH` is real corruption (delete the repo and re-download; `verify` also exits non-zero), `—` marks small non-LFS files that have no upstream hash to check, and `!` `MISSING` simply means never downloaded — entirely normal in a quant repo like this one, where you fetched one variant out of 27 files. The one number that should always be 0 is `mismatch`.
 
 ## Scripting: `cache path`
 

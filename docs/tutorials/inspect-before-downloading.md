@@ -2,9 +2,9 @@
 
 *Read tensor metadata over HTTP Range — no weight data downloaded — and decide whether the model is worth the bandwidth.*
 
-*~1,680 words · about 7 min read*
+*~1,720 words · about 7 min read*
 
-<!-- Last updated: 2026-06-03, hf-fm v0.10.4 -->
+<!-- Last updated: 2026-06-11, hf-fm v0.10.5 -->
 
 <!--
 STYLE CONVENTIONS for editing this tutorial — keep growth consistent.
