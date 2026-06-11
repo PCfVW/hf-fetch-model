@@ -47,6 +47,7 @@ A living list of the questions we and our early users have actually run into. If
   - [How do I pass a HuggingFace token? Why does a gated model fail?](#how-do-i-pass-a-huggingface-token-why-does-a-gated-model-fail)
 - [Discovery — finding what to inspect or download](#discovery--finding-what-to-inspect-or-download)
   - [A repo has many `.safetensors` files — how do I pick one to inspect?](#a-repo-has-many-safetensors-files--how-do-i-pick-one-to-inspect)
+  - [A repo has many `.safetensors` files — can I pick one interactively?](#a-repo-has-many-safetensors-files--can-i-pick-one-interactively)
   - [How do I see a model's tensor names without downloading it?](#how-do-i-see-a-models-tensor-names-without-downloading-it)
   - [How do I compare two HuggingFace models structurally?](#how-do-i-compare-two-huggingface-models-structurally)
   - [How do I know if a model fits on my GPU?](#how-do-i-know-if-a-model-fits-on-my-gpu)
@@ -152,7 +153,25 @@ hf-fm inspect Qwen/Qwen2.5-Coder-7B-Instruct --list
 hf-fm inspect Qwen/Qwen2.5-Coder-7B-Instruct 2 --tree
 ```
 
-Indices are stable for as long as the repository does not change remotely — for scripted reproducibility, pass the `--revision <sha>` that `--list` prints in its header to both commands.
+Indices are stable for as long as the repository does not change remotely — for scripted reproducibility, pass the `--revision <sha>` that `--list` prints in its header to both commands. Since v0.10.5, the listing covers every tensor format `inspect` can read (`.safetensors` / `.gguf` / `.npz` / `.pth`), so a GGUF-only repo lists and index-resolves the same way. Prefer one command over two? The next question covers the interactive `--pick` flag, which shares the same numbered universe.
+
+### A repo has many `.safetensors` files — can I pick one interactively?
+
+Yes — `--pick` (since v0.10.5) collapses the two-step `--list` → `inspect <repo> <n>` workflow into one command:
+
+```
+hf-fm inspect little-lake-studios/demoncore-flux demonCORE --pick --dtypes
+# Multiple tensor files match "demonCORE" in little-lake-studios/demoncore-flux:
+#   1  transformer/demonCORENSFW_fluxV11.safetensors     15.40 GiB
+#   2  transformer/demonCORESFWNSFW_fluxV12.safetensors  15.40 GiB
+#   3  transformer/demonCORESFWNSFW_fluxV13.safetensors  15.40 GiB
+# Pick [1..3]: 3
+# Resolving to transformer/demonCORESFWNSFW_fluxV13.safetensors
+```
+
+Under `--pick`, the positional argument is a **case-insensitive substring** filter, never a numeric index: when exactly one file matches, hf-fm skips the prompt and resolves directly (printing `Resolving to <name>` on stderr); with no positional at all, the picker offers every supported tensor file. It composes with every rendering flag (`--tree`, `--dtypes`, `--filter`, `--limit`, `--check-gpu`, `--json`) — the table and prompt go to **stderr**, so `--pick --json > out.json` still writes clean JSON to the file. Pressing Enter on an empty line (or Ctrl-D / Ctrl-Z) cancels with a non-zero exit code.
+
+`--pick` requires an interactive terminal (stdin and stderr attached). In scripts and CI, use `--list` + the numeric index instead — the two workflows coexist and share the same alphabetically-sorted file universe, so `#3` means the same file in both.
 
 ### How do I see a model's tensor names without downloading it?
 

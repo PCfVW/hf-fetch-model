@@ -201,6 +201,18 @@ hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --json
 # Inspect all safetensors in a repo (uses shard index fast path when available)
 hf-fm inspect google/gemma-2-2b-it
 
+# List the repo's tensor files (.safetensors / .gguf / .npz / .pth) — no headers read
+hf-fm inspect google/gemma-2-2b-it --list
+
+# Inspect file #2 from the --list numbering (1-based, alphabetical)
+hf-fm inspect google/gemma-2-2b-it 2
+
+# Pick the file interactively (numbered prompt on stderr; v0.10.5+)
+hf-fm inspect google/gemma-2-2b-it --pick
+
+# Narrow the picker by case-insensitive substring first; a unique match skips the prompt
+hf-fm inspect little-lake-studios/demoncore-flux fluxV13 --pick --dtypes
+
 # Suppress metadata line
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --no-metadata
 
@@ -526,7 +538,9 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--filter` | Show only tensors whose name contains this substring | — |
 | `--json` | Output the full header as JSON instead of a human-readable table | off |
 | `--limit` | Show only the first N tensors (applied after `--filter`). JSON output gains a `truncated` field when the cap is reached. | — |
+| `--list` | List the repo's supported tensor files (`.safetensors` / `.gguf` / `.npz` / `.pth`) as a numbered table (filename + size) and exit — no headers read. The `#` column doubles as the `FILENAME` argument on a follow-up run (`hf-fm inspect <repo> 3`); indices are alphabetical and stable while the repo does not change remotely (pin `--revision <sha>` on both sides to lock the view). Conflicts with `FILENAME`, the rendering flags, and `--pick`. | off |
 | `--no-metadata` | Suppress the `Metadata:` line in human-readable output | off |
+| `--pick` | Pick the file to inspect interactively from a numbered list (v0.10.5+). With no `FILENAME`, offers every supported tensor file; with a `FILENAME`, treats it as a **case-insensitive substring** filter — a unique match auto-resolves (with a `Resolving to <name>` note on stderr), several matches prompt `Pick [1..N]:` on stderr. Under `--pick` the positional is never a numeric index. Requires an interactive terminal (stdin + stderr); the prompt goes to stderr, so `--json` stdout can be redirected. Empty input cancels with a non-zero exit. Composes with every rendering flag; conflicts with `--list`. | off |
 | `--tree` | Show a hierarchical tree view grouped by dotted namespace prefix; numeric sibling groups with identical sub-structure collapse to `[0..N]`. Composes with `--filter` and `--json`. Conflicts with `--dtypes` and `--limit`. | off |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |
