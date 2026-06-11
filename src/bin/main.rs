@@ -382,6 +382,8 @@ See also: hf-fm list-families, hf-fm discover")]
         hf-fm inspect <repo>                                    # inspect every .safetensors in the repo\n  \
         hf-fm inspect <repo> --list                             # list tensor files (no headers read)\n  \
         hf-fm inspect <repo> 3                                  # inspect file #3 from --list\n  \
+        hf-fm inspect <repo> --pick                             # pick the file interactively\n  \
+        hf-fm inspect <repo> fluxV13 --pick --dtypes            # substring narrows, then pick\n  \
         hf-fm inspect <repo> model.safetensors --tree           # hierarchical view of one file\n  \
         hf-fm inspect <repo> --check-gpu                        # GPU-fit verdict for the whole repo\n  \
         hf-fm inspect <repo> model.gguf --cached                # inspect a cached GGUF file (v0.10.2+)\n\n\
@@ -417,6 +419,21 @@ See also: hf-fm list-families, hf-fm discover")]
         /// alphabetical, so shard ordering is natural. No headers are read.
         #[arg(long, conflicts_with_all = ["filename", "no_metadata", "json", "filter", "dtypes", "limit", "tree"])]
         list: bool,
+        /// Pick the file to inspect interactively from a numbered list.
+        ///
+        /// With no `FILENAME`, offers every supported tensor file in the repo
+        /// (`.safetensors` / `.gguf` / `.npz` / `.pth`). With a `FILENAME`,
+        /// treats it as a case-insensitive substring filter: a unique match
+        /// auto-resolves (with a `Resolving to <name>` note on stderr),
+        /// several matches prompt for a numbered choice. Under `--pick` the
+        /// `FILENAME` argument is never a numeric index. Requires an
+        /// interactive terminal (stdin + stderr); non-interactive contexts
+        /// should use `--list` + `hf-fm inspect <repo> <n>` instead. The
+        /// prompt goes to stderr, so `--json` stdout can still be redirected.
+        /// Composes with every rendering flag (`--tree`, `--dtypes`,
+        /// `--filter`, `--limit`, `--check-gpu`, `--json`).
+        #[arg(long, conflicts_with = "list")]
+        pick: bool,
         /// Suppress the `Metadata:` line in human-readable output.
         #[arg(long)]
         no_metadata: bool,
@@ -878,6 +895,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             token,
             cached,
             list,
+            pick,
             no_metadata,
             json,
             filter,
@@ -893,6 +911,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             token.as_deref(),
             cached,
             list,
+            pick,
             no_metadata,
             json,
             filter.as_deref(),
@@ -4390,6 +4409,7 @@ fn run_inspect(
     token: Option<&str>,
     cached: bool,
     list: bool,
+    pick: bool,
     no_metadata: bool,
     json: bool,
     filter: Option<&str>,
@@ -4401,6 +4421,25 @@ fn run_inspect(
 ) -> Result<(), FetchError> {
     if list {
         return run_inspect_list(repo_id, revision, token, cached);
+    }
+    if pick {
+        let picked = pick_inspect_file(repo_id, filename, revision, token, cached)?;
+        // BORROW: explicit .as_str() for String → &str argument
+        return run_inspect_single(
+            repo_id,
+            picked.as_str(),
+            revision,
+            token,
+            cached,
+            no_metadata,
+            json,
+            filter,
+            dtypes,
+            limit,
+            tree,
+            check_gpu,
+            context,
+        );
     }
     match filename {
         Some(f) => {
@@ -4530,6 +4569,151 @@ fn gather_tensor_listing(
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok((entries, commit_sha))
+}
+
+/// Resolves the `--pick` file choice for `inspect`.
+///
+/// Narrows the repo's tensor-file listing by an optional case-insensitive
+/// substring (`needle`): a unique match auto-resolves with a transparency
+/// note on stderr; several matches print a numbered table and prompt on
+/// stderr, reading the selection from stdin. The prompt channel is stderr
+/// throughout, so `--json` output on stdout survives redirection.
+fn pick_inspect_file(
+    repo_id: &str,
+    needle: Option<&str>,
+    revision: Option<&str>,
+    token: Option<&str>,
+    cached: bool,
+) -> Result<String, FetchError> {
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return Err(FetchError::InvalidArgument(
+            "--pick requires an interactive terminal (stdin + stderr attached): \
+             run `hf-fm inspect <repo> --list`, then `hf-fm inspect <repo> <n>`"
+                .to_owned(),
+        ));
+    }
+
+    let (entries, commit_sha) = gather_tensor_listing(repo_id, revision, token, cached)?;
+    let candidates = narrow_pick_candidates(&entries, needle);
+
+    // Same transparency suffix as the numeric-index path: show which commit
+    // the listing was resolved against when known.
+    let rev_note = match &commit_sha {
+        Some(sha) => format!(" (repo rev: {})", short_sha(sha)),
+        None => String::new(),
+    };
+
+    match candidates.as_slice() {
+        [] => Err(FetchError::InvalidArgument(match needle {
+            Some(n) => format!(
+                "no tensor files match {n:?} in {repo_id} \
+                 (run `hf-fm inspect {repo_id} --list` to see all)"
+            ),
+            None => format!(
+                "no supported tensor files (.safetensors / .gguf / .npz / .pth) \
+                 in repository {repo_id}"
+            ),
+        })),
+        [(filename, _size)] => {
+            eprintln!("Resolving to {filename}{rev_note}");
+            // BORROW: explicit .clone() for owned String result
+            Ok((*filename).clone())
+        }
+        // EXPLICIT: two or more candidates — hand off to the prompt loop
+        _ => prompt_pick_selection(repo_id, needle, &candidates, &rev_note),
+    }
+}
+
+/// Prints the numbered candidate table on stderr and loops the `Pick` prompt
+/// until a valid selection, returning the chosen filename.
+///
+/// Empty input / EOF cancels with a non-zero exit (`cancelled — no file
+/// picked`); unparseable or out-of-range input re-prompts without crashing.
+fn prompt_pick_selection(
+    repo_id: &str,
+    needle: Option<&str>,
+    candidates: &[&(String, u64)],
+    rev_note: &str,
+) -> Result<String, FetchError> {
+    match needle {
+        Some(n) => eprintln!("Multiple tensor files match {n:?} in {repo_id}:"),
+        None => eprintln!("Tensor files in {repo_id}:"),
+    }
+
+    // Same dynamic column-width idiom as `run_inspect_list`, rendered on
+    // stderr (the prompt channel) instead of stdout.
+    let count = candidates.len();
+    let index_width = count.to_string().len();
+    let file_width = candidates.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
+    let size_strings: Vec<String> = candidates.iter().map(|(_, s)| format_size(*s)).collect();
+    let size_width = size_strings.iter().map(String::len).max().unwrap_or(0);
+
+    for (i, ((filename, _), size_str)) in candidates.iter().zip(size_strings.iter()).enumerate() {
+        let n = i + 1;
+        eprintln!("  {n:>index_width$}  {filename:<file_width$}  {size_str:>size_width$}");
+    }
+
+    // EXPLICIT: imperative retry loop — re-reads stdin until a valid pick
+    // or a cancellation; an iterator idiom cannot express the re-prompt.
+    loop {
+        eprint!("Pick [1..{count}]: ");
+        let mut input = String::new();
+        let bytes_read = std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| FetchError::Io {
+                path: PathBuf::from("<stdin>"),
+                source: e,
+            })?;
+        let trimmed = input.trim();
+        if bytes_read == 0 || trimmed.is_empty() {
+            // Ctrl-D / Ctrl-Z+Enter / bare Enter: bail rather than loop.
+            return Err(FetchError::InvalidArgument(
+                "cancelled — no file picked".to_owned(),
+            ));
+        }
+        if let Some(n) = parse_pick_input(trimmed, count) {
+            // INDEX: n is bounded by 1..=count via parse_pick_input
+            #[allow(clippy::indexing_slicing)]
+            let (filename, _size) = candidates[n - 1];
+            eprintln!("Resolving to {filename}{rev_note}");
+            // BORROW: explicit .clone() for owned String result
+            return Ok(filename.clone());
+        }
+        eprintln!(
+            "invalid choice {trimmed:?} — enter a number between 1 and {count}, \
+             or press Enter to cancel"
+        );
+    }
+}
+
+/// Narrows a tensor-file listing to the entries whose filename contains
+/// `needle` case-insensitively; `None` keeps the full listing.
+fn narrow_pick_candidates<'a>(
+    entries: &'a [(String, u64)],
+    needle: Option<&str>,
+) -> Vec<&'a (String, u64)> {
+    match needle {
+        None => entries.iter().collect(),
+        Some(raw) => {
+            let needle_lc = raw.to_lowercase();
+            entries
+                .iter()
+                .filter(|(filename, _)| filename.to_lowercase().contains(&needle_lc))
+                .collect()
+        }
+    }
+}
+
+/// Parses one line of picker input into a 1-based selection index.
+///
+/// Returns `None` for anything that should re-prompt: non-integer text,
+/// zero, or an index above `count`. Empty / EOF input is the caller's
+/// cancellation path, not this function's concern.
+fn parse_pick_input(line: &str, count: usize) -> Option<usize> {
+    line.trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=count).contains(n))
 }
 
 /// Prints the numbered list of supported tensor files in `repo_id`.
@@ -7194,6 +7378,78 @@ fn format_downloads(n: u64) -> String {
 )]
 mod tests {
     use super::*;
+
+    // ---------- narrow_pick_candidates / parse_pick_input ----------
+
+    fn sample_listing() -> Vec<(String, u64)> {
+        vec![
+            ("model-00001-of-00002.safetensors".to_owned(), 100),
+            ("model-00002-of-00002.safetensors".to_owned(), 200),
+            ("params.npz".to_owned(), 50),
+            (
+                "transformer/demonCORESFWNSFW_fluxV13.safetensors".to_owned(),
+                300,
+            ),
+        ]
+    }
+
+    #[test]
+    fn narrow_pick_candidates_no_needle_keeps_all() {
+        let entries = sample_listing();
+        assert_eq!(narrow_pick_candidates(&entries, None).len(), entries.len());
+    }
+
+    #[test]
+    fn narrow_pick_candidates_substring_is_case_insensitive() {
+        let entries = sample_listing();
+        let hits = narrow_pick_candidates(&entries, Some("demoncore"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].0,
+            "transformer/demonCORESFWNSFW_fluxV13.safetensors"
+        );
+    }
+
+    #[test]
+    fn narrow_pick_candidates_matches_path_prefix_too() {
+        // The substring contract covers the full repo-relative name,
+        // directories included.
+        let entries = sample_listing();
+        let hits = narrow_pick_candidates(&entries, Some("TRANSFORMER/"));
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn narrow_pick_candidates_multiple_matches_preserve_order() {
+        let entries = sample_listing();
+        let hits = narrow_pick_candidates(&entries, Some("model-0000"));
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].0, "model-00001-of-00002.safetensors");
+        assert_eq!(hits[1].0, "model-00002-of-00002.safetensors");
+    }
+
+    #[test]
+    fn narrow_pick_candidates_no_match_is_empty() {
+        let entries = sample_listing();
+        assert!(narrow_pick_candidates(&entries, Some("gguf")).is_empty());
+    }
+
+    #[test]
+    fn parse_pick_input_accepts_in_range_with_whitespace() {
+        assert_eq!(parse_pick_input("2", 3), Some(2));
+        assert_eq!(parse_pick_input("  3 \n", 3), Some(3));
+        assert_eq!(parse_pick_input("1", 1), Some(1));
+    }
+
+    #[test]
+    fn parse_pick_input_rejects_zero_out_of_range_and_garbage() {
+        assert_eq!(parse_pick_input("0", 3), None);
+        assert_eq!(parse_pick_input("4", 3), None);
+        assert_eq!(parse_pick_input("foo", 3), None);
+        assert_eq!(parse_pick_input("-1", 3), None);
+        assert_eq!(parse_pick_input("2.5", 3), None);
+        assert_eq!(parse_pick_input("", 3), None);
+    }
 
     // ---------- multi_file_source_label ----------
 
