@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hf-fm status <repo>` now attributes partial downloads per-file instead of repo-wide** — during any active (or interrupted) download, every file absent from the snapshot directory printed `PARTIAL` with the *same* downloaded size: the size of the first `.chunked.part` found in `blobs/`, regardless of which file it belonged to (a 4.1 KiB `data_summary_card.md` reported "2.49 GiB downloaded"). Worse, the repo-level short-circuit sat before the `Excluded` / `Missing` arms, so preset-excluded and genuinely-missing files were swallowed into `PARTIAL` too, inflating `partial_count()`. [`cache::repo_status`](src/cache.rs) now keys the lookup per-file: an absent file is `Partial` only when *its own* `blobs/<sha256>.chunked.part` exists (the chunked download path names temp blobs by the file's etag, which for LFS files **is** the content `SHA256` — the mapping was already on disk), with `local_size` read from that blob; files with no chunk of their own fall through to `Excluded` / `Missing` as designed. Non-LFS files (no `sha256` in the API listing) report `Missing` until finalized — they never take the chunked path's named temp blob anyway. The repo-level `find_partial_blob_size` helper stays for the `du` / GC paths (`CachedModelSummary.has_partial`, `repo_has_partial`), which are repo-scoped by design; the now-unused `has_partial_blob` wrapper is removed. Reporting-only fix (transfers were always finalized correctly). Three new unit tests cover own-chunk attribution, the another-file's-chunk regression, and the no-`sha256` case. Surfaced by the 2026-06-10 Phi-3.5-mini dogfooding session ([report](docs/dogfooding-feedbacks/hf-fm-dogfooding-status-partial-misattribution.md)).
+
 ## [0.10.4] — KV-cache & hybrid-Mamba GPU budgeting
 
 ### Added

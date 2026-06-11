@@ -325,8 +325,8 @@ pub enum FileStatus {
         local_size: u64,
     },
     /// File exists but is smaller than expected (interrupted download),
-    /// or a `.chunked.part` temp file was found in the blobs directory
-    /// (repo-level heuristic — may not correspond to this specific file).
+    /// or the file's own `blobs/<sha256>.chunked.part` temp blob exists
+    /// (keyed on the file's LFS `sha256` — per-file attribution).
     Partial {
         /// Local file size in bytes.
         local_size: u64,
@@ -423,12 +423,13 @@ impl RepoStatus {
 ///
 /// # Notes
 ///
-/// Partial download detection is a repo-level heuristic: if any
-/// `.chunked.part` file exists in the repo's `blobs/` directory, all
-/// missing files are reported as [`FileStatus::Partial`] with the partial
-/// file's size. This may overcount partials when multiple files are
-/// missing but only one has an incomplete blob. Exact blob-to-file
-/// mapping would require LFS metadata.
+/// Partial-download detection is per-file: a file absent from the snapshot
+/// directory is reported [`FileStatus::Partial`] only when its own
+/// chunked-download temp blob (`blobs/<sha256>.chunked.part`, keyed on the
+/// file's LFS `sha256`) exists on disk, and `local_size` is that temp
+/// blob's current byte count. Non-LFS files carry no `sha256`, so an
+/// interrupted non-chunked download reports [`FileStatus::Missing`] until
+/// it finalizes.
 ///
 /// # Errors
 ///
@@ -460,11 +461,6 @@ pub async fn repo_status(
         .as_deref()
         .map(|hash| crate::cache_layout::snapshot_dir(&repo_dir, hash));
 
-    // Pre-check for .chunked.part files in blobs directory (avoids re-scanning
-    // the blobs directory for every missing file in the loop below).
-    let blobs_dir = crate::cache_layout::blobs_dir(&repo_dir);
-    let has_any_partial = has_partial_blob(&blobs_dir);
-
     // Compile preset globs once, outside the per-file loop. `compile_glob_patterns`
     // already returns `Ok(None)` for empty slices, so an empty `Some(&[])`
     // collapses to the "no filter" case below.
@@ -487,35 +483,39 @@ pub async fn repo_status(
             // BORROW: explicit .as_str() for path construction
             .map(|dir| dir.join(remote.filename.as_str()));
 
-        let status = if let Some(ref path) = local_path {
-            if path.exists() {
-                let local_size = std::fs::metadata(path).map_or(0, |m| m.len());
+        // Size of the snapshot copy when it exists; `None` when the file is
+        // absent (or no snapshot directory is known for this revision).
+        let snapshot_size = local_path.as_ref().and_then(|path| {
+            path.exists()
+                .then(|| std::fs::metadata(path).map_or(0, |m| m.len()))
+        });
 
-                if expected_size > 0 && local_size < expected_size {
-                    FileStatus::Partial {
-                        local_size,
-                        expected_size,
-                    }
-                } else {
-                    FileStatus::Complete { local_size }
-                }
-            } else if has_any_partial {
-                // Blobs directory has .chunked.part temp files
-                let part_size = find_partial_blob_size(&blobs_dir);
+        let status = if let Some(local_size) = snapshot_size {
+            if expected_size > 0 && local_size < expected_size {
                 FileStatus::Partial {
-                    local_size: part_size,
+                    local_size,
                     expected_size,
                 }
-            } else if preset_globset
-                .as_ref()
-                // BORROW: explicit .as_str() — globset matches against &str
-                .is_some_and(|gs| !gs.is_match(remote.filename.as_str()))
-            {
-                // File is absent AND the active preset deliberately excludes it.
-                FileStatus::Excluded { expected_size }
             } else {
-                FileStatus::Missing { expected_size }
+                FileStatus::Complete { local_size }
             }
+        } else if let Some(part_size) =
+            // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+            partial_chunk_size(&repo_dir, remote.sha256.as_deref())
+        {
+            // This file's own chunked-download temp blob is on disk: attribute
+            // exactly its byte count to this file (keyed on the LFS sha256).
+            FileStatus::Partial {
+                local_size: part_size,
+                expected_size,
+            }
+        } else if preset_globset
+            .as_ref()
+            // BORROW: explicit .as_str() — globset matches against &str
+            .is_some_and(|gs| !gs.is_match(remote.filename.as_str()))
+        {
+            // File is absent AND the active preset deliberately excludes it.
+            FileStatus::Excluded { expected_size }
         } else {
             FileStatus::Missing { expected_size }
         };
@@ -706,13 +706,21 @@ pub fn read_ref(repo_dir: &Path, revision: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Checks whether any `.chunked.part` temp file exists in the blobs directory.
+/// Returns the on-disk size of a file's own chunked-download temp blob.
 ///
-/// This is a repo-level heuristic: it cannot map a specific filename to its
-/// blob without full LFS metadata, so it checks for any `.chunked.part` file.
-/// A `true` result means *some* file in the repo has a partial download.
-fn has_partial_blob(blobs_dir: &Path) -> bool {
-    find_partial_blob_size(blobs_dir) > 0
+/// Looks up `{repo_dir}/blobs/<sha256>.chunked.part` — the chunked download
+/// path names its temp blob after the file's etag, which for LFS files is
+/// the content's `SHA256` (see [`crate::cache_layout::temp_blob_path`]) —
+/// so a specific file's partial is addressable without scanning the blobs
+/// directory. Returns `None` when the file has no known `sha256` (non-LFS
+/// file) or no temp blob exists on disk.
+fn partial_chunk_size(repo_dir: &Path, sha256: Option<&str>) -> Option<u64> {
+    let sha = sha256?;
+    let part_path = crate::cache_layout::temp_blob_path(repo_dir, sha);
+    std::fs::metadata(part_path)
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .map(|m| m.len())
 }
 
 /// Returns the size of the first `.chunked.part` file found in the blobs directory.
@@ -1253,5 +1261,49 @@ mod tests {
         assert!(result.is_none(), "expected None for absent sidecar");
 
         let _ = std::fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn partial_chunk_size_returns_own_chunk_size() {
+        let tmp =
+            std::env::temp_dir().join(format!("hf-fm-partial-own-chunk-{}", std::process::id()));
+        let blobs = tmp.join("blobs");
+        std::fs::create_dir_all(&blobs).expect("create blobs dir");
+        let sha = "41246eed00000000000000000000000000000000000000000000000000000344";
+        std::fs::write(blobs.join(format!("{sha}.chunked.part")), vec![0u8; 1234])
+            .expect("write partial blob");
+
+        assert_eq!(partial_chunk_size(&tmp, Some(sha)), Some(1234));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn partial_chunk_size_ignores_other_files_chunks() {
+        // The regression this guards: a chunk belonging to ANOTHER file must
+        // not be attributed to this one (the pre-v0.10.5 repo-level fallback
+        // assigned the first chunk found to every absent file).
+        let tmp =
+            std::env::temp_dir().join(format!("hf-fm-partial-other-chunk-{}", std::process::id()));
+        let blobs = tmp.join("blobs");
+        std::fs::create_dir_all(&blobs).expect("create blobs dir");
+        let other_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        std::fs::write(
+            blobs.join(format!("{other_sha}.chunked.part")),
+            vec![0u8; 999],
+        )
+        .expect("write partial blob");
+
+        let queried_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert_eq!(partial_chunk_size(&tmp, Some(queried_sha)), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn partial_chunk_size_none_without_sha() {
+        // Non-LFS files carry no sha256; the lookup must not guess.
+        let tmp = std::env::temp_dir().join(format!("hf-fm-partial-no-sha-{}", std::process::id()));
+        assert_eq!(partial_chunk_size(&tmp, None), None);
     }
 }
