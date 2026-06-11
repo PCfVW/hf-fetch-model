@@ -268,6 +268,7 @@ Filter, progress, auth, and more via the builder — see [Configuration](docs/co
 | [CLI Reference](docs/cli-reference.md) | All subcommands, flags, and output examples |
 | [FAQ](docs/FAQ.md) | Common questions — installation, auth, cache location, discovery, errors |
 | [Inspect tutorial](docs/tutorials/inspect-before-downloading.md) | Walkthrough: read tensor metadata, size, and architecture without downloading weights |
+| [Cache tutorial](docs/tutorials/clean-up-before-your-disk-fills.md) | Walkthrough: see what the cache holds, then reclaim disk space safely (`du` → `status` → `cache gc`) |
 | [Search](docs/search.md) | Comma filtering, `--exact`, model card metadata |
 | [Configuration](docs/configuration.md) | Builder API, presets, progress callbacks |
 | [Architecture](docs/architecture.md) | How hf-fetch-model relates to `hf-hub` and `candle-mi` |

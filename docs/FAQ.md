@@ -280,7 +280,7 @@ Yes, fully compatible. hf-fm writes to `~/.cache/huggingface/hub/` by default (o
 
 ### My disk is getting full — which models are taking the most space?
 
-Run `hf-fm du` for a size-sorted summary. Each row has a `#` index you can pass back to the command to see that repo's files one level deeper (`hf-fm du 3`), and `du --age` adds a "last modified" column that is handy for spotting models you downloaded once months ago and never touched again. When you have identified what to remove, use `hf-fm cache delete <repo-id>` (repo ID or the numeric index from `du`); it prompts for confirmation unless you pass `--yes`.
+Run `hf-fm du` for a size-sorted summary. Each row has a `#` index you can pass back to the command to see that repo's files one level deeper (`hf-fm du 3`), and `du --age` adds a "last modified" column that is handy for spotting models you downloaded once months ago and never touched again. When you have identified what to remove, use `hf-fm cache delete <repo-id>` (repo ID or the numeric index from `du`); it prompts for confirmation unless you pass `--yes`. For bulk reclaiming — age-based or size-budget eviction with a `--dry-run` preview — the [Clean up before your disk fills](tutorials/clean-up-before-your-disk-fills.md) tutorial walks the whole `du` → `status` → `cache gc` workflow on a real 592 GiB cache.
 
 ### What is a `.chunked.part` file, and is it safe to delete?
 

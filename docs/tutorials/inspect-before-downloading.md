@@ -328,3 +328,5 @@ Total bytes downloaded to learn all of that: less than a megabyte. Every command
 The companion path — **inspect after you download** — already exists today via `--cached` on `.gguf` files (since v0.10.2) and `.npz` / `.pth` files plus quantization detection on cached safetensors (since v0.10.3).
 
 For details on every flag in `inspect`, see the [CLI reference](../cli-reference.md). For common follow-up questions, the [FAQ](../FAQ.md) covers gating, cache layout, and the quirks of partial downloads.
+
+And once the models you *did* download start crowding your disk, the companion tutorial [Clean up before your disk fills](clean-up-before-your-disk-fills.md) covers the other end of the lifecycle: `du`, `status`, and the `cache` commands.
