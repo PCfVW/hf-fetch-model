@@ -371,16 +371,16 @@ See also: hf-fm list-families, hf-fm discover")]
         #[arg(long, conflicts_with = "repo_id")]
         tree: bool,
     },
-    /// Inspect tensor file headers (`.safetensors` remote/cached; `.gguf` cached).
+    /// Inspect tensor file headers (`.safetensors` remote/cached; `.gguf` / `.npz` / `.pth` cached).
     ///
     /// Reads tensor metadata without downloading full weight data. For
     /// `.safetensors`, checks the local cache first and falls back to HTTP
-    /// Range requests. For `.gguf`, only cached inspect is supported in
-    /// v0.10.x (remote GGUF inspect is planned for v0.11); pass `--cached`
-    /// after downloading the file.
+    /// Range requests. For `.gguf` / `.npz` / `.pth`, only cached inspect
+    /// is supported in v0.10.x (remote inspect for those formats is planned
+    /// for v0.11); pass `--cached` after downloading the file.
     #[command(after_help = "Examples:\n  \
         hf-fm inspect <repo>                                    # inspect every .safetensors in the repo\n  \
-        hf-fm inspect <repo> --list                             # list safetensors files (no headers read)\n  \
+        hf-fm inspect <repo> --list                             # list tensor files (no headers read)\n  \
         hf-fm inspect <repo> 3                                  # inspect file #3 from --list\n  \
         hf-fm inspect <repo> model.safetensors --tree           # hierarchical view of one file\n  \
         hf-fm inspect <repo> --check-gpu                        # GPU-fit verdict for the whole repo\n  \
@@ -397,7 +397,8 @@ See also: hf-fm list-families, hf-fm discover")]
     Inspect {
         /// The repository identifier (e.g., `"google/gemma-2-2b-it"`).
         repo_id: String,
-        /// Specific `.safetensors` or `.gguf` file, numeric index from `--list`, or omit for all.
+        /// Specific tensor file (`.safetensors` / `.gguf` / `.npz` / `.pth`),
+        /// numeric index from `--list`, or omit for all.
         filename: Option<String>,
         /// Git revision (branch, tag, or commit SHA).
         #[arg(long)]
@@ -408,11 +409,12 @@ See also: hf-fm list-families, hf-fm discover")]
         /// Cache-only mode: fail if the file is not cached locally.
         #[arg(long)]
         cached: bool,
-        /// List `.safetensors` files in the repo (filename + size) and exit.
+        /// List supported tensor files in the repo (filename + size) and exit.
         ///
-        /// Prints a numbered table; the `#` column can be used as the `filename`
-        /// argument on a follow-up run (e.g. `hf-fm inspect <repo> 3`). Indices
-        /// are alphabetical, so shard ordering is natural. No headers are read.
+        /// Covers `.safetensors` / `.gguf` / `.npz` / `.pth`. Prints a numbered
+        /// table; the `#` column can be used as the `filename` argument on a
+        /// follow-up run (e.g. `hf-fm inspect <repo> 3`). Indices are
+        /// alphabetical, so shard ordering is natural. No headers are read.
         #[arg(long, conflicts_with_all = ["filename", "no_metadata", "json", "filter", "dtypes", "limit", "tree"])]
         list: bool,
         /// Suppress the `Metadata:` line in human-readable output.
@@ -4429,8 +4431,9 @@ fn run_inspect(
 /// Resolves an inspect filename argument to a concrete filename.
 ///
 /// If `arg` parses as a positive `usize`, treats it as a 1-based index into
-/// the repository's alphabetically-sorted list of `.safetensors` files and
-/// returns the corresponding filename. Otherwise returns `arg` unchanged.
+/// the repository's alphabetically-sorted list of supported tensor files
+/// (`.safetensors` / `.gguf` / `.npz` / `.pth`, same universe as `--list`)
+/// and returns the corresponding filename. Otherwise returns `arg` unchanged.
 ///
 /// When an index is resolved, a one-line `Resolving index N → <name>` note
 /// is printed to stderr so the user can confirm the pick before the inspect
@@ -4448,18 +4451,19 @@ fn resolve_inspect_filename_arg(
         return Ok(arg.to_owned());
     };
 
-    let (entries, commit_sha) = gather_safetensors_listing(repo_id, revision, token, cached)?;
+    let (entries, commit_sha) = gather_tensor_listing(repo_id, revision, token, cached)?;
 
     if entries.is_empty() {
         return Err(FetchError::InvalidArgument(format!(
-            "index {n} cannot be resolved: no .safetensors files in repository {repo_id} \
+            "index {n} cannot be resolved: no supported tensor files \
+             (.safetensors / .gguf / .npz / .pth) in repository {repo_id} \
              (run `hf-fm inspect {repo_id} --list` to confirm)"
         )));
     }
 
     if n == 0 || n > entries.len() {
         return Err(FetchError::InvalidArgument(format!(
-            "index {n} is out of range (repository has {count} .safetensors files — \
+            "index {n} is out of range (repository has {count} tensor files — \
              use 1..{count}; run `hf-fm inspect {repo_id} --list` to see them)",
             count = entries.len()
         )));
@@ -4486,18 +4490,19 @@ fn short_sha(sha: &str) -> String {
     sha.get(..12).map_or_else(|| sha.to_owned(), str::to_owned)
 }
 
-/// Fetches the `(filename, size_bytes)` list of safetensors files for a repo,
-/// from either the local cache or the `HuggingFace` API, sorted alphabetically.
+/// Fetches the `(filename, size_bytes)` list of supported tensor files
+/// (`.safetensors` / `.gguf` / `.npz` / `.pth`) for a repo, from either the
+/// local cache or the `HuggingFace` API, sorted alphabetically.
 ///
 /// Also returns the commit SHA of the resolved revision when available.
-fn gather_safetensors_listing(
+fn gather_tensor_listing(
     repo_id: &str,
     revision: Option<&str>,
     token: Option<&str>,
     cached: bool,
-) -> Result<inspect::SafetensorsListing, FetchError> {
+) -> Result<inspect::TensorFileListing, FetchError> {
     if cached {
-        return inspect::list_cached_safetensors(repo_id, revision);
+        return inspect::list_cached_tensor_files(repo_id, revision);
     }
 
     // BORROW: explicit .to_owned() for Option<&str> → Option<String>
@@ -4519,14 +4524,15 @@ fn gather_safetensors_listing(
 
     let mut entries: Vec<(String, u64)> = files
         .into_iter()
-        .filter(|f| f.filename.ends_with(".safetensors"))
+        // BORROW: explicit .as_str() — predicate takes &str
+        .filter(|f| inspect::is_supported_tensor_file(f.filename.as_str()))
         .map(|f| (f.filename, f.size.unwrap_or(0)))
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok((entries, commit_sha))
 }
 
-/// Prints the numbered list of `.safetensors` files in `repo_id`.
+/// Prints the numbered list of supported tensor files in `repo_id`.
 ///
 /// Used for discovery: tells the user what filenames / indices they can pass
 /// to a follow-up `hf-fm inspect <repo> <n>` run. Does not read file headers.
@@ -4536,7 +4542,7 @@ fn run_inspect_list(
     token: Option<&str>,
     cached: bool,
 ) -> Result<(), FetchError> {
-    let (entries, commit_sha) = gather_safetensors_listing(repo_id, revision, token, cached)?;
+    let (entries, commit_sha) = gather_tensor_listing(repo_id, revision, token, cached)?;
 
     println!("Repo: {repo_id}");
     let rev_label = revision.unwrap_or("main");
@@ -4547,7 +4553,9 @@ fn run_inspect_list(
     println!();
 
     if entries.is_empty() {
-        println!("No .safetensors files in this repository.");
+        println!(
+            "No supported tensor files (.safetensors / .gguf / .npz / .pth) in this repository."
+        );
         if cached {
             println!();
             println!("Hint: the repo may not be cached locally. Try without --cached.");

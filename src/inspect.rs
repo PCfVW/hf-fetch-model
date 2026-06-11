@@ -1107,14 +1107,45 @@ pub async fn inspect_repo_safetensors(
     Ok(results)
 }
 
-/// A `(filename, size_bytes)` enumeration of safetensors files in a repo,
+/// Tensor-file extensions the `inspect` dispatcher understands.
+///
+/// Single source of truth shared by the cached listing
+/// ([`list_cached_tensor_files`]) and the CLI's remote listing / numeric
+/// index / `--pick` candidate set. Matches the v0.10.3 per-file dispatch in
+/// `hf-fm inspect` (`.safetensors` remote or cached; `.gguf` / `.npz` /
+/// `.pth` cached-only until the v0.11 remote-inspect line).
+pub const SUPPORTED_TENSOR_EXTENSIONS: [&str; 4] = ["safetensors", "gguf", "npz", "pth"];
+
+/// Returns `true` when `filename`'s extension matches one of
+/// [`SUPPORTED_TENSOR_EXTENSIONS`] (case-insensitive).
+#[must_use]
+pub fn is_supported_tensor_file(filename: &str) -> bool {
+    Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            SUPPORTED_TENSOR_EXTENSIONS
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+        })
+}
+
+/// A `(filename, size_bytes)` enumeration of tensor files in a repo,
 /// paired with the commit SHA of the resolved revision (when known).
 ///
-/// The same tuple shape serves both local and remote listings: [`list_cached_safetensors`]
-/// produces it from a cached snapshot; `repo::list_repo_files_with_commit` filtered to
-/// `*.safetensors` produces it from the `HuggingFace` API. Callers that need a uniform
-/// view over "what safetensors can I inspect?" regardless of source use this alias.
-pub type SafetensorsListing = (Vec<(String, u64)>, Option<String>);
+/// The same tuple shape serves both local and remote listings:
+/// [`list_cached_tensor_files`] produces it from a cached snapshot;
+/// `repo::list_repo_files_with_commit` filtered through
+/// [`is_supported_tensor_file`] produces it from the `HuggingFace` API.
+/// Callers that need a uniform view over "what tensor files can I inspect?"
+/// regardless of source use this alias.
+pub type TensorFileListing = (Vec<(String, u64)>, Option<String>);
+
+/// Alias kept for pre-v0.10.5 callers; [`list_cached_safetensors`] returns it.
+///
+/// Same tuple shape as [`TensorFileListing`], restricted by convention to
+/// `.safetensors` entries.
+pub type SafetensorsListing = TensorFileListing;
 
 /// Lists `.safetensors` files in the cached snapshot for `repo_id`@`revision`.
 ///
@@ -1139,6 +1170,45 @@ pub fn list_cached_safetensors(
     repo_id: &str,
     revision: Option<&str>,
 ) -> Result<SafetensorsListing, FetchError> {
+    list_cached_matching_files(repo_id, revision, |name| name.ends_with(".safetensors"))
+}
+
+/// Lists all supported tensor files in the cached snapshot for `repo_id`@`revision`.
+///
+/// Multi-format sibling of [`list_cached_safetensors`]: matches every
+/// extension in [`SUPPORTED_TENSOR_EXTENSIONS`] (case-insensitive) instead
+/// of `.safetensors` only. Returns `(entries, commit_sha)` where `entries`
+/// is a sorted list of `(filename, size_bytes)` tuples, and `commit_sha` is
+/// the snapshot's commit hash (same value stored in `refs/<revision>`).
+/// Returns empty lists when the repo or revision is not cached. Does **not**
+/// parse any headers — it is a cheap name-and-size enumeration intended for
+/// discovery UI (e.g. `inspect --list --cached`, `inspect --pick --cached`).
+///
+/// # Blocking I/O
+///
+/// Performs a synchronous recursive directory walk with a `stat` call per
+/// matching entry. On local SSDs the cost is sub-millisecond; on networked
+/// caches (NFS/CIFS) a large sharded repo can take seconds. Wrap in
+/// [`tokio::task::spawn_blocking`] from async contexts.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Io`] if the snapshot directory cannot be read.
+pub fn list_cached_tensor_files(
+    repo_id: &str,
+    revision: Option<&str>,
+) -> Result<TensorFileListing, FetchError> {
+    list_cached_matching_files(repo_id, revision, is_supported_tensor_file)
+}
+
+/// Shared body of [`list_cached_safetensors`] / [`list_cached_tensor_files`]:
+/// resolves the snapshot directory and walks it with the given filename
+/// predicate.
+fn list_cached_matching_files(
+    repo_id: &str,
+    revision: Option<&str>,
+    matches: fn(&str) -> bool,
+) -> Result<TensorFileListing, FetchError> {
     let rev = revision.unwrap_or("main");
     let cache_dir = cache::hf_cache_dir()?;
     let repo_dir = cache_layout::repo_dir(&cache_dir, repo_id);
@@ -1153,15 +1223,17 @@ pub fn list_cached_safetensors(
     }
 
     let mut results = Vec::new();
-    collect_safetensors_names_sizes(&snapshot_dir, "", &mut results)?;
+    collect_matching_names_sizes(&snapshot_dir, "", matches, &mut results)?;
     results.sort_by(|a, b| a.0.cmp(&b.0));
     Ok((results, Some(commit_hash)))
 }
 
-/// Recursively collects `(filename, size)` pairs for `.safetensors` files.
-fn collect_safetensors_names_sizes(
+/// Recursively collects `(filename, size)` pairs for files whose bare
+/// entry name satisfies `matches` (extension predicates need no prefix).
+fn collect_matching_names_sizes(
     dir: &Path,
     prefix: &str,
+    matches: fn(&str) -> bool,
     results: &mut Vec<(String, u64)>,
 ) -> Result<(), FetchError> {
     let entries = std::fs::read_dir(dir).map_err(|e| FetchError::Io {
@@ -1181,8 +1253,8 @@ fn collect_safetensors_names_sizes(
             } else {
                 format!("{prefix}/{name}")
             };
-            collect_safetensors_names_sizes(&path, &child_prefix, results)?;
-        } else if name.ends_with(".safetensors") {
+            collect_matching_names_sizes(&path, &child_prefix, matches, results)?;
+        } else if matches(&name) {
             let filename = if prefix.is_empty() {
                 name
             } else {
@@ -1738,4 +1810,44 @@ pub fn fetch_model_config_cached(
 
     let config = parse_model_config_json(&content, repo_id)?;
     Ok(Some(config))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic)]
+
+    use super::is_supported_tensor_file;
+
+    #[test]
+    fn is_supported_tensor_file_accepts_all_four_formats() {
+        assert!(is_supported_tensor_file("model.safetensors"));
+        assert!(is_supported_tensor_file("model.gguf"));
+        assert!(is_supported_tensor_file("params.npz"));
+        assert!(is_supported_tensor_file("weights.pth"));
+    }
+
+    #[test]
+    fn is_supported_tensor_file_is_case_insensitive_on_extension() {
+        assert!(is_supported_tensor_file("MODEL.SAFETENSORS"));
+        assert!(is_supported_tensor_file("model.GGUF"));
+    }
+
+    #[test]
+    fn is_supported_tensor_file_handles_nested_paths() {
+        assert!(is_supported_tensor_file(
+            "transformer/demonCORESFWNSFW_fluxV13.safetensors"
+        ));
+    }
+
+    #[test]
+    fn is_supported_tensor_file_rejects_other_extensions() {
+        assert!(!is_supported_tensor_file("config.json"));
+        assert!(!is_supported_tensor_file("model.bin"));
+        assert!(!is_supported_tensor_file("archive.npy"));
+        assert!(!is_supported_tensor_file("README.md"));
+        assert!(!is_supported_tensor_file("no_extension"));
+        // The extension must be the FINAL path segment suffix, not a
+        // substring elsewhere in the name.
+        assert!(!is_supported_tensor_file("model.safetensors.bak"));
+    }
 }
