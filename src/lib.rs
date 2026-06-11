@@ -121,6 +121,15 @@
 //! going through the cache) is planned for v0.11; until then those formats
 //! error early with a "pass --cached after downloading" recovery hint.
 //!
+//! For discovery — "what tensor files does this cached repo hold?" —
+//! [`inspect::list_cached_tensor_files`] (v0.10.5) enumerates
+//! `(filename, size)` pairs across all four formats without parsing any
+//! headers, with [`inspect::is_supported_tensor_file`] /
+//! [`inspect::SUPPORTED_TENSOR_EXTENSIONS`] as the shared extension
+//! predicate. The `.safetensors`-only [`inspect::list_cached_safetensors`]
+//! (v0.9.7) remains for callers that want exactly that subset. These back
+//! the CLI's `inspect --list`, numeric-index, and `--pick` flows.
+//!
 //! ## `HuggingFace` Cache
 //!
 //! Downloaded files are stored in the standard `HuggingFace` cache directory
@@ -131,8 +140,10 @@
 //! v0.10.0 adds library APIs for inspecting, verifying, and pruning the local
 //! cache. [`cache::cache_summary`] enumerates every cached repo with size and
 //! file counts; [`cache::repo_status`] gives a per-file `Complete` / `Partial` /
-//! `Missing` breakdown for one repo; [`cache::verify_cache`] re-checks `SHA256`
-//! digests of cached files against `HuggingFace` LFS metadata; and
+//! `Missing` / `Excluded` breakdown for one repo (since v0.10.5, partials are
+//! attributed per-file via each file's own `blobs/<sha256>.chunked.part` temp
+//! blob rather than a repo-level heuristic); [`cache::verify_cache`] re-checks
+//! `SHA256` digests of cached files against `HuggingFace` LFS metadata; and
 //! [`cache::find_partial_files`] locates `.chunked.part` orphans from
 //! interrupted downloads.
 //!

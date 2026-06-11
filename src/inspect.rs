@@ -1,14 +1,21 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Safetensors header inspection (local and remote).
+//! Tensor-file header inspection (local and remote).
 //!
-//! Reads tensor metadata (names, shapes, dtypes, byte offsets) from
-//! `.safetensors` files without downloading full weight data. Supports
-//! cache-first resolution with HTTP Range request fallback.
+//! Reads tensor metadata (names, shapes, dtypes, byte offsets) without
+//! downloading full weight data. `.safetensors` files resolve cache-first
+//! with HTTP Range request fallback; `.gguf` / `.npz` / `.pth` files are
+//! inspected from the local cache via the `anamnesis` parser crate
+//! ([`inspect_gguf_cached`] / [`inspect_npz_cached`] / [`inspect_pth_cached`],
+//! v0.10.2–v0.10.3 — remote inspect for those three is planned for v0.11).
 //!
 //! The primary types are [`TensorInfo`] (per-tensor metadata),
-//! [`SafetensorsHeaderInfo`] (parsed header), and [`ShardedIndex`]
-//! (shard-to-tensor mapping for sharded models).
+//! [`SafetensorsHeaderInfo`] (the format-agnostic parsed-header shape all
+//! four formats return), and [`ShardedIndex`] (shard-to-tensor mapping for
+//! sharded models). For cheap discovery without header parsing,
+//! [`list_cached_tensor_files`] enumerates a cached repo's tensor files
+//! across all four formats ([`list_cached_safetensors`] is the
+//! `.safetensors`-only subset).
 //!
 //! The module also reads small JSON sidecars from the same cache-first /
 //! HTTP-fallback path: [`AdapterConfig`] (`adapter_config.json`, for `PEFT`
