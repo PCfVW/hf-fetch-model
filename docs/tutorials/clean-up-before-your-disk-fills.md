@@ -2,7 +2,7 @@
 
 *See what the HuggingFace cache holds, decide what to keep, and reclaim the rest — with a dry-run before anything is deleted.*
 
-*~1,150 words · about 5 min read*
+*~1,420 words · about 6 min read*
 
 <!-- Last updated: 2026-06-11, hf-fm v0.10.5 -->
 
@@ -21,6 +21,14 @@ STYLE CONVENTIONS for editing this tutorial — keep growth consistent.
 3. Safety: every destructive command appears with --dry-run, or with its
    confirmation prompt visible and answered `n`. Never paste an output
    that shows an actual deletion the reader did not see previewed first.
+   The partial-download captures (status PARTIAL rows, du ● marker,
+   clean-partial dry run, the resume run) were produced by deliberately
+   interrupting a `--preset safetensors` download of the ungated mirror
+   NousResearch/Meta-Llama-3.1-8B (chosen so no license is needed to
+   reproduce) and re-capturing as it resumed. The clean-partial dry run is
+   framed as a counterfactual ("had you abandoned it") because in the real
+   session the download was resumed, not cleaned — keep that framing so the
+   narrative timeline stays honest.
 4. Output blocks: paste exact output, do not paraphrase. Trim only when a
    block runs longer than ~20 lines and the trimmed lines are
    representative repetition (note the trim with `…`).
@@ -97,7 +105,14 @@ That preview says: everything untouched for 90 days, removed in one stroke, free
 
 ## Seeing: the `du` family
 
-`du` is one command with progressive flags. The `#` column is not decoration: every index it prints is accepted wherever a repo ID is — `du 23`, `cache delete 23`, `cache verify 23` — so you never type `models--microsoft--Phi-3.5-mini-instruct` or even `microsoft/Phi-3.5-mini-instruct` by hand. A `●` marker after a row flags a repo with partial downloads.
+`du` is one command with progressive flags. The `#` column is not decoration: every index it prints is accepted wherever a repo ID is — `du 23`, `cache delete 23`, `cache verify 23` — so you never type `models--microsoft--Phi-3.5-mini-instruct` or even `microsoft/Phi-3.5-mini-instruct` by hand. A `●` marker after a row flags a repo with an interrupted download — like the half-fetched Llama mirror near the bottom of this list:
+
+```
+   50    1.09 GiB  NousResearch/Meta-Llama-3.1-8B                                  3  ●
+  ● = partial downloads
+```
+
+(That partial is a download we interrupt on purpose in the next section. Its size reads as only 1.09 GiB and 3 files because `du` counts *finalized* files; the in-flight shards still live in `blobs/` as `.chunked.part` and surface as the `●`, not as counted size. `status`, below, is what shows their true progress.)
 
 `--age` adds the question GC will ask — *when did I last touch this?*
 
@@ -173,9 +188,51 @@ Cache: C:\Users\Eric JACOPIN\.cache\huggingface\hub\models--microsoft--Phi-3.5-m
 20/20 complete, 0 partial, 0 missing
 ```
 
-Four states can appear. `complete` and `MISSING` mean what they say. `PARTIAL` means an interrupted download left a `.chunked.part` temp blob — since v0.10.5 each partial row shows that file's *own* downloaded byte count, so a mid-download `status` is a live per-file progress report. `excluded` appears when a `--preset` (recorded at download time, or passed as `status --preset <P>`) deliberately skipped the file — distinguishing "I chose not to fetch this" from "this download is incomplete".
+Four states can appear, and the all-green run above shows only one. Start a download and interrupt it — close the laptop, drop the connection, hit Ctrl-C — then ask `status` what survived. Here is an ungated Llama-3.1-8B mirror, fetched with `--preset safetensors` and interrupted partway through its four shards:
 
-One thing to unlearn: a `.chunked.part` file is **not** garbage. It is resume state — the next `hf-fm` invocation for that file continues where it stopped instead of restarting (v0.9.8). Clean partials only when you have decided *not* to resume.
+```sh
+hf-fm status NousResearch/Meta-Llama-3.1-8B --preset safetensors
+```
+
+```
+NousResearch/Meta-Llama-3.1-8B (main @ 1f47e50cdbe801ad8a5174156ec3a0655108fb9f)
+Cache: C:\Users\Eric JACOPIN\.cache\huggingface\hub\models--NousResearch--Meta-Llama-3.1-8B
+
+  .gitattributes                      1.5 KiB  excluded
+  LICENSE                             7.4 KiB  excluded
+  config.json                           826 B  complete
+  generation_config.json                185 B  complete
+  model-00001-of-00004.safetensors   1.38 GiB / 4.63 GiB    PARTIAL
+  model-00002-of-00004.safetensors   1.27 GiB / 4.66 GiB    PARTIAL
+  model-00003-of-00004.safetensors   1.36 GiB / 4.58 GiB    PARTIAL
+  model-00004-of-00004.safetensors   1.09 GiB  complete
+  model.safetensors.index.json       23.4 KiB  MISSING
+  original/consolidated.00.pth      14.96 GiB  excluded
+  …
+  tokenizer.json                     8.66 MiB  MISSING
+
+3/17 complete, 3 partial, 5 missing, 6 excluded
+```
+
+All four at once. `complete` and `MISSING` mean what they say. Each `PARTIAL` row shows that file's *own* downloaded bytes against its full size — `1.38 GiB / 4.63 GiB`, a different figure per row, not one repo-level number stamped on every line (a v0.10.5 fix: the count is read from the resume sidecar, so it is true progress, not the preallocated blob's reserved size). A mid-download `status` is therefore a live per-file progress report. `excluded` marks files the `--preset` deliberately skipped — here the `original/consolidated.00.pth` PyTorch checkpoint and the docs — telling "I chose not to fetch this" apart from "this download is incomplete". (Drop `--preset` and those same files report `MISSING`; the preset is what lets `status` know the difference.)
+
+One thing to unlearn: a `.chunked.part` file is **not** garbage. It is resume state — run the same download again and it continues from those exact bytes instead of restarting (v0.9.8):
+
+```sh
+hf-fm NousResearch/Meta-Llama-3.1-8B --preset safetensors
+```
+
+```
+  Disk: 13.87 GiB to fetch, 2088.84 GiB available (2074.97 GiB after download)
+[hf-fm] model-00003-of-00004.safetensors: 2.57 GiB/4.58 GiB (56%)
+[hf-fm] model-00001-of-00004.safetensors: 2.78 GiB/4.63 GiB (60%)
+[hf-fm] model-00002-of-00004.safetensors: 3.15 GiB/4.66 GiB (67%)
+  …
+Downloaded to: …/models--NousResearch--Meta-Llama-3.1-8B/snapshots/1f47e50c…
+  14.97 GiB in 205.7s (74.5 MiB/s)
+```
+
+The shards pick up at 56–67%, not 0% — the interrupted bytes counted. Clean partials only when you have decided *not* to resume.
 
 ## Acting: `delete`, `clean-partial`, `gc`
 
@@ -195,13 +252,22 @@ hf-fm cache delete julien-c/dummy-unknown
 
 It removes the repo's entire `models--…` directory — blobs, refs, snapshots — so nothing is left half-alive. Pass `--yes` to skip the prompt in scripts.
 
-**Leftover partials:** `cache clean-partial` sweeps `.chunked.part` files (and their resume sidecars) across the whole cache, with the same `--dry-run` / prompt / `--yes` controls. This cache is currently clean:
+**Leftover partials:** suppose you had *abandoned* that interrupted Llama download instead of resuming it. `cache clean-partial` sweeps the leftover `.chunked.part` files (and their resume sidecars) across the whole cache, with the same `--dry-run` / prompt / `--yes` controls. Run the dry run first:
+
+```sh
+hf-fm cache clean-partial --dry-run
+```
 
 ```
 Cache: C:\Users\Eric JACOPIN\.cache\huggingface\hub
 
-No partial downloads found.
+Would remove 3 files (13.87 GiB):
+  NousResearch/Meta-Llama-3.1-8B: c28b25e7…chunked.part  (4.66 GiB)
+  NousResearch/Meta-Llama-3.1-8B: d8e9504d…chunked.part  (4.58 GiB)
+  NousResearch/Meta-Llama-3.1-8B: f8b9704a…chunked.part  (4.63 GiB)
 ```
+
+The reclaimed figure is real disk: a chunked download preallocates each temp blob at its *full* size, so a half-finished 4.66 GiB shard occupies 4.66 GiB on disk even though `status` (reading the sidecar) correctly reports only the bytes truly transferred. Pass a repo ID to scope the sweep to one model (`cache clean-partial NousResearch/Meta-Llama-3.1-8B`); omit it to clean everything. Either way, heed the lesson above — a partial is resume state, so clean only the downloads you have given up on. An empty cache simply reports `No partial downloads found.`
 
 **The sweep:** `cache gc` evicts by either of the two budgets you actually think in. `--older-than <DAYS>` answers *"what haven't I used lately?"* (the 30-second answer above). `--max-size <SIZE>` answers *"how much space can I spare?"* — it removes oldest-first until the cache fits the target. Both combine, and `--except` protects repos you want kept regardless of age:
 
