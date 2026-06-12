@@ -3800,8 +3800,10 @@ fn run_diff(
     dtypes: bool,
     json: bool,
 ) -> Result<(), FetchError> {
-    let tensors_a = collect_repo_tensors(repo_a, revision_a, token, cached)?;
-    let tensors_b = collect_repo_tensors(repo_b, revision_b, token, cached)?;
+    let tensors_a = collect_repo_tensors(repo_a, revision_a, token, cached)
+        .map_err(|e| enrich_gated_content_error(e, repo_a, token))?;
+    let tensors_b = collect_repo_tensors(repo_b, revision_b, token, cached)
+        .map_err(|e| enrich_gated_content_error(e, repo_b, token))?;
 
     if tensors_a.is_empty() {
         println!("No .safetensors files found in {repo_a}.");
@@ -4442,7 +4444,7 @@ fn run_inspect(
             check_gpu,
             context,
         )
-        .map_err(|e| enrich_gated_inspect_error(e, repo_id, token));
+        .map_err(|e| enrich_gated_content_error(e, repo_id, token));
     }
     match filename {
         Some(f) => {
@@ -4463,12 +4465,12 @@ fn run_inspect(
                 check_gpu,
                 context,
             )
-            .map_err(|e| enrich_gated_inspect_error(e, repo_id, token))
+            .map_err(|e| enrich_gated_content_error(e, repo_id, token))
         }
         None => run_inspect_repo(
             repo_id, revision, token, cached, json, filter, dtypes, limit, tree, check_gpu, context,
         )
-        .map_err(|e| enrich_gated_inspect_error(e, repo_id, token)),
+        .map_err(|e| enrich_gated_content_error(e, repo_id, token)),
     }
 }
 
@@ -4481,16 +4483,18 @@ fn is_auth_status_error(err: &FetchError) -> bool {
         if msg.contains("returned status 401") || msg.contains("returned status 403"))
 }
 
-/// Upgrades a raw 401/403 inspect error into a gated-repo diagnosis.
+/// Upgrades a raw 401/403 content error into a gated-repo diagnosis.
 ///
-/// `download` has had a gated-model pre-flight since v0.9.3; `inspect`'s
-/// Range path historically surfaced the raw `403 Forbidden` instead. On a
-/// status-401/403 error this makes one best-effort metadata probe and,
-/// when the repo is confirmed gated, replaces the raw HTTP error with the
-/// same actionable wording the download pre-flight uses (license link +
-/// token guidance). Any probe failure — network error, private repo,
-/// no runtime — returns the original error untouched.
-fn enrich_gated_inspect_error(err: FetchError, repo_id: &str, token: Option<&str>) -> FetchError {
+/// `download` has had a gated-model pre-flight since v0.9.3; the `inspect`
+/// and `diff` Range paths historically surfaced the raw `403 Forbidden`
+/// instead. On a status-401/403 error this makes one best-effort metadata
+/// probe and, when the repo is confirmed gated, replaces the raw HTTP
+/// error with the same actionable wording the download pre-flight uses
+/// (license link + token guidance). Any probe failure — network error,
+/// private repo, no runtime — returns the original error untouched.
+/// `diff` wraps each side's fetch separately, so the failing repo is
+/// always named precisely.
+fn enrich_gated_content_error(err: FetchError, repo_id: &str, token: Option<&str>) -> FetchError {
     if !is_auth_status_error(&err) {
         return err;
     }
@@ -7438,7 +7442,7 @@ fn format_downloads(n: u64) -> String {
 mod tests {
     use super::*;
 
-    // ---------- is_auth_status_error / enrich_gated_inspect_error ----------
+    // ---------- is_auth_status_error / enrich_gated_content_error ----------
 
     #[test]
     fn auth_status_error_detects_401_and_403_http_errors() {
@@ -7464,12 +7468,12 @@ mod tests {
     }
 
     #[test]
-    fn enrich_gated_inspect_error_passes_non_auth_errors_through() {
+    fn enrich_gated_content_error_passes_non_auth_errors_through() {
         // Non-401/403 errors must come back untouched (and without any
         // network probe — the early return precedes the metadata fetch).
         let original =
             FetchError::Http("Range request for x returned status 404 Not Found".to_owned());
-        let enriched = enrich_gated_inspect_error(original, "org/model", None);
+        let enriched = enrich_gated_content_error(original, "org/model", None);
         assert!(
             matches!(&enriched, FetchError::Http(msg) if msg.contains("404")),
             "expected the original Http error to pass through, got: {enriched}"

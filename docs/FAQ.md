@@ -127,7 +127,7 @@ hf-fm ships as a **library crate by default** — no command-line binaries unles
 
 ### How do I pass a HuggingFace token? Why does a gated model fail?
 
-Either pass `--token <value>` on the command line, or set the `HF_TOKEN` environment variable once and forget about it — every subcommand reads it automatically. Gated models (like Meta's Llama releases or Google's Gemma family) require both a valid token and that you have accepted the licence on the model's HuggingFace page. When either is missing, `download` and `inspect` report an `authentication failed: <repo> is a gated model …` error carrying the license URL and token guidance (`download` checks the gate up front, since v0.9.3; `inspect` diagnoses the underlying 401/403 from its Range requests, since v0.10.5).
+Either pass `--token <value>` on the command line, or set the `HF_TOKEN` environment variable once and forget about it — every subcommand reads it automatically. Gated models (like Meta's Llama releases or Google's Gemma family) require both a valid token and that you have accepted the licence on the model's HuggingFace page. When either is missing, `download`, `inspect`, and `diff` report an `authentication failed: <repo> is a gated model …` error carrying the license URL and token guidance (`download` checks the gate up front, since v0.9.3; `inspect` and `diff` diagnose the underlying 401/403 from their Range requests, since v0.10.5 — `diff` names whichever side is gated).
 
 Three traps worth knowing:
 

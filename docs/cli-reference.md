@@ -263,6 +263,8 @@ hf-fm inspect bartowski/Mistral-7B-Instruct-v0.3-GGUF Mistral-7B-Instruct-v0.3-Q
 
 ## Diff examples
 
+Gated repos get the same 401/403 diagnosis as `inspect` (v0.10.5): each side is fetched separately, so the error names exactly which repo needs its license accepted.
+
 ```sh
 # Compare tensor layouts between two model variants (cache-first)
 hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq

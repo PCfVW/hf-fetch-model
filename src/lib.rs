@@ -215,9 +215,9 @@
 //! The library-level [`inspect`] functions surface the underlying HTTP
 //! `401` / `403` as [`FetchError::Http`] instead — note that the Hub serves
 //! a gated repo's *metadata* publicly, so file listings succeed while
-//! content requests fail. The `hf-fm` CLI upgrades such inspect failures
-//! into the same gated-model diagnosis the download pre-flight emits
-//! (v0.10.5).
+//! content requests fail. The `hf-fm` CLI upgrades such `inspect` / `diff`
+//! failures into the same gated-model diagnosis the download pre-flight
+//! emits (v0.10.5).
 
 pub mod cache;
 pub mod cache_layout;
