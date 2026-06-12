@@ -43,6 +43,7 @@ A living list of the questions we and our early users have actually run into. If
 - [Installation and authentication](#installation-and-authentication)
   - [How do I install it? What is the Minimum Rust Version?](#how-do-i-install-it-what-is-the-minimum-rust-version)
   - [How do I upgrade hf-fm? Why does `cargo install` silently keep the old version?](#how-do-i-upgrade-hf-fm-why-does-cargo-install-silently-keep-the-old-version)
+  - [Is the `hf-fm` binary code-signed? Why did my antivirus flag it?](#is-the-hf-fm-binary-code-signed-why-did-my-antivirus-flag-it)
   - [What is the `cli` feature and do I need it?](#what-is-the-cli-feature-and-do-i-need-it)
   - [How do I pass a HuggingFace token? Why does a gated model fail?](#how-do-i-pass-a-huggingface-token-why-does-a-gated-model-fail)
 - [Discovery — finding what to inspect or download](#discovery--finding-what-to-inspect-or-download)
@@ -120,6 +121,19 @@ hf-fm --version
 ```
 
 Without `--force`, `cargo install` short-circuits whenever **any** version of the binary is already in `~/.cargo/bin/` — even when crates.io has a newer release. The "already installed" notice is logged to stderr at low priority and is easy to miss in a busy terminal: the install command exits `0`, looks like it succeeded, but the binary on `PATH` is unchanged. `--force` bypasses the short-circuit and always builds the latest. The companion note at [`docs/dogfooding-feedbacks/cargo-install-silent-skip.md`](dogfooding-feedbacks/cargo-install-silent-skip.md) captures the failure mode in full — including a reproduction recipe and the proposed `hf-fm --check-update` flag tracked as a future patch-release candidate.
+
+### Is the `hf-fm` binary code-signed? Why did my antivirus flag it?
+
+hf-fm is distributed as **source on crates.io**, not as a pre-built executable. When you run `cargo install hf-fetch-model --features cli`, Cargo compiles the binary **on your own machine** from source you can read. There is no publisher-signed `.exe` to verify because there is no download of a finished binary — the trust model is "build it yourself from open source," which is stronger than trusting a signature on someone else's build. So today the honest answer to "is it Authenticode/notarization signed?" is: it doesn't need to be, because nothing pre-compiled is shipped.
+
+If a heuristic antivirus (Windows Defender SmartScreen, etc.) flags the freshly-built `hf-fm.exe` or a script that launches it, that is almost always a **behavioral false positive** — multi-connection downloaders and process-launching scripts pattern-match to loader malware. It is not specific to hf-fm. Two clean responses: build in a directory your AV is told to trust, or — if you want Windows to trust the binary itself — code-sign it. For purely local use, a self-signed certificate you import into your own Trusted Publishers store is enough:
+
+```powershell
+$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=hf-fm (local)" -CertStoreLocation Cert:\CurrentUser\My
+Set-AuthenticodeSignature -FilePath "$env:USERPROFILE\.cargo\bin\hf-fm.exe" -Certificate $cert -TimestampServer http://timestamp.digicert.com
+```
+
+A self-signed certificate is trusted only on machines where you install it; it does nothing for other users. **Publicly-trusted** signing (the kind that satisfies SmartScreen for everyone) requires a CA-issued certificate whose key lives on FIPS-140 hardware — only worth pursuing if/when hf-fm starts shipping pre-built GitHub Release binaries. The likely path then is the [SignPath Foundation](https://signpath.org/), which provides free CI-integrated Authenticode signing to qualifying open-source projects (OSI license, actively maintained, repo-owned builds — hf-fm qualifies on all stated criteria). Until pre-built binaries ship, building from source remains the recommended and verifiable install.
 
 ### What is the `cli` feature and do I need it?
 
