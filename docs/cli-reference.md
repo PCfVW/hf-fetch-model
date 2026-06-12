@@ -467,7 +467,7 @@ Exit code is non-zero only when at least one file mismatched; `skipped` and `mis
 
 ## Download flags
 
-These flags apply to the default download command (`hf-fm <REPO_ID>`). `download-file` shares the performance flags and `--flat` but not `--dry-run`, `--filter`, or `--preset`. `download-file` also accepts glob patterns (e.g., `"pytorch_model-*.bin"`) as the filename argument.
+These flags apply to the default download command (`hf-fm <REPO_ID>`). `download-file` shares the performance and timeout flags (`--chunk-threshold-mib`, `--concurrency`, `--connections-per-file`, `--timeout-per-file-secs`, `--timeout-total-secs`) and `--flat`, but not `--dry-run`, `--filter`, or `--preset`. `download-file` also accepts glob patterns (e.g., `"pytorch_model-*.bin"`) as the filename argument.
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -482,6 +482,8 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--output-dir` | Custom output directory (or flat copy target with `--flat`) | HF cache |
 | `--preset` | Filter preset: `safetensors`, `gguf`, `npz`, `pth`, `config-only` | — |
 | `--revision` | Git revision (branch, tag, SHA) | main |
+| `--timeout-per-file-secs` | Per-file transfer timeout, in seconds. The ceiling on any single file. Raise it for large files on slow links — at ~10 MiB/s the 300 s default caps progress at roughly 3 GiB, so try `1800` for files in the 5–15 GiB range. | 300 |
+| `--timeout-total-secs` | Overall wall-clock budget for the whole invocation, in seconds (including retries and, since v0.10.5, in-flight files — not just a between-files check). Independent of `--timeout-per-file-secs`; the effective cap on any file is whichever of the two elapses first. Applies to `download-file`'s single file too. | no limit |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |
 
 ## List-files flags

@@ -29,8 +29,8 @@ let outcome = hf_fetch_model::download_with_config(
 | `.exclude(glob)` | Exclude pattern (repeatable) | none |
 | `.concurrency(n)` | Parallel file downloads | auto-tuned |
 | `.output_dir(path)` | Custom cache directory | HF default |
-| `.timeout_per_file(dur)` | Per-file timeout | 300s |
-| `.timeout_total(dur)` | Overall timeout | unlimited |
+| `.timeout_per_file(dur)` | Ceiling on any single file transfer | 300s |
+| `.timeout_total(dur)` | Hard wall-clock cap on the whole batch (including retries and in-flight files), independent of the per-file timeout | unlimited |
 | `.max_retries(n)` | Retries per file | 3 |
 | `.verify_checksums(bool)` | SHA256 verification | true |
 | `.chunk_threshold(bytes)` | Min file size for multi-connection download | auto-tuned |

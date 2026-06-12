@@ -314,7 +314,7 @@ Run `hf-fm du` for a size-sorted summary. Each row has a `#` index you can pass 
 
 ### Why does my download keep timing out, and how do I extend the budget?
 
-By default hf-fm gives each file a 300-second budget — fine for typical multi-GiB safetensors at typical home-broadband speeds, but it can run out before a 10 GiB file finishes if your effective throughput is below ~35 MiB/s. Pass `--timeout-per-file-secs <N>` to extend it; `1800` (30 minutes) is a sensible value for files in the 5–15 GiB range on slower links. There is also a `--timeout-total-secs` flag that bounds the entire batch when you are downloading many files at once.
+By default hf-fm gives each file a 300-second budget — fine for typical multi-GiB safetensors at typical home-broadband speeds, but it can run out before a 10 GiB file finishes if your effective throughput is below ~35 MiB/s. Pass `--timeout-per-file-secs <N>` to extend it; `1800` (30 minutes) is a sensible value for files in the 5–15 GiB range on slower links. The companion `--timeout-total-secs` flag is an overall wall-clock budget for the whole invocation — it bounds a multi-file batch *and* a single large file (including `download-file`), elapsing whichever comes first against the per-file limit. (Before v0.10.5 the total budget was only checked between files, so it silently failed to interrupt a single dominant download; it is now a hard cap on in-flight transfers too.)
 
 ```
 hf-fm google/gemma-4-E2B-it --preset safetensors --timeout-per-file-secs 1800
