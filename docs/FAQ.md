@@ -127,7 +127,13 @@ hf-fm ships as a **library crate by default** — no command-line binaries unles
 
 ### How do I pass a HuggingFace token? Why does a gated model fail?
 
-Either pass `--token <value>` on the command line, or set the `HF_TOKEN` environment variable once and forget about it — every subcommand reads it automatically. Gated models (like Meta's Llama releases or Google's Gemma family) require both a valid token and that you have accepted the licence on the model's HuggingFace page; without either, the first HTTP request returns a 401 or 403 and hf-fm surfaces it as a `FetchError::Api` or `FetchError::RepoNotFound`.
+Either pass `--token <value>` on the command line, or set the `HF_TOKEN` environment variable once and forget about it — every subcommand reads it automatically. Gated models (like Meta's Llama releases or Google's Gemma family) require both a valid token and that you have accepted the licence on the model's HuggingFace page. When either is missing, `download` and `inspect` report an `authentication failed: <repo> is a gated model …` error carrying the license URL and token guidance (`download` checks the gate up front, since v0.9.3; `inspect` diagnoses the underlying 401/403 from its Range requests, since v0.10.5).
+
+Three traps worth knowing:
+
+1. **A gated repo's metadata is public.** `list-files` and `inspect --list` fill in sizes and SHA256 hashes with no token at all — only *content* requests (downloads, header Range requests) hit the gate. A successful listing is not proof of access.
+2. **Each gated family is licensed separately.** Accepting the Llama 3.2 license grants nothing for Llama 3.1 — request access on the exact repo you need.
+3. **Fine-grained tokens need the gated-repo permission.** A fine-grained token without *"Read access to contents of all public gated repos you can access"* gets 403 even after the license is accepted; classic "read" tokens don't have this failure mode.
 
 ```
 # bash / zsh

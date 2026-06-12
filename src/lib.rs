@@ -206,6 +206,18 @@
 //!
 //! Set the `HF_TOKEN` environment variable to access private or gated models,
 //! or use [`FetchConfig::builder().token()`](FetchConfigBuilder::token).
+//!
+//! Gated repos (Meta Llama, Google Gemma, …) additionally require accepting
+//! the license on the model's `HuggingFace` page — once per gated family
+//! (a Llama 3.2 grant does not cover Llama 3.1). [`download()`] /
+//! [`download_with_config`] pre-flight the gate and return
+//! [`FetchError::Auth`] with the license URL before any transfer starts.
+//! The library-level [`inspect`] functions surface the underlying HTTP
+//! `401` / `403` as [`FetchError::Http`] instead — note that the Hub serves
+//! a gated repo's *metadata* publicly, so file listings succeed while
+//! content requests fail. The `hf-fm` CLI upgrades such inspect failures
+//! into the same gated-model diagnosis the download pre-flight emits
+//! (v0.10.5).
 
 pub mod cache;
 pub mod cache_layout;

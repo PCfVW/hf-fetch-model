@@ -188,6 +188,8 @@ hf-fm info mistralai/Ministral-3-3B-Instruct-2512 --revision v1.0
 
 For a narrative walkthrough using a real 4-shard model, see the [Inspect tutorial](tutorials/inspect-before-downloading.md). `inspect` covers `.safetensors` (remote or cached) plus `.gguf` (v0.10.2), `.npz`, and `.pth` (both v0.10.3) for **cached** files; remote inspect for those three is planned for v0.11. An unsupported extension is rejected with a clear error.
 
+Gated repos (Meta Llama, Google Gemma, …) need an accepted license plus a token for `inspect`'s Range requests; on a 401/403 the error names the gate and the license URL instead of the raw status (v0.10.5). Note that a gated repo's file *listing* is public — `--list` or `list-files` succeeding does not prove content access. See the [FAQ entry on tokens and gated models](FAQ.md#how-do-i-pass-a-huggingface-token-why-does-a-gated-model-fail).
+
 ```sh
 # Inspect a single safetensors file (cache-first, falls back to HTTP Range requests)
 hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors
@@ -543,7 +545,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 | `--pick` | Pick the file to inspect interactively from a numbered list (v0.10.5+). With no `FILENAME`, offers every supported tensor file; with a `FILENAME`, treats it as a **case-insensitive substring** filter — a unique match auto-resolves (with a `Resolving to <name>` note on stderr), several matches prompt `Pick [1..N]:` on stderr. Under `--pick` the positional is never a numeric index. Requires an interactive terminal (stdin + stderr); the prompt goes to stderr, so `--json` stdout can be redirected. Empty input cancels with a non-zero exit. Composes with every rendering flag; conflicts with `--list`. | off |
 | `--tree` | Show a hierarchical tree view grouped by dotted namespace prefix; numeric sibling groups with identical sub-structure collapse to `[0..N]`. Composes with `--filter` and `--json`. Conflicts with `--dtypes` and `--limit`. | off |
 | `--revision` | Git revision (branch, tag, SHA) | main |
-| `--token` | Auth token (or set `HF_TOKEN` env var) | — |
+| `--token` | Auth token (or set `HF_TOKEN` env var). Required for gated repos, together with an accepted license — each gated family (Llama 3.1 vs 3.2, …) is licensed separately. | — |
 
 ## General flags
 
