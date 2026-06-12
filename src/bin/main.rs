@@ -4400,7 +4400,9 @@ fn print_diff_dtypes(
     }
 }
 
-/// Inspects `.safetensors` file headers for tensor metadata.
+/// Inspects tensor file headers (`.safetensors` / `.gguf` / `.npz` / `.pth`)
+/// for tensor metadata, upgrading raw 401/403 content errors into a
+/// gated-repo diagnosis on the way out.
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 fn run_inspect(
     repo_id: &str,
@@ -4439,7 +4441,8 @@ fn run_inspect(
             tree,
             check_gpu,
             context,
-        );
+        )
+        .map_err(|e| enrich_gated_inspect_error(e, repo_id, token));
     }
     match filename {
         Some(f) => {
@@ -4460,11 +4463,67 @@ fn run_inspect(
                 check_gpu,
                 context,
             )
+            .map_err(|e| enrich_gated_inspect_error(e, repo_id, token))
         }
         None => run_inspect_repo(
             repo_id, revision, token, cached, json, filter, dtypes, limit, tree, check_gpu, context,
-        ),
+        )
+        .map_err(|e| enrich_gated_inspect_error(e, repo_id, token)),
     }
+}
+
+/// Returns `true` when an inspect-path error is an HTTP `401` / `403`
+/// status failure — the signature of gated-content rejection (the Hub
+/// serves a gated repo's metadata publicly; only content requests carry
+/// the gate, so the failure surfaces here rather than at listing time).
+fn is_auth_status_error(err: &FetchError) -> bool {
+    matches!(err, FetchError::Http(msg)
+        if msg.contains("returned status 401") || msg.contains("returned status 403"))
+}
+
+/// Upgrades a raw 401/403 inspect error into a gated-repo diagnosis.
+///
+/// `download` has had a gated-model pre-flight since v0.9.3; `inspect`'s
+/// Range path historically surfaced the raw `403 Forbidden` instead. On a
+/// status-401/403 error this makes one best-effort metadata probe and,
+/// when the repo is confirmed gated, replaces the raw HTTP error with the
+/// same actionable wording the download pre-flight uses (license link +
+/// token guidance). Any probe failure — network error, private repo,
+/// no runtime — returns the original error untouched.
+fn enrich_gated_inspect_error(err: FetchError, repo_id: &str, token: Option<&str>) -> FetchError {
+    if !is_auth_status_error(&err) {
+        return err;
+    }
+
+    let Ok(rt) = tokio::runtime::Runtime::new() else {
+        return err;
+    };
+    let Ok(metadata) = rt.block_on(discover::fetch_model_card(repo_id)) else {
+        return err;
+    };
+    if !metadata.gated.is_gated() {
+        return err;
+    }
+
+    // BORROW: explicit .map(ToOwned::to_owned) for Option<&str> → Option<String>
+    let effective_token = token
+        .map(ToOwned::to_owned)
+        .or_else(|| std::env::var("HF_TOKEN").ok());
+
+    let reason = if effective_token.is_none() {
+        format!(
+            "{repo_id} is a gated model — its file listing is public but content \
+             requires access: accept the license at https://huggingface.co/{repo_id} \
+             and set HF_TOKEN or pass --token"
+        )
+    } else {
+        format!(
+            "{repo_id} is a gated model and your token was rejected — accept the \
+             license at https://huggingface.co/{repo_id} (each gated family is \
+             licensed separately) and check that the token grants gated-repo read access"
+        )
+    };
+    FetchError::Auth { reason }
 }
 
 /// Resolves an inspect filename argument to a concrete filename.
@@ -7378,6 +7437,44 @@ fn format_downloads(n: u64) -> String {
 )]
 mod tests {
     use super::*;
+
+    // ---------- is_auth_status_error / enrich_gated_inspect_error ----------
+
+    #[test]
+    fn auth_status_error_detects_401_and_403_http_errors() {
+        let forbidden = FetchError::Http(
+            "Range request for model-00002-of-00004.safetensors returned status 403 Forbidden"
+                .to_owned(),
+        );
+        let unauthorized = FetchError::Http(
+            "shard index request for org/model returned status 401 Unauthorized".to_owned(),
+        );
+        assert!(is_auth_status_error(&forbidden));
+        assert!(is_auth_status_error(&unauthorized));
+    }
+
+    #[test]
+    fn auth_status_error_ignores_other_errors() {
+        let not_found = FetchError::Http(
+            "Range request for x.safetensors returned status 404 Not Found".to_owned(),
+        );
+        let io_like = FetchError::InvalidArgument("403 in a filename is not a status".to_owned());
+        assert!(!is_auth_status_error(&not_found));
+        assert!(!is_auth_status_error(&io_like));
+    }
+
+    #[test]
+    fn enrich_gated_inspect_error_passes_non_auth_errors_through() {
+        // Non-401/403 errors must come back untouched (and without any
+        // network probe — the early return precedes the metadata fetch).
+        let original =
+            FetchError::Http("Range request for x returned status 404 Not Found".to_owned());
+        let enriched = enrich_gated_inspect_error(original, "org/model", None);
+        assert!(
+            matches!(&enriched, FetchError::Http(msg) if msg.contains("404")),
+            "expected the original Http error to pass through, got: {enriched}"
+        );
+    }
 
     // ---------- narrow_pick_candidates / parse_pick_input ----------
 
