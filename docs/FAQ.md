@@ -135,6 +135,8 @@ Three traps worth knowing:
 2. **Each gated family is licensed separately.** Accepting the Llama 3.2 license grants nothing for Llama 3.1 — request access on the exact repo you need.
 3. **Fine-grained tokens need the gated-repo permission.** A fine-grained token without *"Read access to contents of all public gated repos you can access"* gets 403 even after the license is accepted; classic "read" tokens don't have this failure mode.
 
+One useful consequence of trap 1: you can answer *"does this gated model even fit my GPU?"* **before** accepting any license. The public listing already shows the `.safetensors` sizes (their sum ≈ the weight bytes), and popular gated models usually have byte-identical ungated mirrors — verify with `list-files` on both and compare the SHA256 columns; if every LFS hash matches, the mirror *is* the model. Then `hf-fm inspect <mirror> --check-gpu --context N` gives the full header-precise verdict, license-free. Example: `NousResearch/Meta-Llama-3.1-8B` mirrors `meta-llama/Llama-3.1-8B` hash-for-hash.
+
 ```
 # bash / zsh
 HF_TOKEN=hf_xxx hf-fm meta-llama/Llama-3.2-1B
