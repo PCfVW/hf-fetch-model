@@ -3,7 +3,7 @@
 This folder archives comments drafted or posted on upstream issues (primarily [huggingface/candle](https://github.com/huggingface/candle/issues) and related repos) where `hf-fetch-model`'s inspection features helped diagnose a problem. The dual purpose is:
 
 1. **Reference**: keep a searchable trail of which issues we engaged with, what we said, and what happened.
-2. **Case-study source material**: the v0.10.0 roadmap includes a first-batch of `docs/case-studies/` written from these replies (see [cache-management-roadmap.md](../roadmaps/cache-management-roadmap.md)). The archive is the raw material; case studies synthesize them into narrative form.
+2. **Case-study source material**: the v0.10.0 roadmap includes a first-batch of `docs/case-studies/` written from these replies (see [cache-management-roadmap.md](../roadmaps/cache-management-roadmap.md)). The archive is the raw material; case studies synthesize them into narrative form. First two shipped in v0.10.5: [per-layer shape variation in Gemma 4](../case-studies/gemma4-per-layer-shape-variation.md) (from the #3448 thread) and [reconstructing an OOM from a crash log](../case-studies/qwen3-next-memory-forensics.md) (from #3530), both written to be honest about how far the threads actually got.
 
 ## File naming
 

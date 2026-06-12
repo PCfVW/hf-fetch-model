@@ -269,6 +269,7 @@ Filter, progress, auth, and more via the builder — see [Configuration](docs/co
 | [FAQ](docs/FAQ.md) | Common questions — installation, auth, cache location, discovery, errors |
 | [Inspect tutorial](docs/tutorials/inspect-before-downloading.md) | Walkthrough: read tensor metadata, size, and architecture without downloading weights |
 | [Cache tutorial](docs/tutorials/clean-up-before-your-disk-fills.md) | Walkthrough: see what the cache holds, then reclaim disk space safely (`du` → `status` → `cache gc`) |
+| [Case studies](docs/case-studies/) | Real investigations where `inspect` did the diagnostic work — per-layer shape variation, OOM forensics from a crash log |
 | [Search](docs/search.md) | Comma filtering, `--exact`, model card metadata |
 | [Configuration](docs/configuration.md) | Builder API, presets, progress callbacks |
 | [Architecture](docs/architecture.md) | How hf-fetch-model relates to `hf-hub` and `candle-mi` |
