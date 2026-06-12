@@ -2,9 +2,9 @@
 
 *See what the HuggingFace cache holds, decide what to keep, and reclaim the rest — with a dry-run before anything is deleted.*
 
-*~1,420 words · about 6 min read*
+*~1,490 words · about 6 min read*
 
-<!-- Last updated: 2026-06-11, hf-fm v0.10.5 -->
+<!-- Last updated: 2026-06-12, hf-fm v0.10.5 -->
 
 <!--
 STYLE CONVENTIONS for editing this tutorial — keep growth consistent.
@@ -13,11 +13,15 @@ STYLE CONVENTIONS for editing this tutorial — keep growth consistent.
    the reader as "you", short paragraphs over bullet lists where prose
    works.
 2. Reproducibility: unlike the inspect tutorial, there is no revision to
-   pin — the cache is machine-local. Every output block is an exact
-   capture from the maintainer's cache (592 GiB, 66 repos, 2026-06-11).
-   The reader's numbers WILL differ; the column shapes and legends must
-   not. If you re-capture, re-capture every block in the same session so
-   the totals agree across sections.
+   pin — the cache is machine-local. Output blocks come from two capture
+   sessions on the same machine: the du / gc / verify / path blocks are
+   from 2026-06-11 (592 GiB, 66 repos); the partial-download blocks
+   (status PARTIAL, du ●, clean-partial, resume) are from a 2026-06-12
+   follow-up that staged an interrupted download (note 3), so they show
+   one extra repo. The reader's numbers WILL differ; the column shapes and
+   legends must not. The two sessions are deliberately not reconciled into
+   one frozen total — the narrative moves forward in time as the reader
+   downloads and interrupts a model.
 3. Safety: every destructive command appears with --dry-run, or with its
    confirmation prompt visible and answered `n`. Never paste an output
    that shows an actual deletion the reader did not see previewed first.
@@ -105,14 +109,14 @@ That preview says: everything untouched for 90 days, removed in one stroke, free
 
 ## Seeing: the `du` family
 
-`du` is one command with progressive flags. The `#` column is not decoration: every index it prints is accepted wherever a repo ID is — `du 23`, `cache delete 23`, `cache verify 23` — so you never type `models--microsoft--Phi-3.5-mini-instruct` or even `microsoft/Phi-3.5-mini-instruct` by hand. A `●` marker after a row flags a repo with an interrupted download — like the half-fetched Llama mirror near the bottom of this list:
+`du` is one command with progressive flags. The `#` column is not decoration: every index it prints is accepted wherever a repo ID is — `du 23`, `cache delete 23`, `cache verify 23` — so you never type `models--microsoft--Phi-3.5-mini-instruct` or even `microsoft/Phi-3.5-mini-instruct` by hand. A `●` marker after a row flags a repo with an interrupted download. Start one, stop it, and that repo's row picks up the marker:
 
 ```
    50    1.09 GiB  NousResearch/Meta-Llama-3.1-8B                                  3  ●
   ● = partial downloads
 ```
 
-(That partial is a download we interrupt on purpose in the next section. Its size reads as only 1.09 GiB and 3 files because `du` counts *finalized* files; the in-flight shards still live in `blobs/` as `.chunked.part` and surface as the `●`, not as counted size. `status`, below, is what shows their true progress.)
+(That partial is a download we interrupt on purpose in the next section, which is why this repo is absent from the full listings above — they predate it. Its size reads as only 1.09 GiB and 3 files because `du` counts *finalized* files; the in-flight shards still live in `blobs/` as `.chunked.part` and surface as the `●`, not as counted size. `status`, below, is what shows their true progress.)
 
 `--age` adds the question GC will ask — *when did I last touch this?*
 
@@ -223,16 +227,16 @@ hf-fm NousResearch/Meta-Llama-3.1-8B --preset safetensors
 ```
 
 ```
-  Disk: 13.87 GiB to fetch, 2088.84 GiB available (2074.97 GiB after download)
-[hf-fm] model-00003-of-00004.safetensors: 2.57 GiB/4.58 GiB (56%)
-[hf-fm] model-00001-of-00004.safetensors: 2.78 GiB/4.63 GiB (60%)
-[hf-fm] model-00002-of-00004.safetensors: 3.15 GiB/4.66 GiB (67%)
+  Disk: 13.88 GiB to fetch, 2088.86 GiB available (2074.98 GiB after download)
+[hf-fm] model-00003-of-00004.safetensors: 1.36 GiB/4.58 GiB (29%)
+[hf-fm] model-00001-of-00004.safetensors: 1.38 GiB/4.63 GiB (29%)
+[hf-fm] model-00002-of-00004.safetensors: 1.27 GiB/4.66 GiB (27%)
   …
 Downloaded to: …/models--NousResearch--Meta-Llama-3.1-8B/snapshots/1f47e50c…
   14.97 GiB in 205.7s (74.5 MiB/s)
 ```
 
-The shards pick up at 56–67%, not 0% — the interrupted bytes counted. Clean partials only when you have decided *not* to resume.
+The shards pick up at 27–29% — exactly where `status` left them above — not 0%. The interrupted bytes counted. (The final `14.97 GiB` line is hf-fm reporting the file's full size, not the bytes fetched this run; the ~4 GiB already on disk is why it finished as fast as it did.) Clean partials only when you have decided *not* to resume.
 
 ## Acting: `delete`, `clean-partial`, `gc`
 
