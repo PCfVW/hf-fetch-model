@@ -67,7 +67,7 @@ pub fn query_gpu(index: u32) -> GpuCheckResult {
 /// | `DeviceIndexOutOfRange { index, count }` | `"index {N} out of range (have {M} device(s))"` (with singular/plural agreement) |
 /// | `NoGpuSource` | `"no NVIDIA device detected (NVML / DXGI not usable)"` |
 /// | `Nvml(s)` / `Dxgi(s)` / `NvidiaSmi(s)` | `"{backend} backend reported: {s}"` |
-/// | `Ram(_)` / `Io(_)` | `"unexpected error: {err}"` (should not occur for `device_info`) |
+/// | `Ram(_)` / `Io(_)` / `Pdh(_)` | `"unexpected error: {err}"` (should not occur for `device_info`) |
 /// | future variants (`HypomnesisError` is `#[non_exhaustive]`) | `"hypomnesis error: {err}"` (generic fallthrough) |
 fn friendly_error(err: &hypomnesis::HypomnesisError) -> String {
     use hypomnesis::HypomnesisError as E;
@@ -80,9 +80,11 @@ fn friendly_error(err: &hypomnesis::HypomnesisError) -> String {
         E::Nvml(s) => format!("NVML backend reported: {s}"),
         E::Dxgi(s) => format!("DXGI backend reported: {s}"),
         E::NvidiaSmi(s) => format!("nvidia-smi backend reported: {s}"),
-        // EXPLICIT: Ram / Io should not surface for device_info, but format defensively
-        // so a future hypomnesis revision that uses them doesn't break our rendering.
-        E::Ram(_) | E::Io(_) => format!("unexpected error: {err}"),
+        // EXPLICIT: Ram / Io / Pdh should not surface for device_info (Pdh is a
+        // per-process backend used only by gpu_processes, added in hypomnesis
+        // 0.2.2), but format defensively so a future revision that routes them
+        // through device_info doesn't break our rendering.
+        E::Ram(_) | E::Io(_) | E::Pdh(_) => format!("unexpected error: {err}"),
         // EXHAUSTIVE: HypomnesisError is `#[non_exhaustive]`; cover future variants generically
         _ => format!("hypomnesis error: {err}"),
     }
