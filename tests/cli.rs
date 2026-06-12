@@ -449,13 +449,20 @@ fn cache_clean_partial_help_shows_flags() {
 }
 
 #[test]
-fn cache_clean_partial_no_partials() {
-    let (stdout, stderr, success) = run(hf_fm().args(["cache", "clean-partial", "--yes"]));
+fn cache_clean_partial_dry_run_is_nondestructive() {
+    // --dry-run, NOT --yes: this test runs against the developer's real
+    // HuggingFace cache, and a --yes sweep silently destroys real resume
+    // state for any download interrupted on this machine (it wiped two
+    // deliberately-staged partials during the 2026-06-12 cache-tutorial
+    // capture session). The dry run exercises the same scan and renders
+    // either the no-partials notice or the removal preview.
+    let (stdout, stderr, success) = run(hf_fm().args(["cache", "clean-partial", "--dry-run"]));
     assert!(success, "cache clean-partial should succeed: {stderr}");
     assert!(
         stdout.contains("No partial downloads found")
-            || stdout.contains("No HuggingFace cache found"),
-        "cache clean-partial should report no partials, got:\n{stdout}"
+            || stdout.contains("No HuggingFace cache found")
+            || stdout.contains("partial download"),
+        "cache clean-partial --dry-run should report the cache's partial state, got:\n{stdout}"
     );
 }
 
