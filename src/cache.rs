@@ -706,7 +706,8 @@ pub fn read_ref(repo_dir: &Path, revision: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Returns the on-disk size of a file's own chunked-download temp blob.
+/// Returns the truly-downloaded byte count of a file's own chunked-download
+/// temp blob.
 ///
 /// Looks up `{repo_dir}/blobs/<sha256>.chunked.part` — the chunked download
 /// path names its temp blob after the file's etag, which for LFS files is
@@ -714,13 +715,31 @@ pub fn read_ref(repo_dir: &Path, revision: &str) -> Option<String> {
 /// so a specific file's partial is addressable without scanning the blobs
 /// directory. Returns `None` when the file has no known `sha256` (non-LFS
 /// file) or no temp blob exists on disk.
+///
+/// The chunked download preallocates the temp blob at its full size, so the
+/// blob's file length reads as `total_size` from the first byte onward.
+/// True progress lives in the `.chunked.part.state` resume sidecar's
+/// per-chunk `completed` offsets; this prefers their sum and falls back to
+/// the blob's file length when the sidecar is absent or unparseable
+/// (pre-v0.9.8 leftovers).
 fn partial_chunk_size(repo_dir: &Path, sha256: Option<&str>) -> Option<u64> {
     let sha = sha256?;
     let part_path = crate::cache_layout::temp_blob_path(repo_dir, sha);
-    std::fs::metadata(part_path)
+    let part_len = std::fs::metadata(part_path)
         .ok()
         .filter(std::fs::Metadata::is_file)
-        .map(|m| m.len())
+        .map(|m| m.len())?;
+
+    let state_path = crate::cache_layout::temp_state_path(repo_dir, sha);
+    let sidecar_sum = std::fs::read_to_string(state_path)
+        .ok()
+        .and_then(|text| {
+            // BORROW: explicit .as_str() instead of Deref coercion
+            serde_json::from_str::<crate::chunked_state::ChunkedState>(text.as_str()).ok()
+        })
+        .map(|state| state.chunks.iter().map(|c| c.completed).sum::<u64>());
+
+    Some(sidecar_sum.unwrap_or(part_len))
 }
 
 /// Returns the size of the first `.chunked.part` file found in the blobs directory.
@@ -1305,5 +1324,54 @@ mod tests {
         // Non-LFS files carry no sha256; the lookup must not guess.
         let tmp = std::env::temp_dir().join(format!("hf-fm-partial-no-sha-{}", std::process::id()));
         assert_eq!(partial_chunk_size(&tmp, None), None);
+    }
+
+    #[test]
+    fn partial_chunk_size_prefers_sidecar_completed_sum() {
+        // The temp blob is preallocated at full size, so its file length is
+        // total_size from the first byte; the truth is the sidecar's summed
+        // per-chunk `completed` offsets.
+        let tmp =
+            std::env::temp_dir().join(format!("hf-fm-partial-sidecar-{}", std::process::id()));
+        let blobs = tmp.join("blobs");
+        std::fs::create_dir_all(&blobs).expect("create blobs dir");
+        let sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        // Preallocated blob: 4096 bytes on disk, only 300 truly downloaded.
+        std::fs::write(blobs.join(format!("{sha}.chunked.part")), vec![0u8; 4096])
+            .expect("write partial blob");
+        let sidecar = format!(
+            "{{\"schema_version\":1,\"etag\":\"{sha}\",\"total_size\":4096,\
+             \"connections\":2,\"chunks\":[\
+             {{\"idx\":0,\"start\":0,\"end\":2047,\"completed\":100}},\
+             {{\"idx\":1,\"start\":2048,\"end\":4095,\"completed\":200}}]}}"
+        );
+        std::fs::write(blobs.join(format!("{sha}.chunked.part.state")), sidecar)
+            .expect("write sidecar");
+
+        assert_eq!(partial_chunk_size(&tmp, Some(sha)), Some(300));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn partial_chunk_size_falls_back_to_blob_len_on_corrupt_sidecar() {
+        let tmp = std::env::temp_dir().join(format!(
+            "hf-fm-partial-corrupt-sidecar-{}",
+            std::process::id()
+        ));
+        let blobs = tmp.join("blobs");
+        std::fs::create_dir_all(&blobs).expect("create blobs dir");
+        let sha = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        std::fs::write(blobs.join(format!("{sha}.chunked.part")), vec![0u8; 2048])
+            .expect("write partial blob");
+        std::fs::write(
+            blobs.join(format!("{sha}.chunked.part.state")),
+            "not json at all",
+        )
+        .expect("write corrupt sidecar");
+
+        assert_eq!(partial_chunk_size(&tmp, Some(sha)), Some(2048));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
