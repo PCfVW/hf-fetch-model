@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Rust crate dependencies — weekly, grouped so routine patch bumps land as
+  # one PR rather than a swarm. Security updates are exempt from grouping and
+  # complement the `cargo audit` CI job (audit fails the build; Dependabot
+  # opens the fix PR).
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions used by the CI / publish workflows.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
