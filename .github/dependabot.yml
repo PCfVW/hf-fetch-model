@@ -14,6 +14,13 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # reqwest 0.13 changed the API (RequestBuilder::query removed) and
+      # conflicts with hf-hub 0.5's reqwest 0.12. Deferred until hf-hub 1.0
+      # stable ships to crates.io. Patch updates within 0.12.x are still
+      # allowed; this only holds back 0.13.0+. Re-evaluate when hf-hub 1.0 lands.
+      - dependency-name: reqwest
+        versions: [">=0.13.0"]
 
   # GitHub Actions used by the CI / publish workflows.
   - package-ecosystem: github-actions
