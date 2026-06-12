@@ -279,6 +279,15 @@ pub async fn download_all_files_map(
     let completed = Arc::new(AtomicUsize::new(0));
     let mut join_set = JoinSet::new();
 
+    // Absolute wall-clock deadline for the whole batch. Files spawn over time
+    // (concurrency-limited), so each in-flight download is bounded by the
+    // shared deadline rather than a fresh per-file copy of the budget — a file
+    // spawned late gets only the remaining time. Without this the total budget
+    // was merely a between-files check, letting a single dominant file run for
+    // up to `timeout_per_file`. Both values are `Copy`, captured per task.
+    let total_deadline = settings.timeout_total.map(|limit| overall_start + limit);
+    let total_timeout_secs = settings.timeout_total.map_or(0, |d| d.as_secs());
+
     for file in files {
         if let Some(total_limit) = settings.timeout_total {
             if overall_start.elapsed() >= total_limit {
@@ -310,7 +319,7 @@ pub async fn download_all_files_map(
         let task_completed = Arc::clone(&completed);
 
         join_set.spawn(async move {
-            let result = dispatch_download(
+            let download_fut = dispatch_download(
                 &task_repo,
                 &file,
                 &task_meta,
@@ -324,8 +333,22 @@ pub async fn download_all_files_map(
                 &task_settings,
                 task_on_progress,
                 total.saturating_sub(task_completed.load(Ordering::Relaxed) + 1),
-            )
-            .await;
+            );
+            // Bound the in-flight download by the shared batch deadline, so the
+            // total budget caps work mid-file, not only at file boundaries.
+            let result = match total_deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, download_fut)
+                    .await
+                    .unwrap_or_else(|_elapsed| {
+                        Err(FetchError::Timeout {
+                            // BORROW: explicit .clone() for owned String
+                            filename: file.filename.clone(),
+                            seconds: total_timeout_secs,
+                        })
+                    }),
+                // EXPLICIT: no overall budget — per-file timeout governs alone
+                None => download_fut.await,
+            };
             drop(permit);
             (file, result)
         });
@@ -586,7 +609,7 @@ pub(crate) async fn download_file_by_name(
         None
     };
 
-    let result = dispatch_download(
+    let download_fut = dispatch_download(
         &repo,
         &file,
         &metadata_map,
@@ -602,8 +625,12 @@ pub(crate) async fn download_file_by_name(
         &settings,
         on_progress.clone(),
         0, // files_remaining: only one file
-    )
-    .await;
+    );
+
+    // Bound the single in-flight file by the overall budget too. Without this
+    // wrapper `download-file` honored only `timeout_per_file` (default 300 s),
+    // so `--timeout-total-secs 3` was silently ignored on a long single file.
+    let result = bound_by_total_timeout(download_fut, settings.timeout_total, filename).await;
 
     let path = result?;
 
@@ -615,6 +642,40 @@ pub(crate) async fn download_file_by_name(
     }
 
     Ok(DownloadOutcome::Downloaded(path))
+}
+
+/// Bounds an in-flight download future by the overall `timeout_total` budget.
+///
+/// `timeout_per_file` already caps how long any single file may take, but it
+/// is a per-file ceiling: a long single file (the whole of `download-file`,
+/// or the dominant file in a batch) could run for up to `timeout_per_file`
+/// regardless of a much shorter `--timeout-total-secs`. This wraps the
+/// download in a wall-clock deadline so the total budget is a hard cap on
+/// in-flight work, not merely a between-files check. A `None` budget leaves
+/// the future unbounded (per-file timeout still applies inside).
+///
+/// # Errors
+///
+/// Returns [`FetchError::Timeout`] if the budget elapses before the download
+/// completes, or whatever error the download itself produced.
+async fn bound_by_total_timeout(
+    download_fut: impl std::future::Future<Output = Result<PathBuf, FetchError>>,
+    timeout_total: Option<Duration>,
+    filename: &str,
+) -> Result<PathBuf, FetchError> {
+    match timeout_total {
+        Some(limit) => tokio::time::timeout(limit, download_fut)
+            .await
+            .unwrap_or_else(|_elapsed| {
+                Err(FetchError::Timeout {
+                    // BORROW: explicit .to_owned() for &str → owned String
+                    filename: filename.to_owned(),
+                    seconds: limit.as_secs(),
+                })
+            }),
+        // EXPLICIT: no overall budget set — per-file timeout governs alone
+        None => download_fut.await,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1444,5 +1505,45 @@ mod tests {
         assert!(got.is_some(), "nested file should resolve");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---------- bound_by_total_timeout ----------
+    // `start_paused` runs on virtual time: `sleep` auto-advances the clock
+    // when the runtime is otherwise idle, so these fire instantly with no
+    // real-world wait while still exercising the real `tokio::time::timeout`.
+
+    #[tokio::test(start_paused = true)]
+    async fn bound_by_total_timeout_fires_when_budget_elapses() {
+        let slow = async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(PathBuf::from("never reached"))
+        };
+        let result =
+            bound_by_total_timeout(slow, Some(Duration::from_secs(3)), "model.safetensors").await;
+        match result {
+            Err(FetchError::Timeout { filename, seconds }) => {
+                assert_eq!(filename, "model.safetensors");
+                assert_eq!(seconds, 3);
+            }
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bound_by_total_timeout_passes_fast_success_through() {
+        let fast = async { Ok(PathBuf::from("done")) };
+        let result = bound_by_total_timeout(fast, Some(Duration::from_secs(3)), "f").await;
+        assert_eq!(result.unwrap(), PathBuf::from("done"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bound_by_total_timeout_none_budget_is_unbounded() {
+        // No cap: even a long sleep completes (virtual time advances on idle).
+        let slow_but_ok = async {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            Ok(PathBuf::from("eventually"))
+        };
+        let result = bound_by_total_timeout(slow_but_ok, None, "f").await;
+        assert_eq!(result.unwrap(), PathBuf::from("eventually"));
     }
 }

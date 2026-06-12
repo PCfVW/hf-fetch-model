@@ -58,7 +58,9 @@ name = "progress"
 required-features = ["indicatif"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# `test-util` enables `#[tokio::test(start_paused = true)]` virtual-time tests
+# (the `bound_by_total_timeout` budget tests fire instantly on a paused clock).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # `test-helpers` exposes `GpuDeviceInfo::builder()` for synthetic fixtures
 # in tests that exercise the fit / miss JSON path. Default-off in runtime.
 hypomnesis = { version = "0.2.1", features = ["test-helpers"] }
