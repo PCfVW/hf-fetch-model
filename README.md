@@ -21,7 +21,11 @@ A Rust library and CLI for downloading and inspecting HuggingFace models. Multi-
 - [License](#license)
 - [Development](#development)
 
-> **New to hf-fm?** Walk through [Inspect before you download](docs/tutorials/inspect-before-downloading.md) — a 7-minute tour of what the tool does without downloading a single weight byte. Common questions live in the [FAQ](docs/FAQ.md); every flag is in the [CLI Reference](docs/cli-reference.md).
+> **New to hf-fm?**
+> - **I want to know which model to download** → [Inspect before you download](docs/tutorials/inspect-before-downloading.md): read tensor shapes, size, and architecture without pulling a single weight byte.
+> - **I want to manage the models on my disk** → [Clean up before your disk fills](docs/tutorials/clean-up-before-your-disk-fills.md): see what the cache holds, then reclaim space safely.
+>
+> Common questions live in the [FAQ](docs/FAQ.md); every flag is in the [CLI Reference](docs/cli-reference.md).
 
 ## Install
 

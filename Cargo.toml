@@ -25,7 +25,7 @@ cli = ["dep:clap", "dep:tracing-subscriber", "indicatif"]
 # lines fire on cached BnB / GPTQ / AWQ safetensors (without them the
 # tensors classify as `Passthrough` and `detect_scheme` returns
 # `Unquantized` — silently no-op for the families the feature targets).
-anamnesis = { version = "0.6.5", features = ["gguf", "npz", "pth", "bnb", "gptq", "awq"] }
+anamnesis = { version = "0.6.7", features = ["gguf", "npz", "pth", "bnb", "gptq", "awq"] }
 clap = { version = "4", features = ["derive"], optional = true }
 dirs = "6"
 fs2 = "0.4"

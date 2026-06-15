@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **README onboarding callout is now an intention-based, two-tutorial list.** The above-the-fold "New to hf-fm?" callout previously pointed only at the inspect tutorial; the v0.10.5 cache tutorial existed but surfaced solely in the Documentation table, so a newcomer reading the top of the README never saw it. It is now a two-bullet **"I want to…"** intention list — *"I want to know which model to download"* → [Inspect before you download](docs/tutorials/inspect-before-downloading.md), *"I want to manage the models on my disk"* → [Clean up before your disk fills](docs/tutorials/clean-up-before-your-disk-fills.md) — lifecycle-ordered (choose → manage), with the FAQ / CLI-reference pointers kept below. Both tutorials now surface at the same tier.
+- **`inspect` / `diff` `--filter` is now case-insensitive.** v0.10.5 made `inspect --pick`'s substring matching case-insensitive, but `--filter` everywhere stayed case-sensitive (`name.contains(pattern)`), so `--filter "Layers.0"` silently matched nothing against `model.layers.0.*` for a user who had internalised the `--pick` contract. All eight `--filter` call sites across `inspect` (single-file, repo aggregate, shard-index summary, multi-file summary, both JSON paths) and `diff` (name set, dtype histograms) now route through one shared `matches_filter` predicate that lowercases both operands. **Behavior change** — it only *widens* matches (a case-sensitive match is still a match), so it cannot drop a result a script previously relied on; no library API change (binary-side only). Help text and the [CLI reference](docs/cli-reference.md) note the case-insensitivity.
+- **Repo-level `inspect` rollups now give a consistent per-tensor-detail hint.** The shard-index summary printed a terse `Hint: use hf-fm inspect <repo> <filename> for per-tensor detail`, while the non-sharded multi-file summary printed a richer "this rollup hides tensor names — run … `--tree` (or `--dtypes`) for per-tensor detail." The two paths now share the richer wording, so a sharded vs non-sharded repo gives the same-quality nudge.
+- **`FetchError::Auth` documentation corrected.** The variant's rustdoc claimed it was "reserved for future use" and that auth failures surface as `FetchError::Api`, but the gated-model pre-flight in `download` / `download_with_config` has actively returned `Auth` (no token, or token rejected on 401/403) since v0.9.3. The doc-comment now describes the real semantics, so library consumers (candle-mi, anamnesis) can rely on matching `Auth`. Doc-comment only; no behavior change.
+
+### Fixed
+
+- **`list-files` no longer prints "1 files".** The summary footer hardcoded the word `files`, so a single-match repo read `1 files, 3.68 GiB total` — the lone rollup in the binary that skipped the existing `pluralize()` helper every other summary uses. Now `1 file` / `N files`.
+
+### Security
+
+- **`anamnesis` `0.6.5` → `0.6.7` — picks up the Phase 6.11 (pickle-VM) and 6.12 (vendored-ZIP) parser hardening that protects hf-fm's `inspect --cached` PTH / NPZ paths.** hf-fm hands untrusted on-disk files to anamnesis's parsers on every cached inspect, so anamnesis's untrusted-input hardening is hf-fm's hardening. 6.11 hardens the PTH pickle-VM interpreter and 6.12 the NPZ/ZIP archive path — exactly the `inspect_pth_cached` / `inspect_npz_cached` parsers hf-fm drives. Inert for hf-fm's metadata-only usage (it never calls `remember` / dequant); the `inspect_cached_*` integration suite passes unchanged, confirming identical inspect-path output. Continues the supply-chain-hygiene theme of the v0.10 line.
+
 ## [0.10.5] — Interactive inspect picker & the v0.10 security capstone
 
 ### Added

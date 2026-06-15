@@ -31,10 +31,14 @@ pub enum FetchError {
         repo_id: String,
     },
 
-    /// Authentication failed (missing or invalid token).
+    /// Authentication failed: a gated repository was requested without a
+    /// token, or the supplied token was rejected (HTTP 401/403).
     ///
-    /// Reserved for future use. Currently, auth failures surface as
-    /// [`FetchError::Api`] because `hf-hub` does not distinguish them.
+    /// Returned by the gated-model pre-flight in `download` /
+    /// `download_with_config` before any transfer starts; non-retryable. The
+    /// library `inspect` functions instead surface the raw HTTP status as
+    /// [`FetchError::Http`] (the `hf-fm` CLI upgrades those into this same
+    /// diagnosis). See the crate-level *Authentication* section.
     #[error("authentication failed: {reason}")]
     Auth {
         /// Description of the authentication failure.

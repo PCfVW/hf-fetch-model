@@ -334,7 +334,7 @@ See also: hf-fm list-families, hf-fm discover")]
         /// Cache-only mode: fail if files are not cached locally.
         #[arg(long)]
         cached: bool,
-        /// Show only tensors whose name contains this substring.
+        /// Show only tensors whose name contains this substring (case-insensitive).
         #[arg(long)]
         filter: Option<String>,
         /// Show only the summary line (counts per category).
@@ -440,7 +440,7 @@ See also: hf-fm list-families, hf-fm discover")]
         /// Output the full header as JSON instead of a human-readable table.
         #[arg(long)]
         json: bool,
-        /// Show only tensors whose name contains this substring.
+        /// Show only tensors whose name contains this substring (case-insensitive).
         #[arg(long)]
         filter: Option<String>,
         /// Show a per-dtype summary instead of individual tensors.
@@ -2563,6 +2563,21 @@ fn format_file_count(n: usize) -> String {
     format!("({n} {})", pluralize(n, "file", "files"))
 }
 
+/// Returns `true` when `name` contains `pattern` as a **case-insensitive**
+/// substring.
+///
+/// The single match predicate behind every `--filter` call site in `inspect`
+/// and `diff`, so they all agree with the case-insensitive substring contract
+/// `inspect --pick` adopted in v0.10.5 — e.g. `--filter "Layers.0"` now
+/// matches `model.layers.0.*`. Both operands are lowercased per call; tensor
+/// name lists are bounded (hundreds–thousands of entries), so the per-name
+/// allocation is not a hot-path concern.
+fn matches_filter(name: &str, pattern: &str) -> bool {
+    // BORROW: explicit .as_str() for the lowercased String → &str
+    name.to_lowercase()
+        .contains(pattern.to_lowercase().as_str())
+}
+
 /// Builds a table-of-contents-style dotted filler of the exact requested `width`.
 ///
 /// Pattern: `"  .  .  .  .  ."` — two leading spaces, dots separated by
@@ -3828,7 +3843,7 @@ fn run_diff(
 
     // Apply filter.
     if let Some(pattern) = filter {
-        all_names.retain(|name| name.contains(pattern));
+        all_names.retain(|name| matches_filter(name, pattern));
     }
 
     // Classify into four buckets.
@@ -4213,8 +4228,8 @@ fn aggregate_diff_dtypes(
         let filtered = map
             .iter()
             // `is_none_or` keeps the tensor when filter is None, or when its
-            // name contains the filter pattern. Stable since Rust 1.82.
-            .filter(|(name, _)| filter.is_none_or(|p| name.contains(p)))
+            // name matches the filter pattern. Stable since Rust 1.82.
+            .filter(|(name, _)| filter.is_none_or(|p| matches_filter(name, p)))
             .map(|(_, t)| t);
         let mut rows: Vec<DiffDtypeGroup> = compute_dtype_groups(filtered)
             .into_iter()
@@ -5558,7 +5573,8 @@ fn run_inspect_single(
     let total_params = info.total_params();
     if let Some(pattern) = filter {
         // BORROW: explicit .as_str() instead of Deref coercion
-        info.tensors.retain(|t| t.name.as_str().contains(pattern));
+        info.tensors
+            .retain(|t| matches_filter(t.name.as_str(), pattern));
     }
 
     // Apply limit after filter. Track matched counts to report truncation.
@@ -6098,7 +6114,7 @@ fn run_inspect_repo_aggregated(
 
     if let Some(pattern) = filter {
         // BORROW: explicit .as_str() instead of Deref coercion
-        flat.retain(|(_, t)| t.name.as_str().contains(pattern));
+        flat.retain(|(_, t)| matches_filter(t.name.as_str(), pattern));
     }
 
     let matched_count = flat.len();
@@ -6492,7 +6508,7 @@ fn print_shard_index_summary(repo_id: &str, index: &inspect::ShardedIndex, filte
     let mut filtered_total: usize = 0;
     for (tensor_name, shard_name) in &index.weight_map {
         if let Some(pattern) = filter {
-            if !tensor_name.contains(pattern) {
+            if !matches_filter(tensor_name, pattern) {
                 continue;
             }
         }
@@ -6545,7 +6561,10 @@ fn print_shard_index_summary(repo_id: &str, index: &inspect::ShardedIndex, filte
     } else {
         println!("  {displayed_shards} {shard_label}, {filtered_total} {tensor_label}");
     }
-    println!("  Hint: use `hf-fm inspect {repo_id} <filename>` for per-tensor detail");
+    println!(
+        "  Hint: this rollup hides tensor names \u{2014} run \
+         `hf-fm inspect {repo_id} <filename> --tree` (or `--dtypes`) for per-tensor detail."
+    );
 }
 
 /// Prints multi-file inspection results as JSON, optionally filtering tensors.
@@ -6561,7 +6580,7 @@ fn print_multi_file_json(
                 let matching: Vec<inspect::TensorInfo> = info
                     .tensors
                     .iter()
-                    .filter(|t| t.name.as_str().contains(pattern)) // BORROW: explicit .as_str()
+                    .filter(|t| matches_filter(t.name.as_str(), pattern)) // BORROW: explicit .as_str()
                     .cloned()
                     .collect();
                 if matching.is_empty() {
@@ -6625,7 +6644,7 @@ fn print_multi_file_json_with_gpu_check(
                     .tensors
                     .iter()
                     // BORROW: explicit .as_str() for &String → &str
-                    .filter(|t| t.name.as_str().contains(pattern))
+                    .filter(|t| matches_filter(t.name.as_str(), pattern))
                     .cloned()
                     .collect();
                 if matching.is_empty() {
@@ -6726,7 +6745,7 @@ fn print_multi_file_summary(
                 .tensors
                 .iter()
                 // BORROW: explicit .as_str() instead of Deref coercion
-                .filter(|t| t.name.as_str().contains(pattern))
+                .filter(|t| matches_filter(t.name.as_str(), pattern))
                 .collect();
             let p: u64 = matching.iter().map(|t| t.num_elements()).sum();
             (matching.len(), p)
@@ -7104,15 +7123,16 @@ fn run_list_files(
 
     // Summary line.
     let count = filtered.len();
+    let file_label = pluralize(count, "file", "files");
     let row_width = fw + 2 + 10 + 2 + 12;
     println!("  {:\u{2500}<row_width$}", "");
     if show_cached {
         println!(
-            "  {count} files, {} total ({cached_count} cached)",
+            "  {count} {file_label}, {} total ({cached_count} cached)",
             format_size(total_bytes)
         );
     } else {
-        println!("  {count} files, {} total", format_size(total_bytes));
+        println!("  {count} {file_label}, {} total", format_size(total_bytes));
     }
     if any_no_sha && !no_checksum {
         println!("  \u{2014} = not an LFS file (no SHA256 tracked by the Hub)");
@@ -7455,6 +7475,34 @@ mod tests {
         );
         assert!(is_auth_status_error(&forbidden));
         assert!(is_auth_status_error(&unauthorized));
+    }
+
+    // ---------- matches_filter (case-insensitive substring) ----------
+
+    #[test]
+    fn matches_filter_is_case_insensitive() {
+        // Exact-case substring still matches — no regression vs the old
+        // case-sensitive `contains`.
+        assert!(matches_filter(
+            "model.layers.0.mlp.down_proj.weight",
+            "layers.0"
+        ));
+        // Mixed-/upper-case pattern now matches a lower-case name: the v0.10.6
+        // alignment with the case-insensitive `inspect --pick` contract.
+        assert!(matches_filter(
+            "model.layers.0.mlp.down_proj.weight",
+            "Layers.0"
+        ));
+        assert!(matches_filter(
+            "model.layers.0.mlp.down_proj.weight",
+            "LAYERS"
+        ));
+        // Upper-case name, lower-case pattern (GGUF `blk.` style).
+        assert!(matches_filter("BLK.0.ATTN_Q.weight", "blk.0"));
+        // Non-substring still fails.
+        assert!(!matches_filter("model.embed_tokens.weight", "layers.0"));
+        // Empty pattern is a substring of every name.
+        assert!(matches_filter("anything", ""));
     }
 
     #[test]
