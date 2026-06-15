@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`list-files` no longer prints "1 files".** The summary footer hardcoded the word `files`, so a single-match repo read `1 files, 3.68 GiB total` — the lone rollup in the binary that skipped the existing `pluralize()` helper every other summary uses. Now `1 file` / `N files`.
+- **`inspect --json` now emits JSON on sharded repos instead of silently printing the human rollup.** On a sharded repo, `inspect <repo> --json` (and `--filter … --json`) with no aggregation flag (`--dtypes` / `--tree` / `--limit` / `--check-gpu`) returned early through the shard-index fast path, whose renderer (`print_shard_index_summary`) takes no `json` parameter — so it printed the human shard table, breaking any `jq` pipeline that fed it. `--json` now bypasses the shard-index fast path and falls through to the header-reading `print_multi_file_json`, emitting full per-tensor JSON (it reads the shard headers, which a `--json` caller wants). Higher severity than a cosmetic gap because it failed *silently*; the narrow scope (sharded repo + `--json` + no aggregation flag) is why it survived. The non-sharded repo path was already correct.
 
 ### Security
 

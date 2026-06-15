@@ -5923,6 +5923,15 @@ fn run_inspect_repo(
     // across shards, so it forces the aggregation path too.
     let needs_aggregation = dtypes || tree || limit.is_some() || check_gpu.is_some();
 
+    // The shard-index fast path renders a per-file rollup straight from
+    // `model.safetensors.index.json` with no header reads, but it is
+    // human-only — `print_shard_index_summary` takes no `json` flag. So
+    // `--json` must bypass it and fall through to the header-reading
+    // `print_multi_file_json`, which emits real per-tensor JSON. (v0.10.6
+    // Symptom 2: `--json` was previously ignored on this path for sharded
+    // repos, silently printing the human rollup instead.)
+    let use_shard_fast_path = !needs_aggregation && !json;
+
     // KV bundle for `--context` (None when not requested, so no I/O on the
     // non-aggregation fast paths). Computed once and shared by both the cached
     // and network aggregation paths below.
@@ -5930,7 +5939,7 @@ fn run_inspect_repo(
 
     if cached {
         // Cache-only: try shard index first, then walk snapshot.
-        if !needs_aggregation {
+        if use_shard_fast_path {
             if let Some(index) = inspect::fetch_shard_index_cached(repo_id, revision)? {
                 print_shard_index_summary(repo_id, &index, filter);
                 print_adapter_config_if_present(repo_id, revision, None, true, json);
@@ -5983,7 +5992,7 @@ fn run_inspect_repo(
         source: e,
     })?;
 
-    if !needs_aggregation {
+    if use_shard_fast_path {
         // BORROW: explicit .as_deref() for Option<String> → Option<&str>
         let shard_index = rt.block_on(inspect::fetch_shard_index(
             repo_id,

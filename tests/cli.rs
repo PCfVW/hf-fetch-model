@@ -1691,6 +1691,35 @@ fn inspect_cached_sharded_dtypes_json_aggregates() {
 }
 
 #[test]
+fn inspect_cached_sharded_json_emits_json() {
+    // v0.10.6 (Symptom 2 fix): `--json` with no aggregation flag must emit
+    // JSON on the shard-index fast path, not the human shard rollup. Before
+    // the fix, `print_shard_index_summary` returned before the `if json`
+    // branch, so a sharded repo silently printed the human table. No filter
+    // needed — bare `--json` exercises the same fast path the filtered form
+    // hits, and stays robust regardless of which sharded repo is cached.
+    let Some(repo_id) = find_cached_sharded_repo() else {
+        eprintln!("SKIP: no cached sharded safetensors model found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args(["inspect", &repo_id, "--cached", "--json"]));
+    assert!(
+        success,
+        "inspect --cached --json sharded model should succeed: {stderr}"
+    );
+    // The per-file JSON array carries SafetensorsHeaderInfo fields...
+    assert!(
+        stdout.contains("\"tensors\"") && stdout.contains("\"header_size\""),
+        "sharded --json should emit per-tensor JSON, got:\n{stdout}"
+    );
+    // ...and must NOT be the human shard summary.
+    assert!(
+        !stdout.contains("shard index"),
+        "sharded --json must not print the human shard summary, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn inspect_cached_sharded_limit_shows_shard_column() {
     let Some(repo_id) = find_cached_sharded_repo() else {
         eprintln!("SKIP: no cached sharded safetensors model found");
