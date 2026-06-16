@@ -1799,6 +1799,68 @@ fn inspect_cached_filter() {
     );
 }
 
+#[test]
+fn inspect_cached_sharded_repo_filter_lists_names() {
+    // v0.10.6 (Symptom 1): a filtered repo-level inspect (no FILE) lists the
+    // matched tensor NAMES nested under each shard, not just a per-shard count.
+    // Exercises print_shard_index_summary, whose names come free from the shard
+    // index's weight_map (no header reads).
+    let Some(repo_id) = find_cached_sharded_repo() else {
+        eprintln!("SKIP: no cached sharded safetensors model found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, "--cached", "--filter", "weight"]));
+    assert!(
+        success,
+        "repo-level sharded inspect --filter should succeed: {stderr}"
+    );
+    assert!(
+        stdout.contains("shard index"),
+        "should take the shard-index path, got:\n{stdout}"
+    );
+    // At least one matched tensor name is listed, nested (4-space indent)
+    // beneath its shard row; "weight" is the filter so every listed name has it.
+    let has_nested_name = stdout
+        .lines()
+        .any(|l| l.starts_with("    ") && l.trim().contains("weight"));
+    assert!(
+        has_nested_name,
+        "filtered shard rollup should list matched tensor names, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_repo_filter_lists_names() {
+    // Companion to the sharded test: a filtered repo-level inspect (no FILE) on
+    // any cached repo lists matched names. A single-`.safetensors` repo with no
+    // index takes the multi-file path (print_multi_file_summary); the assertion
+    // holds for either rollup.
+    let Some((repo_id, _filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["inspect", &repo_id, "--cached", "--filter", "weight"]));
+    assert!(
+        success,
+        "repo-level inspect --filter should succeed: {stderr}"
+    );
+    // The summary still echoes the active filter...
+    assert!(
+        stdout.contains("filter:"),
+        "filtered rollup should echo the filter, got:\n{stdout}"
+    );
+    // ...and at least one matched name is listed nested beneath its file row.
+    let has_nested_name = stdout
+        .lines()
+        .any(|l| l.starts_with("    ") && l.trim().contains("weight"));
+    assert!(
+        has_nested_name,
+        "filtered rollup should list matched tensor names, got:\n{stdout}"
+    );
+}
+
 // -----------------------------------------------------------------------
 // diff subcommand (cache-only tests — no network)
 // -----------------------------------------------------------------------

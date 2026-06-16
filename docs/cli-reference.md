@@ -203,6 +203,10 @@ hf-fm inspect google/gemma-2-2b-it model-00001-of-00002.safetensors --json
 # Inspect all safetensors in a repo (uses shard index fast path when available)
 hf-fm inspect google/gemma-2-2b-it
 
+# Repo-level filter: list the matched tensor names nested under each shard/file
+# (case-insensitive substring; add --limit N to cap a broad match)
+hf-fm inspect google/gemma-2-2b-it --filter "layers.0."
+
 # List the repo's tensor files (.safetensors / .gguf / .npz / .pth) — no headers read
 hf-fm inspect google/gemma-2-2b-it --list
 
@@ -313,6 +317,8 @@ hf-fm du --tree --age
 |------|-------------|---------|
 | `--age` | Show a last-modified age column (e.g., `2 days ago`, `3 months ago`) | off |
 | `--tree` | Hierarchical tree view: repos as branches, files as leaves, using box-drawing connectors. Composes with `--age`; conflicts with the positional repo argument (the per-repo view is already covered by `du <REPO_ID>`). | off |
+
+A repo with an in-progress or interrupted download carries a leading `●` marker in the `du` listing (`● = partial downloads`); run `hf-fm status <REPO_ID>` for the per-file breakdown.
 
 ## Other commands
 

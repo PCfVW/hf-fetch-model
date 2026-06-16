@@ -380,6 +380,7 @@ See also: hf-fm list-families, hf-fm discover")]
     /// for v0.11); pass `--cached` after downloading the file.
     #[command(after_help = "Examples:\n  \
         hf-fm inspect <repo>                                    # inspect every .safetensors in the repo\n  \
+        hf-fm inspect <repo> --filter blocks.0.                 # matched tensor names (per shard/file)\n  \
         hf-fm inspect <repo> --list                             # list tensor files (no headers read)\n  \
         hf-fm inspect <repo> 3                                  # inspect file #3 from --list\n  \
         hf-fm inspect <repo> --pick                             # pick the file interactively\n  \
@@ -6505,24 +6506,36 @@ fn print_dtype_summary(
     }
 }
 
-/// Prints shard index summary (tensor counts per shard).
+/// Prints the shard-index rollup: tensor counts per shard, plus the matched
+/// tensor names nested under each shard when a `filter` is active (the names
+/// come free from the index's `weight_map` — no header reads).
 fn print_shard_index_summary(repo_id: &str, index: &inspect::ShardedIndex, filter: Option<&str>) {
     println!("  Repo:   {repo_id}");
     println!("  Source: shard index (model.safetensors.index.json)");
     println!();
 
-    // Count tensors per shard, optionally filtering by tensor name.
+    // Count tensors per shard, optionally filtering by tensor name. When a
+    // filter is active we also collect the matched names per shard: they are
+    // free here (the shard index maps every name to its shard with no header
+    // reads), so the rollup can list them instead of hiding them behind a
+    // count (v0.10.6 Symptom 1).
     let total_tensors = index.weight_map.len();
-    let mut by_shard: HashMap<String, usize> = HashMap::new();
+    let mut by_shard: HashMap<&str, usize> = HashMap::new();
+    let mut names_by_shard: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut filtered_total: usize = 0;
     for (tensor_name, shard_name) in &index.weight_map {
         if let Some(pattern) = filter {
             if !matches_filter(tensor_name, pattern) {
                 continue;
             }
+            // BORROW: explicit .as_str() for &String → &str map key + value
+            names_by_shard
+                .entry(shard_name.as_str())
+                .or_default()
+                .push(tensor_name.as_str());
         }
-        // BORROW: explicit .clone() for owned String key
-        *by_shard.entry(shard_name.clone()).or_default() += 1;
+        // BORROW: explicit .as_str() for &String → &str map key
+        *by_shard.entry(shard_name.as_str()).or_default() += 1;
         filtered_total += 1;
     }
 
@@ -6537,11 +6550,22 @@ fn print_shard_index_summary(repo_id: &str, index: &inspect::ShardedIndex, filte
     println!("  {:<fw$} {:>8}", "File", "Tensors");
 
     for shard in &index.shards {
-        let count = by_shard.get(shard).copied().unwrap_or(0);
+        // BORROW: explicit .as_str() for &String → &str map lookup
+        let count = by_shard.get(shard.as_str()).copied().unwrap_or(0);
         if filter.is_some() && count == 0 {
             continue;
         }
         println!("  {shard:<fw$} {count:>8}");
+        // Filtered: list this shard's matched tensor names beneath its row.
+        if filter.is_some() {
+            if let Some(names) = names_by_shard.get(shard.as_str()) {
+                let mut sorted = names.clone();
+                sorted.sort_unstable();
+                for tname in sorted {
+                    println!("    {tname}");
+                }
+            }
+        }
     }
 
     println!("  {}", "\u{2500}".repeat(row_width));
@@ -6567,13 +6591,18 @@ fn print_shard_index_summary(repo_id: &str, index: &inspect::ShardedIndex, filte
             "  {displayed_shards} {shard_label}, {filtered_total}/{total_tensors} {tensor_label} (filter: {:?})",
             filter.unwrap_or_default(),
         );
+        println!(
+            "  Hint: names shown above \u{2014} for shapes/dtypes/sizes run \
+             `hf-fm inspect {repo_id} <filename> --tree` (or `--dtypes`), or add \
+             `--limit N` to cap a broad match."
+        );
     } else {
         println!("  {displayed_shards} {shard_label}, {filtered_total} {tensor_label}");
+        println!(
+            "  Hint: this rollup hides tensor names \u{2014} run \
+             `hf-fm inspect {repo_id} <filename> --tree` (or `--dtypes`) for per-tensor detail."
+        );
     }
-    println!(
-        "  Hint: this rollup hides tensor names \u{2014} run \
-         `hf-fm inspect {repo_id} <filename> --tree` (or `--dtypes`) for per-tensor detail."
-    );
 }
 
 /// Prints multi-file inspection results as JSON, optionally filtering tensors.
@@ -6719,7 +6748,8 @@ fn multi_file_source_label(sources: &[inspect::InspectSource]) -> String {
     }
 }
 
-/// Prints multi-file inspection results as a human-readable summary.
+/// Prints the multi-file rollup: per-file tensor counts and params, plus the
+/// matched tensor names nested under each file when a `filter` is active.
 fn print_multi_file_summary(
     repo_id: &str,
     source: &str,
@@ -6749,7 +6779,7 @@ fn print_multi_file_summary(
         total_tensors_unfiltered = total_tensors_unfiltered.saturating_add(info.tensors.len());
         total_params_unfiltered = total_params_unfiltered.saturating_add(info.total_params());
 
-        let (tensor_count, params) = if let Some(pattern) = filter {
+        let (tensor_count, params, matched_names) = if let Some(pattern) = filter {
             let matching: Vec<&inspect::TensorInfo> = info
                 .tensors
                 .iter()
@@ -6757,9 +6787,12 @@ fn print_multi_file_summary(
                 .filter(|t| matches_filter(t.name.as_str(), pattern))
                 .collect();
             let p: u64 = matching.iter().map(|t| t.num_elements()).sum();
-            (matching.len(), p)
+            // BORROW: explicit .as_str() for &String → &str
+            let mut names: Vec<&str> = matching.iter().map(|t| t.name.as_str()).collect();
+            names.sort_unstable();
+            (matching.len(), p, names)
         } else {
-            (info.tensors.len(), info.total_params())
+            (info.tensors.len(), info.total_params(), Vec::new())
         };
 
         if filter.is_some() && tensor_count == 0 {
@@ -6773,6 +6806,12 @@ fn print_multi_file_summary(
             "  {name:<fw$} {tensor_count:>8} {:>12}",
             inspect::format_params(params)
         );
+        // Filtered: list this file's matched tensor names beneath its row
+        // (v0.10.6 Symptom 1). Names only — shapes/dtypes stay in the per-file
+        // form the Hint points at, for parity with the shard-index path.
+        for tname in &matched_names {
+            println!("    {tname}");
+        }
     }
 
     println!("  {}", "\u{2500}".repeat(row_width));
@@ -6803,13 +6842,20 @@ fn print_multi_file_summary(
         );
     }
 
-    // Discoverability nudge: this rollup hides tensor names. For the common
-    // single-`.safetensors` repo it is least informative (one row, a param
-    // count, nothing else), so point the user at the per-tensor views. The
-    // tuple match gates on both no-`--filter` (a filtered view is already a
-    // deliberate drill-down) and exactly one file (the multi-shard rollup's
-    // per-file breakdown is itself the useful signal).
-    if let (None, [(name, _)]) = (filter, results) {
+    // Discoverability nudge. When filtered, the matched names are listed
+    // above, so the hint pivots to the shapes/dtypes the rollup still omits
+    // (and to `--limit` for capping a broad match). When unfiltered, names are
+    // hidden behind counts; nudge the common single-`.safetensors` repo (least
+    // informative — one row, a param count, nothing else) toward the per-tensor
+    // views. Multi-file unfiltered rollups keep their per-file breakdown as the
+    // useful signal, so they get no hint.
+    if filter.is_some() {
+        println!(
+            "  Hint: names shown above \u{2014} for shapes/dtypes/sizes run \
+             `hf-fm inspect {repo_id} <filename> --tree` (or `--dtypes`), or add \
+             `--limit N` to cap a broad match."
+        );
+    } else if let [(name, _)] = results {
         println!(
             "  Hint: this rollup hides tensor names \u{2014} run \
              `hf-fm inspect {repo_id} {name} --tree` (or `--dtypes`) for per-tensor detail."

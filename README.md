@@ -68,7 +68,7 @@ Without `--force`, a stale local registry index can cause `cargo install` to exi
 | `hf-fm list-families` | List model families in local cache |
 | `hf-fm list-files <REPO_ID>` | List remote files (sizes, SHA256) without downloading |
 | `hf-fm search <QUERY>` | Search the HuggingFace Hub for models |
-| `hf-fm status [REPO_ID]` | Show download status (complete / partial / missing / excluded) |
+| `hf-fm status [REPO_ID]` | Per-repo: per-file download status (complete / partial / missing / excluded). With no `REPO_ID`: a table of all cached repos, each marked `ok` or `PARTIAL`. |
 
 See [CLI Reference](docs/cli-reference.md) for all flags and output examples.
 

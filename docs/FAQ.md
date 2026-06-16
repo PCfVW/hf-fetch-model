@@ -197,7 +197,7 @@ Under `--pick`, the positional argument is a **case-insensitive substring** filt
 
 ### How do I see a model's tensor names without downloading it?
 
-Run `hf-fm inspect <repo>` with no filename and it will inspect every `.safetensors` file in the repository. For one specific file, add the filename (or an index from `--list`). Internally, hf-fm fetches only the JSON header via an HTTP Range request — for a typical 2 GiB safetensors file, you transfer maybe 70 KiB of metadata. Add `--tree` for the hierarchical view that groups numeric layers (`layers.[0..27]   (×28)`), or `--dtypes` for a dtype-and-parameter summary. For a complete walkthrough on a real 4-shard model, see [Inspect before you download](tutorials/inspect-before-downloading.md).
+Run `hf-fm inspect <repo>` with no filename for a per-file (or, on sharded repos, per-shard) rollup — tensor *counts* and parameters. To see the tensor *names*, either name a specific file (or an index from `--list`), or add `--filter "<substring>"`, which lists the matching names nested under each shard/file (e.g. `--filter "layers.0."` for everything in block 0; the match is case-insensitive). Internally, hf-fm fetches only the JSON header via an HTTP Range request — for a typical 2 GiB safetensors file, you transfer maybe 70 KiB of metadata. Add `--tree` for the hierarchical view that groups numeric layers (`layers.[0..27]   (×28)`), or `--dtypes` for a dtype-and-parameter summary. For a complete walkthrough on a real 4-shard model, see [Inspect before you download](tutorials/inspect-before-downloading.md).
 
 ### How do I compare two HuggingFace models structurally?
 
