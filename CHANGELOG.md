@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6] — Dogfooding polish & onboarding
+
 ### Changed
 
 - **README onboarding callout is now an intention-based, two-tutorial list.** The above-the-fold "New to hf-fm?" callout previously pointed only at the inspect tutorial; the v0.10.5 cache tutorial existed but surfaced solely in the Documentation table, so a newcomer reading the top of the README never saw it. It is now a two-bullet **"I want to…"** intention list — *"I want to know which model to download"* → [Inspect before you download](docs/tutorials/inspect-before-downloading.md), *"I want to manage the models on my disk"* → [Clean up before your disk fills](docs/tutorials/clean-up-before-your-disk-fills.md) — lifecycle-ordered (choose → manage), with the FAQ / CLI-reference pointers kept below. Both tutorials now surface at the same tier.

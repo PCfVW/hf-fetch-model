@@ -445,7 +445,7 @@ Resolving to transformer/demonCORESFWNSFW_fluxV13.safetensors
 
 **Status: shipped (all four table rows).** One design decision went beyond the table: rather than giving `--pick` a private multi-format listing, the **whole listing universe was unified** — `inspect --list` and the v0.9.7 numeric index now also cover `.safetensors` / `.gguf` / `.npz` / `.pth`, so `#N` means the same file in `--list`, `inspect <repo> <n>`, and the picker (one additive library helper, `inspect::list_cached_tensor_files`, plus the shared `is_supported_tensor_file` predicate). Two further contracts fixed at implementation time: under `--pick` the positional is **always** a substring (never a numeric index — the picker is the selection mechanism), and the substring match is **case-insensitive**.
 
-### v0.10.6 — Dogfooding polish & onboarding (planned)
+### v0.10.6 — Dogfooding polish & onboarding ✓
 
 | Feature | Scope |
 |---------|-------|
