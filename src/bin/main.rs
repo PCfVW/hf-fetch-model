@@ -22,8 +22,8 @@ use hf_fetch_model::inspect;
 use hf_fetch_model::progress::IndicatifProgress;
 use hf_fetch_model::repo;
 use hf_fetch_model::{
-    compile_glob_patterns, file_matches, has_glob_chars, FetchConfig, FetchConfigBuilder,
-    FetchError, Filter,
+    compile_glob_patterns, file_matches, has_glob_chars, DownloadPlan, FetchConfig,
+    FetchConfigBuilder, FetchError, Filter,
 };
 
 #[path = "../format.rs"]
@@ -286,6 +286,10 @@ See also: hf-fm list-families, hf-fm discover")]
         /// `--timeout-per-file-secs`.
         #[arg(long)]
         timeout_total_secs: Option<u64>,
+
+        /// Preview what would be downloaded without actually downloading.
+        #[arg(long)]
+        dry_run: bool,
 
         /// Copy the downloaded file to flat layout: `{output-dir}/{filename}`.
         ///
@@ -818,6 +822,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             connections_per_file,
             timeout_per_file_secs,
             timeout_total_secs,
+            dry_run,
             flat,
         }) => run_download_file(DownloadFileParams {
             repo_id: repo_id.as_str(),
@@ -829,6 +834,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             connections_per_file,
             timeout_per_file_secs,
             timeout_total_secs,
+            dry_run,
             flat,
         }),
         Some(Commands::Status {
@@ -1314,6 +1320,21 @@ fn run_dry_run(repo_id: &str, args: &DownloadArgs) -> Result<(), FetchError> {
     }
     println!();
 
+    render_download_plan(&plan)
+}
+
+/// Renders a [`DownloadPlan`]'s file table, byte summary, and (when not fully
+/// cached) the recommended [`FetchConfig`] tuning block.
+///
+/// The shared body behind both `download --dry-run` ([`run_dry_run`]) and
+/// `download-file --dry-run` ([`run_download_file_dry_run`]); each caller prints
+/// its own header before delegating here so the table/summary stay identical.
+///
+/// # Errors
+///
+/// Returns [`FetchError::InvalidPattern`] if [`DownloadPlan::recommended_config`]
+/// fails (should not happen — the recommended builder sets no glob patterns).
+fn render_download_plan(plan: &DownloadPlan) -> Result<(), FetchError> {
     // Display file table.
     let fw = plan
         .files
@@ -1386,6 +1407,7 @@ struct DownloadFileParams<'a> {
     connections_per_file: Option<usize>,
     timeout_per_file_secs: Option<u64>,
     timeout_total_secs: Option<u64>,
+    dry_run: bool,
     flat: bool,
 }
 
@@ -1400,12 +1422,20 @@ fn run_download_file(params: DownloadFileParams<'_>) -> Result<(), FetchError> {
         connections_per_file,
         timeout_per_file_secs,
         timeout_total_secs,
+        dry_run,
         flat,
     } = params;
     if !repo_id.contains('/') {
         return Err(FetchError::InvalidArgument(format!(
             "invalid REPO_ID \"{repo_id}\": expected \"org/model\" format (e.g., \"mntss/clt-gemma-2-2b-426k\")"
         )));
+    }
+
+    // Preview only — resolve the file list (single or glob) and render the
+    // dry-run table without downloading. Handled before the glob dispatch so
+    // both forms share one entry point.
+    if dry_run {
+        return run_download_file_dry_run(repo_id, filename, revision, token, output_dir, flat);
     }
 
     // Glob pattern: list repo files, filter, and download each match.
@@ -1420,6 +1450,7 @@ fn run_download_file(params: DownloadFileParams<'_>) -> Result<(), FetchError> {
             connections_per_file,
             timeout_per_file_secs,
             timeout_total_secs,
+            dry_run,
             flat,
         });
     }
@@ -1501,6 +1532,88 @@ fn run_download_file(params: DownloadFileParams<'_>) -> Result<(), FetchError> {
     Ok(())
 }
 
+/// Renders the `download-file --dry-run` preview for a single file or glob
+/// without downloading.
+///
+/// Resolves the target list by passing `filename` (a literal name or a glob) as
+/// the lone include filter to [`download_plan`], mirroring what a real
+/// `download-file` would fetch, then prints a tailored `Repo` / `Revision`
+/// (+ `Flat`) header and delegates to [`render_download_plan`] for the shared
+/// file table. An explicit filename matching nothing is an error; a glob
+/// matching nothing prints a notice and succeeds — matching the real paths.
+///
+/// # Errors
+///
+/// Returns [`FetchError::InvalidArgument`] when an explicit (non-glob)
+/// `filename` matches no file in the repository.
+/// Returns [`FetchError::Http`] if the `HuggingFace` API listing request fails.
+/// Returns [`FetchError::Io`] if the async runtime cannot be created.
+fn run_download_file_dry_run(
+    repo_id: &str,
+    filename: &str,
+    revision: Option<&str>,
+    token: Option<&str>,
+    output_dir: Option<PathBuf>,
+    flat: bool,
+) -> Result<(), FetchError> {
+    // The filename (literal name or glob) is the lone include filter, mirroring
+    // what a real download-file would fetch.
+    let mut builder = FetchConfig::builder().filter(filename);
+
+    if let Some(rev) = revision {
+        builder = builder.revision(rev);
+    }
+    if let Some(tok) = token {
+        builder = builder.token(tok);
+    } else {
+        builder = builder.token_from_env();
+    }
+
+    // When --flat, output_dir is the flat copy target, not the HF cache root,
+    // so the plan keeps the default cache root in that case.
+    // BORROW: explicit .clone() for owned Option<PathBuf>
+    let flat_target = if flat { output_dir.clone() } else { None };
+    if !flat {
+        if let Some(dir) = output_dir {
+            builder = builder.output_dir(dir);
+        }
+    }
+
+    let config = builder.build()?;
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| FetchError::Io {
+        path: PathBuf::from("<runtime>"),
+        source: e,
+    })?;
+
+    let plan = rt.block_on(hf_fetch_model::download_plan(repo_id, &config))?;
+
+    if plan.files.is_empty() {
+        if has_glob_chars(filename) {
+            println!("No files matched pattern \"{filename}\" in {repo_id}");
+            return Ok(());
+        }
+        return Err(FetchError::InvalidArgument(format!(
+            "\"{filename}\" not found in {repo_id}"
+        )));
+    }
+
+    // Tailored header — no preset/--filter line; download-file's filename is
+    // positional, not a glob-filter set.
+    println!("  Repo:     {}", plan.repo_id);
+    println!("  Revision: {}", plan.revision);
+    if flat {
+        let target = resolve_flat_target(flat_target.as_deref())?;
+        println!(
+            "  Flat:     {} (files will be copied here)",
+            target.display()
+        );
+    }
+    println!();
+
+    render_download_plan(&plan)
+}
+
 /// Downloads files matching a glob pattern from a repository.
 ///
 /// Lists all remote files, filters by the glob, and downloads each match
@@ -1516,6 +1629,9 @@ fn run_download_file_glob(params: DownloadFileParams<'_>) -> Result<(), FetchErr
         connections_per_file,
         timeout_per_file_secs,
         timeout_total_secs,
+        // EXPLICIT: dry-run is intercepted in run_download_file before this glob
+        // path; only real downloads reach here.
+        dry_run: _,
         flat,
     } = params;
     // When --flat, output_dir is the flat copy target, not the HF cache root.

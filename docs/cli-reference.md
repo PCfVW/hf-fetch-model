@@ -77,6 +77,9 @@ hf-fm download-file mntss/clt-gemma-2-2b-426k W_dec_0.safetensors
 # Download sharded PyTorch files by glob pattern
 hf-fm download-file org/model "pytorch_model-*.bin"
 
+# Preview which files / how many bytes a glob would pull, without downloading
+hf-fm download-file org/model "pytorch_model-*.bin" --dry-run
+
 # Download to flat layout (files directly in target directory)
 hf-fm google/gemma-2-2b-it --preset safetensors --flat --output-dir ./models
 
@@ -473,7 +476,7 @@ Exit code is non-zero only when at least one file mismatched; `skipped` and `mis
 
 ## Download flags
 
-These flags apply to the default download command (`hf-fm <REPO_ID>`). `download-file` shares the performance and timeout flags (`--chunk-threshold-mib`, `--concurrency`, `--connections-per-file`, `--timeout-per-file-secs`, `--timeout-total-secs`) and `--flat`, but not `--dry-run`, `--filter`, or `--preset`. `download-file` also accepts glob patterns (e.g., `"pytorch_model-*.bin"`) as the filename argument.
+These flags apply to the default download command (`hf-fm <REPO_ID>`). `download-file` shares the performance and timeout flags (`--chunk-threshold-mib`, `--concurrency`, `--connections-per-file`, `--timeout-per-file-secs`, `--timeout-total-secs`), `--flat`, and `--dry-run`, but not `--filter` or `--preset`. `download-file` also accepts glob patterns (e.g., `"pytorch_model-*.bin"`) as the filename argument; with `--dry-run` it previews the matched file(s) and byte totals (a non-matching explicit filename errors; a non-matching glob prints a notice and exits 0) without downloading.
 
 | Flag | Description | Default |
 |------|-------------|---------|

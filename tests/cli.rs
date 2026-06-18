@@ -113,6 +113,31 @@ fn download_file_help_mentions_glob() {
 }
 
 #[test]
+fn download_file_help_shows_dry_run_flag() {
+    let (stdout, stderr, success) = run(hf_fm().args(["download-file", "--help"]));
+    assert!(success, "download-file --help failed: {stderr}");
+    assert!(
+        stdout.contains("--dry-run"),
+        "download-file help should show --dry-run flag, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn download_file_dry_run_invalid_repo_format() {
+    // Validation rejects a repo id without a slash before any network call.
+    let (_stdout, stderr, success) =
+        run(hf_fm().args(["download-file", "noSlash", "model.safetensors", "--dry-run"]));
+    assert!(
+        !success,
+        "download-file --dry-run with invalid repo should fail"
+    );
+    assert!(
+        stderr.contains("org/model"),
+        "error should mention expected format, got:\n{stderr}"
+    );
+}
+
+#[test]
 fn help_shows_timeout_flags() {
     let (stdout, stderr, success) = run(hf_fm().arg("--help"));
     assert!(success, "--help failed: {stderr}");
