@@ -651,3 +651,18 @@ For autoregressive inference the PCIe 3.0 ×2 wiring is fine. Prefill on long se
 2. *No BIOS configuration required.* §1 and §2 of the manual mention no disabling or sharing of PCIEX2 lanes. The slot is hardwired ×2 from the chipset regardless of which other slots are populated. Both GPUs will appear in `nvidia-smi` and in `hypomnesis::device_count()` automatically — which is exactly what `inspect --check-gpu all` needs.
 
 **Conclusion.** Hardware plan is viable for the v0.12.0 work. Only material risk before purchase is **physical clearance with the existing 5060 Ti's cooler** — measure first. PSU, power delivery, BIOS, and chipset routing are all fine.
+
+---
+
+### `inspect` pickle-safety verdict — candidate (post-v0.12, gated on anamnesis)
+
+Surfaced by the June 2026 [Rust-ecosystem survey](../rust-ecosystem-comparison.md) (the `llm_hunter` entry): no Rust tool gives an *offline, load-safety* verdict on a PyTorch `.pth`, and the one forensic tool adjacent to the space explicitly disclaims pickle-opcode analysis. anamnesis already understands pickle safety — its `.pth` parser enforces a strict GLOBAL allowlist (weights-only-equivalent) and the v0.6.6 pickle-VM hardening means a crafted file can't DoS the parser. The only missing piece is *surfacing* it.
+
+| Feature | Scope |
+|---------|-------|
+| `inspect <repo> file.pth --cached` safety line | After the tensor table, print a pickle-safety verdict from anamnesis's GLOBAL scan: `Pickle: N globals, all tensor-reconstruction (safe to load)` or `⚠ references os.system / posix — arbitrary-code-execution risk under torch.load(weights_only=False)`. `--json` gains a `pickle_safety` object (`globals` / `disallowed` / `verdict`). Binary-side rendering only — no new library API on hf-fm's side. |
+| Gated on anamnesis | Needs anamnesis to expose a *non-failing* enumerate-globals scan (today it fails closed on the first disallowed global). Tracked under anamnesis [ROADMAP → Future Directions](../../../anamnesis/ROADMAP.md) ("Pickle GLOBAL safety scan"). Until then hf-fm only gets pass/fail (parse succeeds → safe; parse errors → unsafe-or-malformed) without the itemised list. |
+
+**Why it fits, and where it stops.** It extends "inspect before you download" to "is it safe to *load*" — on-mission, leveraging capability already built, and differentiated from candle's own pickle reader (no allowlist, no signal). Deliberately a *thin surface over what the parser already knows* — **not** a malware-DB scanner or entropy/forensic profiler (that is `llm_hunter` / `modelscan`'s lane, consciously passed on). Prior art exists (`picklescan`, Protect AI `modelscan`, HuggingFace's server-side upload scanning), so the value is the **offline, Rust-native CLI verdict** for consumers outside the Python tooling path (e.g. a candle-mi pipeline), not novelty.
+
+**Provisional placement:** a small v0.12.x patch or the v0.13 opener once the anamnesis scan API lands; the version is deliberately unassigned until then.

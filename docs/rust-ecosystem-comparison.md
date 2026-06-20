@@ -70,7 +70,7 @@ Crate **v0.0.0 (first published 2026-03-26)**, by an HF Xet engineer. A **second
 **v0.2.0 (2026-02-19)**, dual MIT/Apache-2.0, by Daniël de Kok (a HuggingFace engineer). A compact Rust CLI binary (~956 LOC) described simply as a "Browser for Safetensors checkpoints" — browses and searches safetensors metadata. *(crates.io lists no repository and only a one-line description. The prior research pass's richer claims — an interactive `ratatui` TUI and **remote/Hub** inspection via `hf-hub` — could **not** be confirmed against any primary source and are NOT asserted here; scored as a local safetensors browser only. Worth re-checking as it matures, given the author's HF affiliation.)*
 
 **llm_hunter** — [github.com/jpegleg/llm_hunter](https://github.com/jpegleg/llm_hunter) — **NEW, not in prior survey**
-**v0.3.5 (created 2026-04-07)**. Rust library + CLI for **forensic** analysis of GGUF **and** safetensors: entropy analysis, signature matching, model-family/quantization detection, JSON reports. A security/forensics angle rather than a structural browser — adjacent to, not overlapping, hf-fm's inspect.
+**v0.3.5 (created 2026-04-07)**. Rust library + CLI for **forensic *identification*** of model files — GGUF-focused, plus generic binary entropy profiling. Detects entropy *transitions* (byte offsets where randomness shifts), recognises container/format signatures (GGUF / ZIP / Pickle / PyTorch / HDF5 *structure*), fingerprints model family and quantisation scheme by scanning text/byte regions, and emits JSON reports (`quick` vs `deep` modes). Its README **explicitly disclaims** malware scanning, pickle-opcode analysis, and tamper detection — so it is identification/profiling, **not** security threat assessment, and it does not overlap hf-fm's structural `inspect`.
 
 **safetensors-cli** — [github.com/gzsombor/safetensors-cli](https://github.com/gzsombor/safetensors-cli) | [crates.io](https://crates.io/crates/safetensors-cli)
 **v0.1.0 (2023-06-17)**, 0 stars, Apache-2.0. Tiny (~57 LOC) inspect tool using memmap2. No feature work since 2023, but **bot-maintained** (Renovate dependency bumps through 2026-02-15) — "unmaintained" is too strong; "dormant on features, deps kept current" is accurate. Local files only.
@@ -171,7 +171,7 @@ Capability headers (the 13 hf-fm areas above):
 | hf-hub-enfer 0.3.2 *(abandoned)* | ◐ | ◐ | — | — | — | — | — | — | — | ◐ | — | ✓ | — |
 | safetensors_explorer 0.2.0 | — | — | ✓ TUI tree, sharded, fuzzy | — | — | — | — | — | — | — | — | — bin only | — |
 | safetensors-browser 0.2.0 | — | — | ✓ local browser | — | — | — | — | — | — | — | — | — bin only | — |
-| llm_hunter 0.3.5 | — | — | ◐ forensic (GGUF+safetensors) | — | — | — | — | — | — | — | — | ✓ | — |
+| llm_hunter 0.3.5 | — | — | ◐ forensic ID (GGUF + entropy) | — | — | — | — | — | — | — | — | ✓ | — |
 | safetensors-cli 0.1.0 | — | — | ◐ minimal | — | — | — | — | — | — | — | — | — bin only | — |
 | safetensors 0.8.0 | — | — | — no CLI | — | — | — | — | — | — | — | — | ✓ format only | — |
 | gguf-rs-lib 0.2.5 *(ThreatFlux)* | — | — | ◐ GGUF only (info/tensors/meta/validate) | — | — | — | — | — | — | — | — | ✓ | — |
