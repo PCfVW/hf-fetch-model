@@ -190,7 +190,13 @@ fn timeout_flags_accept_numeric_values() {
 fn list_files_help_shows_all_flags() {
     let (stdout, stderr, success) = run(hf_fm().args(["list-files", "--help"]));
     assert!(success, "list-files --help failed: {stderr}");
-    for flag in ["--no-checksum", "--show-cached", "--filter", "--preset"] {
+    for flag in [
+        "--no-checksum",
+        "--show-cached",
+        "--filter",
+        "--preset",
+        "--json",
+    ] {
         assert!(
             stdout.contains(flag),
             "list-files help should contain {flag}, got:\n{stdout}"
@@ -327,6 +333,108 @@ fn list_files_filter_limits_output() {
     assert!(
         !stdout.contains("pytorch_model.bin"),
         "filtered output should NOT contain pytorch_model.bin, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn list_files_json_output() {
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["list-files", "julien-c/dummy-unknown", "--json"]));
+    assert!(success, "list-files --json failed: {stderr}");
+
+    // REAL validation: parse the output, then assert schema + invariants
+    // (a malformed object, wrong type, or broken total fails the parse/asserts).
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout).expect("--json output must be valid JSON");
+
+    assert_eq!(
+        v.get("repo_id").and_then(serde_json::Value::as_str),
+        Some("julien-c/dummy-unknown"),
+        "repo_id should echo the requested repo, got:\n{stdout}"
+    );
+    let files = v
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .expect("files must be a JSON array");
+    assert!(!files.is_empty(), "files array should not be empty");
+
+    // Invariant: total_bytes == sum(files[].size); file_count == files.len().
+    let sum: u64 = files
+        .iter()
+        .map(|f| {
+            f.get("size")
+                .and_then(serde_json::Value::as_u64)
+                .expect("size must be a u64")
+        })
+        .sum();
+    assert_eq!(
+        v.get("total_bytes").and_then(serde_json::Value::as_u64),
+        Some(sum),
+        "total_bytes must equal the sum of file sizes"
+    );
+    assert_eq!(
+        v.get("file_count").and_then(serde_json::Value::as_u64),
+        Some(u64::try_from(files.len()).expect("file count fits u64")),
+        "file_count must equal files.len()"
+    );
+
+    // sha256 present on every entry as string-or-null; cached absent here.
+    for f in files {
+        let sha = f
+            .get("sha256")
+            .expect("every file must carry a sha256 field");
+        assert!(
+            sha.is_string() || sha.is_null(),
+            "sha256 must be a string or null, got:\n{stdout}"
+        );
+        assert!(
+            f.get("cached").is_none(),
+            "cached must be absent without --show-cached, got:\n{stdout}"
+        );
+    }
+    assert!(
+        v.get("cached_count").is_none(),
+        "cached_count must be absent without --show-cached, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn list_files_json_show_cached_has_cached_fields() {
+    let (stdout, stderr, success) = run(hf_fm().args([
+        "list-files",
+        "julien-c/dummy-unknown",
+        "--json",
+        "--show-cached",
+    ]));
+    assert!(success, "list-files --json --show-cached failed: {stderr}");
+
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout).expect("--json output must be valid JSON");
+    let files = v
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .expect("files must be a JSON array");
+
+    // Every file carries a cached word from the documented vocabulary, and
+    // cached_count equals the number of complete entries.
+    let mut complete: u64 = 0;
+    for f in files {
+        let cached = f
+            .get("cached")
+            .and_then(serde_json::Value::as_str)
+            .expect("cached must be a string");
+        assert!(
+            matches!(cached, "complete" | "partial" | "missing"),
+            "cached must be complete/partial/missing, got {cached:?}"
+        );
+        if cached == "complete" {
+            complete += 1;
+        }
+    }
+    assert_eq!(
+        v.get("cached_count").and_then(serde_json::Value::as_u64),
+        Some(complete),
+        "cached_count must equal the count of complete files"
     );
 }
 

@@ -137,6 +137,9 @@ hf-fm list-files google/gemma-2-2b-it --no-checksum
 
 # Show which files are already in local cache
 hf-fm list-files google/gemma-2-2b-it --show-cached
+
+# Emit JSON for scripting (size budgeting, checksum manifests)
+hf-fm list-files google/gemma-2-2b-it --json | jq '.total_bytes'
 ```
 
 ## Search examples
@@ -501,7 +504,8 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 |------|-------------|---------|
 | `--exclude` | Exclude glob pattern (repeatable) | none |
 | `--filter` | Include glob pattern (repeatable) | all files |
-| `--no-checksum` | Suppress the SHA256 column | off |
+| `--json` | Output the file list as JSON: `{repo_id, files[{filename, size, sha256}], total_bytes, file_count}` — full (untruncated) SHA256 regardless of `--no-checksum`; adds per-file `cached` and a `cached_count` with `--show-cached` | off |
+| `--no-checksum` | Suppress the SHA256 column (human table only; `--json` always carries the full digest) | off |
 | `--preset` | Filter preset: `safetensors`, `gguf`, `npz`, `pth`, `config-only` | — |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--show-cached` | Show cache status: complete (✓), partial, or missing (✗) | off |

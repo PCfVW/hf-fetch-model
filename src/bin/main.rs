@@ -514,6 +514,9 @@ See also: hf-fm list-families, hf-fm discover")]
         /// Show cache status for each file (complete, partial, or missing).
         #[arg(long)]
         show_cached: bool,
+        /// Output the file list as JSON (full SHA256, regardless of `--no-checksum`).
+        #[arg(long)]
+        json: bool,
     },
     /// Manage the local `HuggingFace` cache.
     Cache {
@@ -938,6 +941,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             preset,
             no_checksum,
             show_cached,
+            json,
         }) => run_list_files(
             repo_id.as_str(),
             revision.as_deref(),
@@ -947,6 +951,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             preset.as_ref(),
             no_checksum,
             show_cached,
+            json,
         ),
         // BORROW: explicit .as_str() for String → &str conversion
         Some(Commands::Cache { subcommand }) => match subcommand {
@@ -7107,6 +7112,43 @@ fn run_status(
 }
 
 /// Lists files in a remote `HuggingFace` repository without downloading.
+/// Cache state of a listed file relative to the local snapshot.
+///
+/// Shared by the `list-files` human table (rendered as a glyph) and `--json`
+/// output (rendered as a word), so the two never disagree on how a file's cache
+/// status is classified.
+// EXHAUSTIVE: internal list-files state enum; crate owns and matches all variants
+#[derive(Clone, Copy)]
+enum FileCacheState {
+    /// Local file present and at least the expected size.
+    Complete,
+    /// Local file present but smaller than the expected size.
+    Partial,
+    /// No local file present in the snapshot.
+    Missing,
+}
+
+impl FileCacheState {
+    /// Marker shown in the human table's Cached column (check mark for
+    /// complete, the word `partial`, cross mark for missing).
+    const fn glyph(self) -> &'static str {
+        match self {
+            Self::Complete => "\u{2713}",
+            Self::Partial => "partial",
+            Self::Missing => "\u{2717}",
+        }
+    }
+
+    /// Machine-readable word for `--json` (`complete` / `partial` / `missing`).
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Missing => "missing",
+        }
+    }
+}
+
 // EXPLICIT: composes filter compilation, file enumeration, optional checksum
 // fetch, optional cache cross-reference, and table formatting. Sequential
 // pipeline; splitting hides the listing flow.
@@ -7124,6 +7166,7 @@ fn run_list_files(
     preset: Option<&Preset>,
     no_checksum: bool,
     show_cached: bool,
+    json: bool,
 ) -> Result<(), FetchError> {
     if !repo_id.contains('/') {
         return Err(FetchError::InvalidArgument(format!(
@@ -7195,7 +7238,7 @@ fn run_list_files(
     // Resolve cache state if requested.
     // Three states: "✓" (complete), "partial" (local < expected), "✗" (missing).
     // Uses the same size-comparison logic as `status` (cache.rs).
-    let cache_marks: Vec<String> = if show_cached {
+    let cache_marks: Vec<FileCacheState> = if show_cached {
         let cache_dir = cache::hf_cache_dir()?;
         let repo_dir = hf_fetch_model::cache_layout::repo_dir(&cache_dir, repo_id);
         let revision_str = revision.unwrap_or("main");
@@ -7215,18 +7258,24 @@ fn run_list_files(
                         let local_size = std::fs::metadata(path).map_or(0, |m| m.len());
                         let expected = f.size.unwrap_or(0);
                         if expected > 0 && local_size < expected {
-                            "partial".to_owned()
+                            FileCacheState::Partial
                         } else {
-                            "\u{2713}".to_owned()
+                            FileCacheState::Complete
                         }
                     }
-                    _ => "\u{2717}".to_owned(),
+                    _ => FileCacheState::Missing,
                 }
             })
             .collect()
     } else {
         Vec::new()
     };
+
+    // JSON output mode: serialize the filtered list (and cache state, when
+    // requested) instead of printing the human table.
+    if json {
+        return print_list_files_json(repo_id, &filtered, &cache_marks, show_cached);
+    }
 
     // Compute file-name column width from the actual data.
     let fw = filtered
@@ -7273,10 +7322,14 @@ fn run_list_files(
         };
 
         if show_cached {
-            let mark = cache_marks.get(i).map_or("\u{2717}", String::as_str);
-            if mark == "\u{2713}" {
+            let state = cache_marks
+                .get(i)
+                .copied()
+                .unwrap_or(FileCacheState::Missing);
+            if matches!(state, FileCacheState::Complete) {
                 cached_count += 1;
             }
+            let mark = state.glyph();
             if no_checksum {
                 println!("  {:<fw$} {:>10}  {mark}", f.filename, size_str);
             } else {
@@ -7309,6 +7362,98 @@ fn run_list_files(
         println!("  \u{2014} = not an LFS file (no SHA256 tracked by the Hub)");
     }
 
+    Ok(())
+}
+
+/// Serializable per-file entry for `list-files --json`.
+#[derive(serde::Serialize)]
+struct ListFileEntry {
+    /// Repo-relative filename.
+    filename: String,
+    /// File size in bytes (`0` when the Hub reports no size).
+    size: u64,
+    /// Full SHA256 hex digest, or `null` for non-LFS files. Always emitted,
+    /// independent of `--no-checksum`.
+    sha256: Option<String>,
+    /// Cache state (`complete` / `partial` / `missing`); present only with
+    /// `--show-cached`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached: Option<String>,
+}
+
+/// Serializable result for `list-files --json`.
+#[derive(serde::Serialize)]
+struct ListFilesResult {
+    /// Repository identifier.
+    repo_id: String,
+    /// Per-file entries (after `--filter` / `--exclude` / `--preset`).
+    files: Vec<ListFileEntry>,
+    /// Total bytes across all listed files (equals the sum of `files[].size`).
+    total_bytes: u64,
+    /// Number of files listed.
+    file_count: usize,
+    /// Number of fully-cached files; present only with `--show-cached`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_count: Option<usize>,
+}
+
+/// Prints the `list-files` result as JSON.
+fn print_list_files_json(
+    repo_id: &str,
+    files: &[repo::RepoFile],
+    cache_marks: &[FileCacheState],
+    show_cached: bool,
+) -> Result<(), FetchError> {
+    let mut entries: Vec<ListFileEntry> = Vec::with_capacity(files.len());
+    let mut total_bytes: u64 = 0;
+    let mut cached_count: usize = 0;
+
+    // EXPLICIT: accumulates total_bytes / cached_count alongside entry
+    // construction; an iterator chain would hide the running totals.
+    for (i, f) in files.iter().enumerate() {
+        let size = f.size.unwrap_or(0);
+        total_bytes = total_bytes.saturating_add(size);
+
+        let cached = if show_cached {
+            let state = cache_marks
+                .get(i)
+                .copied()
+                .unwrap_or(FileCacheState::Missing);
+            if matches!(state, FileCacheState::Complete) {
+                cached_count += 1;
+            }
+            // BORROW: explicit .to_owned() for &'static str → owned String
+            Some(state.word().to_owned())
+        } else {
+            None
+        };
+
+        entries.push(ListFileEntry {
+            // BORROW: explicit .clone() for owned String field
+            filename: f.filename.clone(),
+            size,
+            // BORROW: explicit .clone() for Option<String> field
+            sha256: f.sha256.clone(),
+            cached,
+        });
+    }
+
+    let result = ListFilesResult {
+        // BORROW: explicit .to_owned() for &str → owned String
+        repo_id: repo_id.to_owned(),
+        file_count: entries.len(),
+        files: entries,
+        total_bytes,
+        cached_count: if show_cached {
+            Some(cached_count)
+        } else {
+            None
+        },
+    };
+
+    let output = serde_json::to_string_pretty(&result)
+        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+    println!("{output}");
     Ok(())
 }
 
