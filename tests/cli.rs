@@ -10,6 +10,7 @@
 #![cfg(feature = "cli")]
 #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
+use serde_json::Value;
 use std::process::Command;
 
 /// Builds a `Command` targeting the `hf-fetch-model` binary.
@@ -25,6 +26,17 @@ fn run(cmd: &mut Command) -> (String, String, bool) {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     (stdout, stderr, output.status.success())
+}
+
+/// Parses `--json` command stdout into a [`Value`], failing the test (with the
+/// raw output) when it is not valid JSON.
+///
+/// The real-validation counterpart to substring-matching: a malformed object,
+/// truncated stream, or stray human banner fails here instead of slipping past
+/// a `.contains()` check.
+fn parse_json(stdout: &str) -> Value {
+    serde_json::from_str(stdout)
+        .unwrap_or_else(|e| panic!("output must be valid JSON ({e}), got:\n{stdout}"))
 }
 
 // -----------------------------------------------------------------------
@@ -344,17 +356,16 @@ fn list_files_json_output() {
 
     // REAL validation: parse the output, then assert schema + invariants
     // (a malformed object, wrong type, or broken total fails the parse/asserts).
-    let v: serde_json::Value =
-        serde_json::from_str(&stdout).expect("--json output must be valid JSON");
+    let v = parse_json(&stdout);
 
     assert_eq!(
-        v.get("repo_id").and_then(serde_json::Value::as_str),
+        v.get("repo_id").and_then(Value::as_str),
         Some("julien-c/dummy-unknown"),
         "repo_id should echo the requested repo, got:\n{stdout}"
     );
     let files = v
         .get("files")
-        .and_then(serde_json::Value::as_array)
+        .and_then(Value::as_array)
         .expect("files must be a JSON array");
     assert!(!files.is_empty(), "files array should not be empty");
 
@@ -363,17 +374,17 @@ fn list_files_json_output() {
         .iter()
         .map(|f| {
             f.get("size")
-                .and_then(serde_json::Value::as_u64)
+                .and_then(Value::as_u64)
                 .expect("size must be a u64")
         })
         .sum();
     assert_eq!(
-        v.get("total_bytes").and_then(serde_json::Value::as_u64),
+        v.get("total_bytes").and_then(Value::as_u64),
         Some(sum),
         "total_bytes must equal the sum of file sizes"
     );
     assert_eq!(
-        v.get("file_count").and_then(serde_json::Value::as_u64),
+        v.get("file_count").and_then(Value::as_u64),
         Some(u64::try_from(files.len()).expect("file count fits u64")),
         "file_count must equal files.len()"
     );
@@ -408,11 +419,10 @@ fn list_files_json_show_cached_has_cached_fields() {
     ]));
     assert!(success, "list-files --json --show-cached failed: {stderr}");
 
-    let v: serde_json::Value =
-        serde_json::from_str(&stdout).expect("--json output must be valid JSON");
+    let v = parse_json(&stdout);
     let files = v
         .get("files")
-        .and_then(serde_json::Value::as_array)
+        .and_then(Value::as_array)
         .expect("files must be a JSON array");
 
     // Every file carries a cached word from the documented vocabulary, and
@@ -421,7 +431,7 @@ fn list_files_json_show_cached_has_cached_fields() {
     for f in files {
         let cached = f
             .get("cached")
-            .and_then(serde_json::Value::as_str)
+            .and_then(Value::as_str)
             .expect("cached must be a string");
         assert!(
             matches!(cached, "complete" | "partial" | "missing"),
@@ -432,7 +442,7 @@ fn list_files_json_show_cached_has_cached_fields() {
         }
     }
     assert_eq!(
-        v.get("cached_count").and_then(serde_json::Value::as_u64),
+        v.get("cached_count").and_then(Value::as_u64),
         Some(complete),
         "cached_count must equal the count of complete files"
     );
@@ -1349,14 +1359,56 @@ fn inspect_cached_json_output() {
     let (stdout, stderr, success) =
         run(hf_fm().args(["inspect", &repo_id, &filename, "--cached", "--json"]));
     assert!(success, "inspect --cached --json should succeed: {stderr}");
-    // Verify it's valid JSON with expected fields.
+    // REAL validation: parse + assert the SafetensorsHeaderInfo schema.
+    let v = parse_json(&stdout);
+    let tensors = v
+        .get("tensors")
+        .and_then(Value::as_array)
+        .expect("tensors must be a JSON array");
+    assert!(!tensors.is_empty(), "tensors array should not be empty");
+    for t in tensors {
+        assert!(
+            t.get("name").and_then(Value::as_str).is_some(),
+            "each tensor needs a string name, got:\n{stdout}"
+        );
+        assert!(
+            t.get("dtype").and_then(Value::as_str).is_some(),
+            "each tensor needs a string dtype, got:\n{stdout}"
+        );
+        assert!(
+            t.get("shape").and_then(Value::as_array).is_some(),
+            "each tensor needs a shape array, got:\n{stdout}"
+        );
+    }
     assert!(
-        stdout.contains("\"tensors\""),
-        "JSON should contain tensors field, got:\n{stdout}"
+        v.get("header_size").and_then(Value::as_u64).is_some(),
+        "header_size must be a u64, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_cached_tree_json_output() {
+    let Some((repo_id, filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) = run(hf_fm().args([
+        "inspect", &repo_id, &filename, "--cached", "--tree", "--json",
+    ]));
+    assert!(success, "inspect --tree --json should succeed: {stderr}");
+    // REAL validation: TreeJsonOutput schema.
+    let v = parse_json(&stdout);
+    assert!(
+        v.get("repo_id").and_then(Value::as_str).is_some(),
+        "tree json needs a repo_id string, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("\"header_size\""),
-        "JSON should contain header_size field, got:\n{stdout}"
+        v.get("tree").and_then(Value::as_array).is_some(),
+        "tree json needs a tree array, got:\n{stdout}"
+    );
+    assert!(
+        v.get("total_tensors").and_then(Value::as_u64).is_some(),
+        "tree json needs total_tensors, got:\n{stdout}"
     );
 }
 
@@ -1430,9 +1482,20 @@ fn inspect_check_gpu_context_json_has_kv_cache() {
         success,
         "inspect --check-gpu --context --json should succeed: {stderr}"
     );
+    // REAL validation: gpu_check rides along, and --context puts a kv_cache
+    // object inside it (computed, skipped, or unavailable — GPU-agnostic).
+    let v = parse_json(&stdout);
+    let gpu_check = v
+        .get("gpu_check")
+        .and_then(Value::as_object)
+        .expect("--check-gpu must add a gpu_check object");
     assert!(
-        stdout.contains("\"kv_cache\""),
-        "JSON should contain a kv_cache object, got:\n{stdout}"
+        gpu_check.contains_key("kv_cache"),
+        "--context must add a kv_cache object under gpu_check, got:\n{stdout}"
+    );
+    assert!(
+        gpu_check.contains_key("model"),
+        "gpu_check must carry a model object, got:\n{stdout}"
     );
 }
 
@@ -1797,11 +1860,19 @@ fn inspect_cached_bnb_json_carries_quant_info() {
         success,
         "inspect --cached --json on BnB safetensors should succeed: {stderr}"
     );
+    // REAL validation: quant_info present and non-null (its absence is the
+    // exact JSON-side signature of the missing-`bnb`-feature regression).
+    let v = parse_json(&stdout);
+    let quant_info = v.get("quant_info").unwrap_or_else(|| {
+        panic!(
+            "BnB-quantized {repo_id}/{filename} JSON must carry the quant_info field \
+             (regression guard: silent None on BnB indicated a missing bnb feature on \
+             the anamnesis dep), got:\n{stdout}"
+        )
+    });
     assert!(
-        stdout.contains("\"quant_info\""),
-        "BnB-quantized {repo_id}/{filename} JSON output must carry the `quant_info` \
-         field (regression guard: silent `None` on BnB indicated missing `bnb` feature \
-         on the anamnesis dep), got:\n{stdout}"
+        !quant_info.is_null(),
+        "quant_info must be a non-null object on BnB {repo_id}/{filename}, got:\n{stdout}"
     );
 }
 
@@ -1817,9 +1888,24 @@ fn inspect_cached_sharded_dtypes_json_aggregates() {
         success,
         "inspect --cached --dtypes --json sharded model should succeed: {stderr}"
     );
+    // REAL validation: DtypeSummaryJson schema.
+    let v = parse_json(&stdout);
+    let dtypes = v
+        .get("dtypes")
+        .and_then(Value::as_array)
+        .expect("dtypes must be a JSON array");
+    assert!(!dtypes.is_empty(), "dtypes array should not be empty");
+    for g in dtypes {
+        for key in ["dtype", "tensors", "params", "bytes"] {
+            assert!(
+                g.get(key).is_some(),
+                "each dtype group needs a {key} field, got:\n{stdout}"
+            );
+        }
+    }
     assert!(
-        stdout.contains("\"dtypes\"") && stdout.contains("\"total_tensors\""),
-        "JSON should contain dtypes + total_tensors fields, got:\n{stdout}"
+        v.get("total_tensors").and_then(Value::as_u64).is_some(),
+        "total_tensors must be a u64, got:\n{stdout}"
     );
 }
 
@@ -1840,10 +1926,26 @@ fn inspect_cached_sharded_json_emits_json() {
         success,
         "inspect --cached --json sharded model should succeed: {stderr}"
     );
-    // The per-file JSON array carries SafetensorsHeaderInfo fields...
+    // REAL validation: a top-level array of [filename, SafetensorsHeaderInfo]
+    // pairs, each header carrying tensors + header_size.
+    let v = parse_json(&stdout);
+    let files = v
+        .as_array()
+        .expect("sharded --json must be a top-level array");
+    assert!(!files.is_empty(), "file array should not be empty");
+    let first = files
+        .first()
+        .and_then(Value::as_array)
+        .expect("each entry is a [filename, header] pair");
     assert!(
-        stdout.contains("\"tensors\"") && stdout.contains("\"header_size\""),
-        "sharded --json should emit per-tensor JSON, got:\n{stdout}"
+        first.first().and_then(Value::as_str).is_some(),
+        "pair[0] must be the filename string, got:\n{stdout}"
+    );
+    let header = first.get(1).expect("pair[1] must be the header object");
+    assert!(
+        header.get("tensors").and_then(Value::as_array).is_some()
+            && header.get("header_size").and_then(Value::as_u64).is_some(),
+        "header must carry tensors + header_size, got:\n{stdout}"
     );
     // ...and must NOT be the human shard summary.
     assert!(
@@ -2066,5 +2168,95 @@ fn diff_cached_different_models() {
     assert!(
         stdout.contains("A:") && stdout.contains("tensors"),
         "should show summary line, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn diff_cached_json_self_diff() {
+    let Some((repo_id, _filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["diff", &repo_id, &repo_id, "--cached", "--json"]));
+    assert!(
+        success,
+        "diff --cached --json self-diff should succeed: {stderr}"
+    );
+    // REAL validation: DiffResult schema + self-diff invariants (all matches).
+    let v = parse_json(&stdout);
+    assert_eq!(
+        v.get("repo_a").and_then(Value::as_str),
+        Some(repo_id.as_str()),
+        "repo_a must echo the input, got:\n{stdout}"
+    );
+    assert_eq!(
+        v.get("repo_b").and_then(Value::as_str),
+        Some(repo_id.as_str()),
+        "repo_b must echo the input, got:\n{stdout}"
+    );
+    for empty in ["only_a", "only_b", "differ"] {
+        let arr = v
+            .get(empty)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{empty} must be an array, got:\n{stdout}"));
+        assert!(
+            arr.is_empty(),
+            "self-diff {empty} must be empty, got:\n{stdout}"
+        );
+    }
+    let matching = v
+        .get("matching_count")
+        .and_then(Value::as_u64)
+        .expect("matching_count must be a u64");
+    assert!(
+        matching > 0,
+        "self-diff must have matching tensors, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn diff_cached_dtypes_json_has_histograms() {
+    let Some((repo_id, _filename)) = find_cached_safetensors_repo() else {
+        eprintln!("SKIP: no cached safetensors repo found");
+        return;
+    };
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["diff", &repo_id, &repo_id, "--cached", "--dtypes", "--json"]));
+    assert!(success, "diff --dtypes --json should succeed: {stderr}");
+    // REAL validation: the --dtypes variant adds a two-sided histogram object.
+    let v = parse_json(&stdout);
+    let hist = v
+        .get("dtype_histograms")
+        .and_then(Value::as_object)
+        .expect("--dtypes --json must add a dtype_histograms object");
+    assert!(
+        hist.contains_key("a") && hist.contains_key("b"),
+        "dtype_histograms must carry a and b sides, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn info_json_output() {
+    let (stdout, stderr, success) = run(hf_fm().args(["info", "julien-c/dummy-unknown", "--json"]));
+    assert!(success, "info --json should succeed: {stderr}");
+    // REAL validation: InfoResult schema.
+    let v = parse_json(&stdout);
+    assert_eq!(
+        v.get("repo_id").and_then(Value::as_str),
+        Some("julien-c/dummy-unknown"),
+        "info json must echo repo_id, got:\n{stdout}"
+    );
+    assert!(
+        v.get("tags").and_then(Value::as_array).is_some(),
+        "info json needs a tags array, got:\n{stdout}"
+    );
+    assert!(
+        v.get("languages").and_then(Value::as_array).is_some(),
+        "info json needs a languages array, got:\n{stdout}"
+    );
+    assert!(
+        v.get("gated").and_then(Value::as_str).is_some(),
+        "info json needs a gated string, got:\n{stdout}"
     );
 }
