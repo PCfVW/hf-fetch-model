@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.7] — CLI parity & scriptability
+
 ### Added
 
 - **`download-file --dry-run` previews the matched file(s) and byte totals without downloading.** The default `download` command has had `--dry-run` since v0.9, but `download-file` rejected it ([CLI reference](docs/cli-reference.md) documented the gap) — so for a glob like `"pytorch_model-*.bin"` there was no way to see *which* files / *how many bytes* a transfer would pull before committing it. `download-file <repo> <file-or-glob> --dry-run` now resolves the file list (treating the positional `FILENAME` as the lone include filter, so it mirrors exactly what a real `download-file` would fetch) and prints the same file table / byte summary / recommended-config block as `download --dry-run`, behind a tailored `Repo` / `Revision` (+ `Flat`) header. A non-matching explicit filename errors (cleaner than the real path's raw HTTP 404, since the listing is in hand); a non-matching glob prints `No files matched pattern …` and exits 0 — mirroring the real single-file vs glob paths. Binary-side only; the renderer is the existing `download --dry-run` table, factored into a shared helper (no behavior change to `download --dry-run`).
