@@ -2213,6 +2213,11 @@ fn diff_cached_json_self_diff() {
         matching > 0,
         "self-diff must have matching tensors, got:\n{stdout}"
     );
+    // No --limit and nothing to cut -> truncated must be omitted entirely.
+    assert!(
+        v.get("truncated").is_none(),
+        "truncated must be absent without --limit, got:\n{stdout}"
+    );
 }
 
 #[test]
@@ -2233,6 +2238,142 @@ fn diff_cached_dtypes_json_has_histograms() {
     assert!(
         hist.contains_key("a") && hist.contains_key("b"),
         "dtype_histograms must carry a and b sides, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn diff_help_shows_limit_flag() {
+    let (stdout, stderr, success) = run(hf_fm().args(["diff", "--help"]));
+    assert!(success, "diff --help failed: {stderr}");
+    assert!(
+        stdout.contains("--limit"),
+        "diff help should show --limit flag, got:\n{stdout}"
+    );
+}
+
+/// Length of a JSON object's array field, or 0 when absent/not an array.
+fn section_len(v: &Value, key: &str) -> usize {
+    v.get(key).and_then(Value::as_array).map_or(0, Vec::len)
+}
+
+#[test]
+fn diff_limit_json_truncates_sections() {
+    let repos = find_all_cached_safetensors_repos();
+    let (Some(repo_a), Some(repo_b)) = (repos.first(), repos.get(1)) else {
+        eprintln!("SKIP: need at least 2 cached safetensors repos for diff --limit test");
+        return;
+    };
+    // Discover the largest section from the unlimited diff so the cap is
+    // guaranteed to bite (deterministic regardless of which repos are cached).
+    let (full_out, _e, ok) = run(hf_fm().args([
+        "diff",
+        repo_a.as_str(),
+        repo_b.as_str(),
+        "--cached",
+        "--json",
+    ]));
+    assert!(ok, "diff --json should succeed");
+    let full = parse_json(&full_out);
+    let max_section = ["only_a", "only_b", "differ"]
+        .iter()
+        .map(|k| section_len(&full, k))
+        .max()
+        .unwrap_or(0);
+    if max_section < 2 {
+        eprintln!("SKIP: diff too small to truncate (largest section {max_section})");
+        return;
+    }
+
+    // Cap to 1: every section array is capped, and `truncated` reports the
+    // true totals with shown == the capped array length.
+    let (out, _e, ok) = run(hf_fm().args([
+        "diff",
+        repo_a.as_str(),
+        repo_b.as_str(),
+        "--cached",
+        "--json",
+        "--limit",
+        "1",
+    ]));
+    assert!(ok, "diff --json --limit 1 should succeed");
+    let v = parse_json(&out);
+    let trunc = v
+        .get("truncated")
+        .and_then(Value::as_object)
+        .expect("truncated must be present when a section is cut");
+    for key in ["only_a", "only_b", "differ"] {
+        assert!(
+            section_len(&v, key) <= 1,
+            "{key} array must be capped to 1, got:\n{out}"
+        );
+        let sec = trunc
+            .get(key)
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("truncated.{key} must be present, got:\n{out}"));
+        let shown = usize::try_from(
+            sec.get("shown")
+                .and_then(Value::as_u64)
+                .expect("shown must be a u64"),
+        )
+        .expect("shown fits usize");
+        let total = usize::try_from(
+            sec.get("total")
+                .and_then(Value::as_u64)
+                .expect("total must be a u64"),
+        )
+        .expect("total fits usize");
+        assert!(shown <= total, "shown <= total for {key}, got:\n{out}");
+        assert_eq!(
+            shown,
+            section_len(&v, key),
+            "shown must equal the capped array length for {key}, got:\n{out}"
+        );
+        assert_eq!(
+            total,
+            section_len(&full, key),
+            "total must equal the full section length for {key}, got:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn diff_limit_human_shows_note() {
+    let repos = find_all_cached_safetensors_repos();
+    let (Some(repo_a), Some(repo_b)) = (repos.first(), repos.get(1)) else {
+        eprintln!("SKIP: need at least 2 cached safetensors repos for diff --limit test");
+        return;
+    };
+    let (full_out, _e, ok) = run(hf_fm().args([
+        "diff",
+        repo_a.as_str(),
+        repo_b.as_str(),
+        "--cached",
+        "--json",
+    ]));
+    assert!(ok, "diff --json should succeed");
+    let full = parse_json(&full_out);
+    let max_section = ["only_a", "only_b", "differ"]
+        .iter()
+        .map(|k| section_len(&full, k))
+        .max()
+        .unwrap_or(0);
+    if max_section < 2 {
+        eprintln!("SKIP: diff too small to truncate (largest section {max_section})");
+        return;
+    }
+
+    let (out, _e, ok) = run(hf_fm().args([
+        "diff",
+        repo_a.as_str(),
+        repo_b.as_str(),
+        "--cached",
+        "--limit",
+        "1",
+    ]));
+    assert!(ok, "diff --limit 1 should succeed");
+    assert!(
+        out.contains("(limit 1)"),
+        "human output must show the per-section limit note, got:\n{out}"
     );
 }
 

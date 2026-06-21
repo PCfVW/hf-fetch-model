@@ -353,6 +353,9 @@ See also: hf-fm list-families, hf-fm discover")]
         /// vs per-dtype table).
         #[arg(long, conflicts_with = "summary")]
         dtypes: bool,
+        /// Show only the first N tensors per section (only-A / only-B / differ), applied after `--filter`.
+        #[arg(long)]
+        limit: Option<usize>,
         /// Output the full diff as JSON.
         #[arg(long)]
         json: bool,
@@ -864,6 +867,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             filter,
             summary,
             dtypes,
+            limit,
             json,
         }) => run_diff(
             repo_a.as_str(),
@@ -875,6 +879,7 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             filter.as_deref(),
             summary,
             dtypes,
+            limit,
             json,
         ),
         // BORROW: explicit .as_str() for String → &str conversion
@@ -3935,6 +3940,7 @@ fn run_diff(
     filter: Option<&str>,
     summary: bool,
     dtypes: bool,
+    limit: Option<usize>,
     json: bool,
 ) -> Result<(), FetchError> {
     let tensors_a = collect_repo_tensors(repo_a, revision_a, token, cached)
@@ -4005,7 +4011,7 @@ fn run_diff(
     if json {
         return print_diff_json(
             repo_a, repo_b, &tensors_a, &tensors_b, &only_a, &only_b, &differ, &matching, filter,
-            dtypes,
+            dtypes, limit,
         );
     }
 
@@ -4029,6 +4035,18 @@ fn run_diff(
             .max()
             .unwrap_or(0);
 
+        // Per-section cap from `--limit` (applied after `--filter`); the full
+        // vecs are left intact so the summary line keeps true counts.
+        let cap = limit.unwrap_or(usize::MAX);
+        // Prints a truncation note when `--limit` cut a section short.
+        let print_limit_note = |total: usize| {
+            if let Some(n) = limit {
+                if total > n {
+                    println!("    \u{2026} showing {n} of {total} (limit {n})");
+                }
+            }
+        };
+
         println!();
 
         // Print only-in-A.
@@ -4039,12 +4057,13 @@ fn run_diff(
                 "tensors"
             };
             println!("  Only in A ({} {label}):", only_a.len());
-            for name in &only_a {
+            for name in only_a.iter().take(cap) {
                 if let Some(t) = tensors_a.get(*name) {
                     let shape_str = format!("{:?}", t.shape);
                     println!("    {name:<nw$} {:<8} {shape_str}", t.dtype);
                 }
             }
+            print_limit_note(only_a.len());
             println!();
         }
 
@@ -4056,12 +4075,13 @@ fn run_diff(
                 "tensors"
             };
             println!("  Only in B ({} {label}):", only_b.len());
-            for name in &only_b {
+            for name in only_b.iter().take(cap) {
                 if let Some(t) = tensors_b.get(*name) {
                     let shape_str = format!("{:?}", t.shape);
                     println!("    {name:<nw$} {:<8} {shape_str}", t.dtype);
                 }
             }
+            print_limit_note(only_b.len());
             println!();
         }
 
@@ -4073,7 +4093,7 @@ fn run_diff(
                 "tensors"
             };
             println!("  Dtype/shape differences ({} {label}):", differ.len());
-            for name in &differ {
+            for name in differ.iter().take(cap) {
                 if let Some((a, b)) = tensors_a.get(*name).zip(tensors_b.get(*name)) {
                     let shape_a = format!("{:?}", a.shape);
                     let shape_b = format!("{:?}", b.shape);
@@ -4082,6 +4102,7 @@ fn run_diff(
                     println!("      B: {:<8} {shape_b}", b.dtype);
                 }
             }
+            print_limit_note(differ.len());
             println!();
         }
 
@@ -4167,6 +4188,22 @@ struct DtypeHistograms {
     b: Vec<DiffDtypeGroup>,
 }
 
+/// Per-section truncation metadata for `diff --json`, emitted only when
+/// `--limit` capped at least one section.
+///
+/// All three sections are always present for a stable schema; an untruncated
+/// section reports `shown == total`. Reuses [`TruncationInfo`] per section so
+/// the `{shown, total}` shape matches `inspect --json`.
+#[derive(serde::Serialize)]
+struct DiffTruncation {
+    /// Truncation of the only-in-A section.
+    only_a: TruncationInfo,
+    /// Truncation of the only-in-B section.
+    only_b: TruncationInfo,
+    /// Truncation of the dtype/shape-differences section.
+    differ: TruncationInfo,
+}
+
 /// Serializable diff result for `--json` output.
 #[derive(serde::Serialize)]
 struct DiffResult {
@@ -4188,6 +4225,9 @@ struct DiffResult {
     /// Per-side dtype histograms when `--dtypes` is set; absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     dtype_histograms: Option<DtypeHistograms>,
+    /// Per-section truncation when `--limit` capped output; absent when complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<DiffTruncation>,
 }
 
 /// Prints diff results as JSON.
@@ -4203,6 +4243,7 @@ fn print_diff_json(
     matching: &[&str],
     filter: Option<&str>,
     dtypes: bool,
+    limit: Option<usize>,
 ) -> Result<(), FetchError> {
     let make_entry = |name: &str,
                       a: Option<&inspect::TensorInfo>,
@@ -4236,24 +4277,48 @@ fn print_diff_json(
         None
     };
 
+    // Per-section cap (after `--filter`); the full slices stay intact so
+    // `truncated` can report each section's true total.
+    let cap = limit.unwrap_or(usize::MAX);
+    let truncated = limit
+        .is_some_and(|n| only_a.len() > n || only_b.len() > n || differ.len() > n)
+        .then(|| DiffTruncation {
+            only_a: TruncationInfo {
+                shown: only_a.len().min(cap),
+                total: only_a.len(),
+            },
+            only_b: TruncationInfo {
+                shown: only_b.len().min(cap),
+                total: only_b.len(),
+            },
+            differ: TruncationInfo {
+                shown: differ.len().min(cap),
+                total: differ.len(),
+            },
+        });
+
     let result = DiffResult {
         repo_a: repo_a.to_owned(),
         repo_b: repo_b.to_owned(),
         only_a: only_a
             .iter()
+            .take(cap)
             .map(|n| make_entry(n, tensors_a.get(*n), None))
             .collect(),
         only_b: only_b
             .iter()
+            .take(cap)
             .map(|n| make_entry(n, None, tensors_b.get(*n)))
             .collect(),
         differ: differ
             .iter()
+            .take(cap)
             .map(|n| make_entry(n, tensors_a.get(*n), tensors_b.get(*n)))
             .collect(),
         matching_count: matching.len(),
         filter: filter.map(str::to_owned),
         dtype_histograms,
+        truncated,
     };
 
     let output = serde_json::to_string_pretty(&result)

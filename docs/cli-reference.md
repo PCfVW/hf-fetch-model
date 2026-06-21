@@ -291,6 +291,9 @@ hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct
 # Per-dtype histograms side-by-side, with Δ Size column (ideal for scaled-sibling pairs)
 hf-fm diff openai/gpt-oss-20b openai/gpt-oss-120b --dtypes
 
+# Cap each section (only-A / only-B / differ) to the first 5 rows, like inspect --limit
+hf-fm diff openai/gpt-oss-20b openai/gpt-oss-120b --cached --limit 5
+
 # JSON output for programmatic consumption (includes byte_count on every tensor entry)
 hf-fm diff RedHatAI/Llama-3.2-1B-Instruct-FP8 casperhansen/llama-3.2-1b-instruct-awq --cached --json
 ```
@@ -471,7 +474,8 @@ Exit code is non-zero only when at least one file mismatched; `skipped` and `mis
 | `--cached` | Cache-only mode: fail if files are not cached locally | off |
 | `--dtypes` | Show side-by-side per-dtype histograms instead of the per-tensor body (conflicts with `--summary`) | off |
 | `--filter` | Show only tensors whose name contains this substring (case-insensitive) | — |
-| `--json` | Output the full diff as JSON (per-tensor entries include `byte_count`; `--dtypes` adds a `dtype_histograms` field) | off |
+| `--json` | Output the full diff as JSON (per-tensor entries include `byte_count`; `--dtypes` adds a `dtype_histograms` field; `--limit` adds a `truncated` object) | off |
+| `--limit` | Show only the first N tensors **per section** (only-A / only-B / differ), applied after `--filter`; the summary keeps true counts and `--json` adds a per-section `truncated {shown, total}` object | — |
 | `--revision-a` | Git revision for model A | main |
 | `--revision-b` | Git revision for model B | main |
 | `--summary` | Show only the summary line (counts per category; conflicts with `--dtypes`) | off |
