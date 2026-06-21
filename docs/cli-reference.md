@@ -325,7 +325,8 @@ hf-fm du --tree --age
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--age` | Show a last-modified age column (e.g., `2 days ago`, `3 months ago`) | off |
-| `--tree` | Hierarchical tree view: repos as branches, files as leaves, using box-drawing connectors. Composes with `--age`; conflicts with the positional repo argument (the per-repo view is already covered by `du <REPO_ID>`). | off |
+| `--json` | Output disk usage as JSON. Flat: `{repos:[{repo_id,size,file_count,has_partial,last_modified}],total_bytes,total_files,repo_count}` (`last_modified` is Unix epoch seconds, regardless of `--age`); `--tree` nests a `files` array per repo; `du <REPO_ID> --json` emits the per-file drill-down. | off |
+| `--tree` | Hierarchical tree view: repos as branches, files as leaves, using box-drawing connectors. Composes with `--age` and `--json`; conflicts with the positional repo argument (the per-repo view is already covered by `du <REPO_ID>`). | off |
 
 A repo with an in-progress or interrupted download carries a leading `●` marker in the `du` listing (`● = partial downloads`); run `hf-fm status <REPO_ID>` for the per-file breakdown.
 
@@ -339,6 +340,12 @@ hf-fm status
 # Re-evaluate "MISSING" through a preset's glob list — `.gitattributes` and `README.md`
 # read `excluded` instead of `MISSING` for a `--preset safetensors` cache.
 hf-fm status RWKV/RWKV7-Goose-World3-1.5B-HF --preset safetensors
+
+# Scriptable JSON (jq-pipeable): disk budget and per-repo completeness
+hf-fm du --json | jq '.total_bytes'
+hf-fm du --tree --json                     # nested: files[] per repo
+hf-fm status --json | jq '.repos[] | select(.has_partial)'
+hf-fm status RWKV/RWKV7-Goose-World3-1.5B-HF --json
 
 # List model families in local cache
 hf-fm list-families
@@ -537,6 +544,7 @@ These flags apply to the default download command (`hf-fm <REPO_ID>`). `download
 
 | Flag | Description | Default |
 |------|-------------|---------|
+| `--json` | Output the status report as JSON. All-repos: `{repos:[{repo_id,file_count,size,has_partial}],model_count}`. Per-repo: `{repo_id,revision,commit_hash,cache_path,files:[{filename,state,local_size?,expected_size?}],summary:{total,complete,partial,missing,excluded}}`, where `state` is `complete` / `partial` / `missing` / `excluded`. | off |
 | `--preset` | Re-evaluate which remote files are deliberate skips. Files not matching this preset's glob list (`safetensors`, `gguf`, `npz`, `pth`, `config-only`) are reported as `excluded` instead of `MISSING`. Overrides the value persisted in `.hf-fm-snapshot.json` by `download --preset`. | sidecar value (or none) |
 | `--revision` | Git revision (branch, tag, SHA) | main |
 | `--token` | Auth token (or set `HF_TOKEN` env var) | — |

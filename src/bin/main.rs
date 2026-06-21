@@ -315,6 +315,9 @@ See also: hf-fm list-families, hf-fm discover")]
         /// `download --preset` in the per-repo `.hf-fm-snapshot.json` sidecar.
         #[arg(long, value_enum)]
         preset: Option<Preset>,
+        /// Output the status report as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Compare tensor layouts between two models.
     ///
@@ -377,6 +380,9 @@ See also: hf-fm list-families, hf-fm discover")]
         /// `--age`, which adds a last-modified column on each repo branch.
         #[arg(long, conflicts_with = "repo_id")]
         tree: bool,
+        /// Output disk usage as JSON (flat by default; `--tree` nests files per repo).
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect tensor file headers (`.safetensors` remote/cached; `.gguf` / `.npz` / `.pth` cached).
     ///
@@ -848,14 +854,20 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             revision,
             token,
             preset,
+            json,
             // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         }) => run_status(
             repo_id.as_str(),
             revision.as_deref(),
             token.as_deref(),
             preset.as_ref(),
+            json,
         ),
-        Some(Commands::Status { repo_id: None, .. }) => run_status_all(),
+        Some(Commands::Status {
+            repo_id: None,
+            json,
+            ..
+        }) => run_status_all(json),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::Diff {
             repo_a,
@@ -887,21 +899,24 @@ fn run(cli: Cli) -> Result<(), FetchError> {
             repo_id: Some(repo_id),
             age: _,
             tree: _, // EXPLICIT: clap conflicts_with rejects --tree alongside repo_id
+            json,
         }) => {
             // BORROW: explicit .as_str() instead of Deref coercion
             let resolved = resolve_du_arg(repo_id.as_str())?;
-            run_du_repo(resolved.as_str())
+            run_du_repo(resolved.as_str(), json)
         }
         Some(Commands::Du {
             repo_id: None,
             age,
             tree: true,
-        }) => run_du_tree(age),
+            json,
+        }) => run_du_tree(age, json),
         Some(Commands::Du {
             repo_id: None,
             age,
             tree: false,
-        }) => run_du(age),
+            json,
+        }) => run_du(age, json),
         // BORROW: explicit .as_str()/.as_deref() for owned → borrowed conversions
         Some(Commands::Inspect {
             repo_id,
@@ -2435,9 +2450,13 @@ fn format_quant_lines(quant_info: Option<&inspect::QuantInfo>) -> Vec<String> {
     ]
 }
 
-fn run_status_all() -> Result<(), FetchError> {
+fn run_status_all(json: bool) -> Result<(), FetchError> {
     let cache_dir = cache::hf_cache_dir()?;
     let summaries = cache::cache_summary()?;
+
+    if json {
+        return print_status_all_json(&summaries, &cache_dir);
+    }
 
     if summaries.is_empty() {
         println!("No models found in local cache.");
@@ -2520,18 +2539,22 @@ fn resolve_du_arg(arg: &str) -> Result<String, FetchError> {
 }
 
 /// Shows disk usage summary for all cached repos, sorted by size descending.
-fn run_du(age: bool) -> Result<(), FetchError> {
+fn run_du(age: bool, json: bool) -> Result<(), FetchError> {
     let cache_dir = cache::hf_cache_dir()?;
-    println!("Cache: {}\n", cache_dir.display());
 
     let mut summaries = cache::cache_summary()?;
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.total_size));
+
+    if json {
+        return print_du_json(&summaries, &cache_dir);
+    }
+
+    println!("Cache: {}\n", cache_dir.display());
 
     if summaries.is_empty() {
         println!("No models found in local cache.");
         return Ok(());
     }
-
-    summaries.sort_by_key(|s| std::cmp::Reverse(s.total_size));
 
     // Compute REPO column width from the longest repo ID (minimum 48).
     let repo_width = summaries
@@ -2617,11 +2640,16 @@ fn run_du(age: bool) -> Result<(), FetchError> {
 }
 
 /// Shows per-file disk usage for a specific cached repo, sorted by size descending.
-fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
+fn run_du_repo(repo_id: &str, json: bool) -> Result<(), FetchError> {
     let cache_dir = cache::hf_cache_dir()?;
-    println!("Cache: {}\n", cache_dir.display());
-
     let files = cache::cache_repo_usage(repo_id)?;
+    let has_partial = cache::repo_has_partial(repo_id)?;
+
+    if json {
+        return print_du_repo_json(repo_id, &files, has_partial, &cache_dir);
+    }
+
+    println!("Cache: {}\n", cache_dir.display());
 
     if files.is_empty() {
         println!("No cached files found for {repo_id}.");
@@ -2658,13 +2686,197 @@ fn run_du_repo(repo_id: &str) -> Result<(), FetchError> {
         pluralize(files.len(), "file", "files"),
     );
 
-    // Check if this repo has partial downloads and hint the user
-    // (targeted scan, not full cache).
-    if cache::repo_has_partial(repo_id)? {
+    // Hint the user when this repo has partial downloads (computed above).
+    if has_partial {
         println!("\n  \u{25cf} partial downloads — run `hf-fm status {repo_id}` for details");
     }
 
     Ok(())
+}
+
+/// Serializes `value` as pretty JSON to stdout.
+///
+/// The shared tail of every `--json` printer added in the v0.10.7 parity work.
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`] if serialization fails.
+fn emit_json<T: serde::Serialize>(value: &T) -> Result<(), FetchError> {
+    let output = serde_json::to_string_pretty(value)
+        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
+    println!("{output}");
+    Ok(())
+}
+
+/// Converts an optional [`SystemTime`](std::time::SystemTime) to Unix epoch
+/// seconds, or `None` when absent or before the epoch.
+fn system_time_to_unix(t: Option<std::time::SystemTime>) -> Option<u64> {
+    t.and_then(|st| st.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+}
+
+/// Per-file leaf for `du --json`.
+#[derive(serde::Serialize)]
+struct DuFileJson {
+    /// Filename relative to the snapshot root.
+    filename: String,
+    /// File size in bytes.
+    size: u64,
+}
+
+/// Per-repo entry for `du --json` (flat) and `du --tree --json` (with `files`).
+#[derive(serde::Serialize)]
+struct DuRepoJson {
+    /// Repository identifier.
+    repo_id: String,
+    /// Total size on disk in bytes.
+    size: u64,
+    /// Number of files in the snapshot directory.
+    file_count: usize,
+    /// Whether the repo has incomplete `.chunked.part` downloads.
+    has_partial: bool,
+    /// Most recent file mtime as Unix epoch seconds (`null` if unknown).
+    last_modified: Option<u64>,
+    /// Per-file leaves; present only under `--tree`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files: Option<Vec<DuFileJson>>,
+}
+
+/// Top-level shape for `du --json` (all repos) and `du --tree --json`.
+#[derive(serde::Serialize)]
+struct DuJson {
+    /// HF cache directory.
+    cache_dir: String,
+    /// Per-repo entries, sorted by size descending.
+    repos: Vec<DuRepoJson>,
+    /// Total bytes across all cached repos.
+    total_bytes: u64,
+    /// Total file count across all cached repos.
+    total_files: usize,
+    /// Number of cached repos.
+    repo_count: usize,
+}
+
+/// Top-level shape for `du <repo> --json` (per-file drill-down).
+#[derive(serde::Serialize)]
+struct DuRepoDetailJson {
+    /// HF cache directory.
+    cache_dir: String,
+    /// Repository identifier.
+    repo_id: String,
+    /// Per-file entries, sorted by size descending.
+    files: Vec<DuFileJson>,
+    /// Total bytes across the repo's files.
+    total_bytes: u64,
+    /// Number of files.
+    file_count: usize,
+    /// Whether the repo has incomplete `.chunked.part` downloads.
+    has_partial: bool,
+}
+
+/// Prints the `du` all-repos summary as JSON (flat — no per-file leaves).
+fn print_du_json(
+    summaries: &[cache::CachedModelSummary],
+    cache_dir: &std::path::Path,
+) -> Result<(), FetchError> {
+    let mut total_bytes: u64 = 0;
+    let mut total_files: usize = 0;
+    let mut repos: Vec<DuRepoJson> = Vec::with_capacity(summaries.len());
+    // EXPLICIT: accumulates totals alongside entry construction.
+    for s in summaries {
+        total_bytes = total_bytes.saturating_add(s.total_size);
+        total_files = total_files.saturating_add(s.file_count);
+        repos.push(DuRepoJson {
+            // BORROW: explicit .clone() for owned String field
+            repo_id: s.repo_id.clone(),
+            size: s.total_size,
+            file_count: s.file_count,
+            has_partial: s.has_partial,
+            last_modified: system_time_to_unix(s.last_modified),
+            files: None,
+        });
+    }
+    let result = DuJson {
+        // BORROW: explicit .to_string() for Path → String
+        cache_dir: cache_dir.display().to_string(),
+        repo_count: repos.len(),
+        repos,
+        total_bytes,
+        total_files,
+    };
+    emit_json(&result)
+}
+
+/// Prints the `du --tree` view as JSON (nested — each repo carries its files).
+fn print_du_tree_json(
+    repos: &[CacheTreeRepo],
+    cache_dir: &std::path::Path,
+) -> Result<(), FetchError> {
+    let mut total_bytes: u64 = 0;
+    let mut total_files: usize = 0;
+    let mut out: Vec<DuRepoJson> = Vec::with_capacity(repos.len());
+    // EXPLICIT: accumulates totals alongside entry construction.
+    for r in repos {
+        total_bytes = total_bytes.saturating_add(r.total_size);
+        total_files = total_files.saturating_add(r.file_count);
+        let files = r
+            .files
+            .iter()
+            .map(|f| DuFileJson {
+                // BORROW: explicit .clone() for owned String field
+                filename: f.filename.clone(),
+                size: f.size,
+            })
+            .collect();
+        out.push(DuRepoJson {
+            // BORROW: explicit .clone() for owned String field
+            repo_id: r.repo_id.clone(),
+            size: r.total_size,
+            file_count: r.file_count,
+            has_partial: r.has_partial,
+            last_modified: system_time_to_unix(r.last_modified),
+            files: Some(files),
+        });
+    }
+    let result = DuJson {
+        // BORROW: explicit .to_string() for Path → String
+        cache_dir: cache_dir.display().to_string(),
+        repo_count: out.len(),
+        repos: out,
+        total_bytes,
+        total_files,
+    };
+    emit_json(&result)
+}
+
+/// Prints a single repo's per-file disk usage as JSON.
+fn print_du_repo_json(
+    repo_id: &str,
+    files: &[cache::CacheFileUsage],
+    has_partial: bool,
+    cache_dir: &std::path::Path,
+) -> Result<(), FetchError> {
+    let mut total_bytes: u64 = 0;
+    let mut entries: Vec<DuFileJson> = Vec::with_capacity(files.len());
+    // EXPLICIT: accumulates total alongside entry construction.
+    for f in files {
+        total_bytes = total_bytes.saturating_add(f.size);
+        entries.push(DuFileJson {
+            // BORROW: explicit .clone() for owned String field
+            filename: f.filename.clone(),
+            size: f.size,
+        });
+    }
+    let result = DuRepoDetailJson {
+        // BORROW: explicit .to_string()/.to_owned() for owned fields
+        cache_dir: cache_dir.display().to_string(),
+        repo_id: repo_id.to_owned(),
+        file_count: entries.len(),
+        files: entries,
+        total_bytes,
+        has_partial,
+    };
+    emit_json(&result)
 }
 
 // ============================================================================
@@ -3018,11 +3230,15 @@ fn render_file_leaves(files: &[CacheTreeFile], indent: &str, widths: &CacheTreeW
 /// Hierarchical cache view: every cached repo and its files in one box-drawing tree.
 ///
 /// Composes with `--age` (adds a last-modified column on repo branches).
-fn run_du_tree(age: bool) -> Result<(), FetchError> {
+fn run_du_tree(age: bool, json: bool) -> Result<(), FetchError> {
     let cache_dir = cache::hf_cache_dir()?;
-    println!("Cache: {}\n", cache_dir.display());
-
     let repos = build_cache_tree()?;
+
+    if json {
+        return print_du_tree_json(&repos, &cache_dir);
+    }
+
+    println!("Cache: {}\n", cache_dir.display());
 
     if repos.is_empty() {
         println!("No models found in local cache.");
@@ -7055,6 +7271,7 @@ fn run_status(
     revision: Option<&str>,
     token: Option<&str>,
     preset: Option<&Preset>,
+    json: bool,
 ) -> Result<(), FetchError> {
     // BORROW: explicit String::from (equivalent to .to_owned()) for Option<&str> → Option<String>
     let token = token
@@ -7087,6 +7304,10 @@ fn run_status(
         revision,
         preset_glob_list,
     ))?;
+
+    if json {
+        return print_status_json(&status, revision.unwrap_or("main"));
+    }
 
     // Header
     let rev_display = revision.unwrap_or("main");
@@ -7174,6 +7395,153 @@ fn run_status(
     }
 
     Ok(())
+}
+
+/// Per-repo summary entry for `status --json` (all repos).
+#[derive(serde::Serialize)]
+struct StatusRepoSummaryJson {
+    /// Repository identifier.
+    repo_id: String,
+    /// Number of files in the snapshot directory.
+    file_count: usize,
+    /// Total size on disk in bytes.
+    size: u64,
+    /// Whether the repo has incomplete `.chunked.part` downloads.
+    has_partial: bool,
+}
+
+/// Top-level shape for `status --json` (all repos).
+#[derive(serde::Serialize)]
+struct StatusAllJson {
+    /// HF cache directory.
+    cache_dir: String,
+    /// Per-repo summaries, in cache-scan order.
+    repos: Vec<StatusRepoSummaryJson>,
+    /// Number of cached models.
+    model_count: usize,
+}
+
+/// Per-file entry for `status <repo> --json`.
+#[derive(serde::Serialize)]
+struct StatusFileJson {
+    /// Repo-relative filename.
+    filename: String,
+    /// One of `complete` / `partial` / `missing` / `excluded` (or `unknown`).
+    state: &'static str,
+    /// Local size in bytes; present for `complete` / `partial`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_size: Option<u64>,
+    /// Expected size in bytes; present for `partial` / `missing` / `excluded`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_size: Option<u64>,
+}
+
+/// Category counts for `status <repo> --json`.
+#[derive(serde::Serialize)]
+struct StatusSummaryJson {
+    /// Total files reported.
+    total: usize,
+    /// Files fully present.
+    complete: usize,
+    /// Files present but smaller than expected.
+    partial: usize,
+    /// Files absent from the local snapshot.
+    missing: usize,
+    /// Files deliberately excluded by the active preset / filter.
+    excluded: usize,
+}
+
+/// Top-level shape for `status <repo> --json` (single repo).
+#[derive(serde::Serialize)]
+struct StatusRepoJson {
+    /// Repository identifier.
+    repo_id: String,
+    /// Requested revision (branch / tag / SHA, default `main`).
+    revision: String,
+    /// Resolved commit hash, if the repo is cached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_hash: Option<String>,
+    /// The repo's cache snapshot path.
+    cache_path: String,
+    /// Per-file status entries, sorted by filename.
+    files: Vec<StatusFileJson>,
+    /// Category counts.
+    summary: StatusSummaryJson,
+}
+
+/// Prints the `status` all-repos summary as JSON.
+fn print_status_all_json(
+    summaries: &[cache::CachedModelSummary],
+    cache_dir: &std::path::Path,
+) -> Result<(), FetchError> {
+    let repos: Vec<StatusRepoSummaryJson> = summaries
+        .iter()
+        .map(|s| StatusRepoSummaryJson {
+            // BORROW: explicit .clone() for owned String field
+            repo_id: s.repo_id.clone(),
+            file_count: s.file_count,
+            size: s.total_size,
+            has_partial: s.has_partial,
+        })
+        .collect();
+    let result = StatusAllJson {
+        // BORROW: explicit .to_string() for Path → String
+        cache_dir: cache_dir.display().to_string(),
+        model_count: repos.len(),
+        repos,
+    };
+    emit_json(&result)
+}
+
+/// Maps a [`FileStatus`](cache::FileStatus) to its JSON
+/// `(state, local_size, expected_size)` tuple.
+fn file_status_json_fields(status: &cache::FileStatus) -> (&'static str, Option<u64>, Option<u64>) {
+    match status {
+        cache::FileStatus::Complete { local_size } => ("complete", Some(*local_size), None),
+        cache::FileStatus::Partial {
+            local_size,
+            expected_size,
+        } => ("partial", Some(*local_size), Some(*expected_size)),
+        cache::FileStatus::Missing { expected_size } => ("missing", None, Some(*expected_size)),
+        cache::FileStatus::Excluded { expected_size } => ("excluded", None, Some(*expected_size)),
+        // EXPLICIT: FileStatus is #[non_exhaustive]; future variants serialize as "unknown".
+        _ => ("unknown", None, None),
+    }
+}
+
+/// Prints a single repo's cache status as JSON.
+fn print_status_json(status: &cache::RepoStatus, revision: &str) -> Result<(), FetchError> {
+    let files: Vec<StatusFileJson> = status
+        .files
+        .iter()
+        .map(|(filename, fs)| {
+            let (state, local_size, expected_size) = file_status_json_fields(fs);
+            StatusFileJson {
+                // BORROW: explicit .clone() for owned String field
+                filename: filename.clone(),
+                state,
+                local_size,
+                expected_size,
+            }
+        })
+        .collect();
+    let summary = StatusSummaryJson {
+        total: status.files.len(),
+        complete: status.complete_count(),
+        partial: status.partial_count(),
+        missing: status.missing_count(),
+        excluded: status.excluded_count(),
+    };
+    let result = StatusRepoJson {
+        // BORROW: explicit .clone()/.to_owned()/.to_string() for owned fields
+        repo_id: status.repo_id.clone(),
+        revision: revision.to_owned(),
+        commit_hash: status.commit_hash.clone(),
+        cache_path: status.cache_path.display().to_string(),
+        files,
+        summary,
+    };
+    emit_json(&result)
 }
 
 /// Lists files in a remote `HuggingFace` repository without downloading.

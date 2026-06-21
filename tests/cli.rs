@@ -876,6 +876,240 @@ fn du_tree_conflicts_with_repo_arg() {
     );
 }
 
+#[test]
+fn du_help_shows_json_flag() {
+    let (stdout, stderr, success) = run(hf_fm().args(["du", "--help"]));
+    assert!(success, "du --help failed: {stderr}");
+    assert!(
+        stdout.contains("--json"),
+        "du help should show --json flag, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn status_help_shows_json_flag() {
+    let (stdout, stderr, success) = run(hf_fm().args(["status", "--help"]));
+    assert!(success, "status --help failed: {stderr}");
+    assert!(
+        stdout.contains("--json"),
+        "status help should show --json flag, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn du_json_all() {
+    let (_, _, dl) = run(hf_fm().args(["julien-c/dummy-unknown"]));
+    assert!(dl, "download fixture should succeed");
+    let (stdout, stderr, success) = run(hf_fm().args(["du", "--json"]));
+    assert!(success, "du --json should succeed: {stderr}");
+
+    let v = parse_json(&stdout);
+    let repos = v
+        .get("repos")
+        .and_then(Value::as_array)
+        .expect("repos array");
+    assert!(
+        !repos.is_empty(),
+        "repos should not be empty (fixture cached)"
+    );
+    assert_eq!(
+        v.get("repo_count").and_then(Value::as_u64),
+        Some(u64::try_from(repos.len()).expect("repo count fits u64")),
+        "repo_count must equal repos.len()"
+    );
+    // total_bytes == Σ repos[].size; total_files == Σ repos[].file_count.
+    let sum_size: u64 = repos
+        .iter()
+        .map(|r| r.get("size").and_then(Value::as_u64).expect("size u64"))
+        .sum();
+    let sum_files: u64 = repos
+        .iter()
+        .map(|r| {
+            r.get("file_count")
+                .and_then(Value::as_u64)
+                .expect("file_count u64")
+        })
+        .sum();
+    assert_eq!(
+        v.get("total_bytes").and_then(Value::as_u64),
+        Some(sum_size),
+        "total_bytes must equal the sum of repo sizes"
+    );
+    assert_eq!(
+        v.get("total_files").and_then(Value::as_u64),
+        Some(sum_files),
+        "total_files must equal the sum of repo file counts"
+    );
+    for r in repos {
+        assert!(
+            r.get("repo_id").and_then(Value::as_str).is_some(),
+            "repo needs repo_id, got:\n{stdout}"
+        );
+        assert!(
+            r.get("has_partial").and_then(Value::as_bool).is_some(),
+            "repo needs has_partial, got:\n{stdout}"
+        );
+        assert!(
+            r.get("files").is_none(),
+            "flat du --json must omit per-repo files, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn du_json_repo() {
+    let (_, _, dl) = run(hf_fm().args(["julien-c/dummy-unknown"]));
+    assert!(dl, "download fixture should succeed");
+    let (stdout, stderr, success) = run(hf_fm().args(["du", "julien-c/dummy-unknown", "--json"]));
+    assert!(success, "du <repo> --json should succeed: {stderr}");
+
+    let v = parse_json(&stdout);
+    assert_eq!(
+        v.get("repo_id").and_then(Value::as_str),
+        Some("julien-c/dummy-unknown")
+    );
+    let files = v
+        .get("files")
+        .and_then(Value::as_array)
+        .expect("files array");
+    assert!(!files.is_empty(), "files should not be empty");
+    // Rock-solid invariant: total_bytes == Σ files[].size (same source).
+    let sum: u64 = files
+        .iter()
+        .map(|f| f.get("size").and_then(Value::as_u64).expect("size u64"))
+        .sum();
+    assert_eq!(
+        v.get("total_bytes").and_then(Value::as_u64),
+        Some(sum),
+        "total_bytes must equal the sum of file sizes"
+    );
+    assert_eq!(
+        v.get("file_count").and_then(Value::as_u64),
+        Some(u64::try_from(files.len()).expect("file count fits u64")),
+        "file_count must equal files.len()"
+    );
+}
+
+#[test]
+fn du_tree_json() {
+    let (_, _, dl) = run(hf_fm().args(["julien-c/dummy-unknown"]));
+    assert!(dl, "download fixture should succeed");
+    let (stdout, stderr, success) = run(hf_fm().args(["du", "--tree", "--json"]));
+    assert!(success, "du --tree --json should succeed: {stderr}");
+
+    let v = parse_json(&stdout);
+    let repos = v
+        .get("repos")
+        .and_then(Value::as_array)
+        .expect("repos array");
+    assert!(!repos.is_empty(), "repos should not be empty");
+    let sum_size: u64 = repos
+        .iter()
+        .map(|r| r.get("size").and_then(Value::as_u64).expect("size u64"))
+        .sum();
+    assert_eq!(
+        v.get("total_bytes").and_then(Value::as_u64),
+        Some(sum_size),
+        "total_bytes must equal the sum of repo sizes"
+    );
+    // The tree view nests per-repo files; the flat view does not.
+    for r in repos {
+        assert!(
+            r.get("files").and_then(Value::as_array).is_some(),
+            "tree du --json must nest a files array per repo, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn status_json_all() {
+    let (_, _, dl) = run(hf_fm().args(["julien-c/dummy-unknown"]));
+    assert!(dl, "download fixture should succeed");
+    let (stdout, stderr, success) = run(hf_fm().args(["status", "--json"]));
+    assert!(success, "status --json should succeed: {stderr}");
+
+    let v = parse_json(&stdout);
+    let repos = v
+        .get("repos")
+        .and_then(Value::as_array)
+        .expect("repos array");
+    assert!(!repos.is_empty(), "repos should not be empty");
+    assert_eq!(
+        v.get("model_count").and_then(Value::as_u64),
+        Some(u64::try_from(repos.len()).expect("model count fits u64")),
+        "model_count must equal repos.len()"
+    );
+    for r in repos {
+        assert!(r.get("repo_id").and_then(Value::as_str).is_some());
+        assert!(r.get("file_count").and_then(Value::as_u64).is_some());
+        assert!(r.get("size").and_then(Value::as_u64).is_some());
+        assert!(r.get("has_partial").and_then(Value::as_bool).is_some());
+    }
+}
+
+#[test]
+fn status_json_repo() {
+    let (stdout, stderr, success) =
+        run(hf_fm().args(["status", "julien-c/dummy-unknown", "--json"]));
+    assert!(success, "status <repo> --json should succeed: {stderr}");
+
+    let v = parse_json(&stdout);
+    assert_eq!(
+        v.get("repo_id").and_then(Value::as_str),
+        Some("julien-c/dummy-unknown")
+    );
+    let files = v
+        .get("files")
+        .and_then(Value::as_array)
+        .expect("files array");
+
+    // Tally per-file states and cross-check against the summary block.
+    let (mut complete, mut partial, mut missing, mut excluded) = (0u64, 0u64, 0u64, 0u64);
+    for f in files {
+        let state = f
+            .get("state")
+            .and_then(Value::as_str)
+            .expect("state string");
+        match state {
+            "complete" => complete += 1,
+            "partial" => partial += 1,
+            "missing" => missing += 1,
+            "excluded" => excluded += 1,
+            other => panic!("unexpected file state {other:?}, got:\n{stdout}"),
+        }
+    }
+    let summary = v
+        .get("summary")
+        .and_then(Value::as_object)
+        .expect("summary object");
+    let field = |k: &str| {
+        summary
+            .get(k)
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| panic!("summary.{k} must be a u64, got:\n{stdout}"))
+    };
+    assert_eq!(
+        field("total"),
+        u64::try_from(files.len()).expect("file count fits u64"),
+        "summary.total must equal files.len()"
+    );
+    assert_eq!(
+        field("complete") + field("partial") + field("missing") + field("excluded"),
+        field("total"),
+        "category counts must sum to total"
+    );
+    assert_eq!(
+        (
+            field("complete"),
+            field("partial"),
+            field("missing"),
+            field("excluded")
+        ),
+        (complete, partial, missing, excluded),
+        "summary counts must match the per-file states"
+    );
+}
+
 // -----------------------------------------------------------------------
 // inspect subcommand (cache-only tests — no network)
 // -----------------------------------------------------------------------
