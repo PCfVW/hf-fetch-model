@@ -1561,7 +1561,7 @@ fn run_download_file(params: DownloadFileParams<'_>) -> Result<(), FetchError> {
 /// without downloading.
 ///
 /// Resolves the target list by passing `filename` (a literal name or a glob) as
-/// the lone include filter to [`download_plan`], mirroring what a real
+/// the lone include filter to `download_plan`, mirroring what a real
 /// `download-file` would fetch, then prints a tailored `Repo` / `Revision`
 /// (+ `Flat`) header and delegates to [`render_download_plan`] for the shared
 /// file table. An explicit filename matching nothing is an error; a glob
@@ -4537,10 +4537,7 @@ fn print_diff_json(
         truncated,
     };
 
-    let output = serde_json::to_string_pretty(&result)
-        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
-    println!("{output}");
-    Ok(())
+    emit_json(&result)
 }
 
 /// Design target for the `--dtypes` histogram width on a default terminal.
@@ -7544,7 +7541,6 @@ fn print_status_json(status: &cache::RepoStatus, revision: &str) -> Result<(), F
     emit_json(&result)
 }
 
-/// Lists files in a remote `HuggingFace` repository without downloading.
 /// Cache state of a listed file relative to the local snapshot.
 ///
 /// Shared by the `list-files` human table (rendered as a glyph) and `--json`
@@ -7582,6 +7578,7 @@ impl FileCacheState {
     }
 }
 
+/// Lists files in a remote `HuggingFace` repository without downloading.
 // EXPLICIT: composes filter compilation, file enumeration, optional checksum
 // fetch, optional cache cross-reference, and table formatting. Sequential
 // pipeline; splitting hides the listing flow.
@@ -7884,10 +7881,7 @@ fn print_list_files_json(
         },
     };
 
-    let output = serde_json::to_string_pretty(&result)
-        .map_err(|e| FetchError::Http(format!("failed to serialize JSON: {e}")))?;
-    println!("{output}");
-    Ok(())
+    emit_json(&result)
 }
 
 /// Parses a size string with binary suffix into a byte count.
