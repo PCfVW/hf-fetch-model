@@ -525,8 +525,9 @@ The v0.11 minor is dedicated to **remote inspection**. v0.11.0 builds an `HttpRa
 |---------|-------|
 | `parse_safetensors_header_from_reader<R: Read>` (anamnesis library work) | New ~30 LOC primitive in anamnesis. **No `Seek` needed** — the safetensors header is sequential at the start of the file. Reads the 8-byte length prefix, then the JSON header, then parses it. |
 | Retire hf-fm's bespoke `fetch_header_bytes` | Replace with a small wrapper that issues two HTTP Range requests (length prefix + header bytes) and feeds them as a `Read` to the new anamnesis primitive. |
+| `Header:` line polish for NPZ / PTH | Cosmetic nit spotted during v0.11.0 dogfooding: remote **and** cached NPZ print `Header: 0 B (JSON), <total> total` — the `0 B (JSON)` prefix is a safetensors-ism (v0.10.3's render polish dropped it for GGUF only). Extend the same fix to NPZ / PTH: these formats have no discrete header, so render just `Header: <total> total` (or relabel the line `Size:`). Render-path only, ~10 LOC in `format_header_line`. |
 
-**User-facing:** no behavioural change — `hf-fm inspect <repo> file.safetensors` works identically. **Architecturally:** single source of truth for safetensors layout. The duplicated parser is gone.
+**User-facing:** no behavioural change on safetensors — `hf-fm inspect <repo> file.safetensors` works identically; NPZ / PTH lose a misleading `0 B (JSON)` prefix. **Architecturally:** single source of truth for safetensors layout. The duplicated parser is gone.
 
 ### v0.11.2 — Remote GGUF inspect
 

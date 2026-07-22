@@ -192,7 +192,7 @@ hf-fm info mistralai/Ministral-3-3B-Instruct-2512 --revision v1.0
 
 ## Inspect examples
 
-For a narrative walkthrough using a real 4-shard model, see the [Inspect tutorial](tutorials/inspect-before-downloading.md). `inspect` covers `.safetensors` (remote or cached) and NumPy `.npz` (remote or cached since v0.11.0 — a handful of HTTP Range requests fetch the `ZIP` directory and array headers, typically well under 200 KiB even on multi-hundred-MiB archives, and the `Source:` line reports the exact request/byte cost), plus `.gguf` (v0.10.2) and `.pth` (v0.10.3) for **cached** files; remote inspect for those two is planned for v0.11.2 / v0.11.3. An unsupported extension is rejected with a clear error.
+For a narrative walkthrough using a real 4-shard model, see the [Inspect tutorial](tutorials/inspect-before-downloading.md). `inspect` covers `.safetensors` (remote or cached) and NumPy `.npz` (remote or cached since v0.11.0 — a handful of HTTP Range requests fetch the `ZIP` directory and array headers, typically 100–200 KiB even on multi-hundred-MiB archives, and the `Source:` line reports the exact request/byte cost), plus `.gguf` (v0.10.2) and `.pth` (v0.10.3) for **cached** files; remote inspect for those two is planned for v0.11.2 / v0.11.3. An unsupported extension is rejected with a clear error.
 
 Gated repos (Meta Llama, Google Gemma, …) need an accepted license plus a token for `inspect`'s Range requests; on a 401/403 the error names the gate and the license URL instead of the raw status (v0.10.5). Note that a gated repo's file *listing* is public — `--list` or `list-files` succeeding does not prove content access. See the [FAQ entry on tokens and gated models](FAQ.md#how-do-i-pass-a-huggingface-token-why-does-a-gated-model-fail).
 

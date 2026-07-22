@@ -389,8 +389,8 @@ See also: hf-fm list-families, hf-fm discover")]
     /// Reads tensor metadata without downloading full weight data. For
     /// `.safetensors` and `.npz`, checks the local cache first and falls
     /// back to HTTP Range requests (`.npz` fetches only the archive
-    /// directory and array headers — a few dozen KiB even on multi-hundred
-    /// MiB archives). For `.gguf` / `.pth`, only cached inspect is
+    /// directory and array headers — typically 100–200 KiB even on
+    /// multi-hundred-MiB archives). For `.gguf` / `.pth`, only cached inspect is
     /// supported (remote inspect is planned for v0.11.2 / v0.11.3); pass
     /// `--cached` after downloading the file.
     #[command(after_help = "Examples:\n  \

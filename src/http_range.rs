@@ -114,8 +114,9 @@ pub trait RangeFetcher {
     fn total_size(&self) -> u64;
 
     /// Requests spent by the transport outside [`RangeFetcher::fetch`]
-    /// (e.g. the probe that resolved the CDN URL). Included in
-    /// [`RangeReader::stats`] so the reported request count is honest.
+    /// (e.g. the eager probe that resolved the file size and classified
+    /// access). Included in [`RangeReader::stats`] so the reported request
+    /// count is honest.
     fn extra_requests(&self) -> u32 {
         0
     }
@@ -123,9 +124,9 @@ pub trait RangeFetcher {
 
 /// Transfer statistics for one [`RangeReader`] lifetime.
 ///
-/// Rendered by the CLI as provenance (e.g. `remote (7 range requests,
-/// 84.3 KiB fetched)`) — the on-screen proof that an inspect read metadata,
-/// not weights.
+/// Rendered by the CLI as provenance (e.g. `remote (6 range requests,
+/// 136.0 KiB fetched)` — the live-measured cost of inspecting a 72 MiB
+/// `NPZ`) — the on-screen proof that an inspect read metadata, not weights.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct RangeStats {
@@ -209,7 +210,7 @@ impl<F: RangeFetcher> RangeReader<F> {
     /// Creates a reader with the default safety budgets
     /// ([`MAX_RANGE_REQUESTS`], [`MAX_TRANSFER_BUDGET`]).
     #[must_use]
-    pub fn new(fetcher: F) -> Self {
+    pub const fn new(fetcher: F) -> Self {
         Self::with_limits(fetcher, MAX_RANGE_REQUESTS, MAX_TRANSFER_BUDGET)
     }
 
@@ -219,7 +220,7 @@ impl<F: RangeFetcher> RangeReader<F> {
     /// caps the total content bytes fetched. Exceeding either fails the
     /// offending read with a [`std::io::Error`] naming the cap.
     #[must_use]
-    pub fn with_limits(fetcher: F, max_requests: u32, max_transfer_bytes: u64) -> Self {
+    pub const fn with_limits(fetcher: F, max_requests: u32, max_transfer_bytes: u64) -> Self {
         Self {
             fetcher,
             pos: 0,
@@ -254,7 +255,7 @@ impl<F: RangeFetcher> RangeReader<F> {
     /// a parse fails, callers use this to recover the typed error (e.g. to
     /// let the CLI upgrade an HTTP `403` into a gated-repo diagnosis).
     #[must_use]
-    pub fn take_last_error(&mut self) -> Option<FetchError> {
+    pub const fn take_last_error(&mut self) -> Option<FetchError> {
         self.last_error.take()
     }
 
@@ -324,6 +325,30 @@ impl<F: RangeFetcher> RangeReader<F> {
         }
         None
     }
+
+    /// Advances the read position by `n` copied bytes.
+    fn advance_pos(&mut self, n: usize) {
+        // CAST: usize → u64, copy count bounded by buf length
+        #[allow(clippy::as_conversions)]
+        {
+            self.pos = self.pos.saturating_add(n as u64);
+        }
+    }
+
+    /// Copies from cache immediately after a fetch that must cover `pos`.
+    ///
+    /// A miss here means the fetch/cache bookkeeping is internally
+    /// inconsistent; surfaced as an error rather than a panic.
+    fn serve_from_cache_after_fetch(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.copy_cached(buf).ok_or_else(|| {
+            io::Error::other(format!(
+                "internal range cache inconsistency at offset {}",
+                self.pos
+            ))
+        })?;
+        self.advance_pos(n);
+        Ok(n)
+    }
 }
 
 impl<F: RangeFetcher> Read for RangeReader<F> {
@@ -338,11 +363,7 @@ impl<F: RangeFetcher> Read for RangeReader<F> {
 
         // 1. Serve from cached extents (window, then tail) — no request.
         if let Some(n) = self.copy_cached(buf) {
-            // CAST: usize → u64, copy count bounded by buf length
-            #[allow(clippy::as_conversions)]
-            {
-                self.pos = self.pos.saturating_add(n as u64);
-            }
+            self.advance_pos(n);
             return Ok(n);
         }
 
@@ -378,27 +399,6 @@ impl<F: RangeFetcher> Read for RangeReader<F> {
             data,
         });
         self.serve_from_cache_after_fetch(buf)
-    }
-}
-
-impl<F: RangeFetcher> RangeReader<F> {
-    /// Copies from cache immediately after a fetch that must cover `pos`.
-    ///
-    /// A miss here means the fetch/cache bookkeeping is internally
-    /// inconsistent; surfaced as an error rather than a panic.
-    fn serve_from_cache_after_fetch(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.copy_cached(buf).ok_or_else(|| {
-            io::Error::other(format!(
-                "internal range cache inconsistency at offset {}",
-                self.pos
-            ))
-        })?;
-        // CAST: usize → u64, copy count bounded by buf length
-        #[allow(clippy::as_conversions)]
-        {
-            self.pos = self.pos.saturating_add(n as u64);
-        }
-        Ok(n)
     }
 }
 
@@ -548,6 +548,7 @@ impl HttpRangeFetcher {
             handle: tokio::runtime::Handle::current(),
             client,
             hf_url,
+            // BORROW: explicit .to_owned() for the owned field
             filename: filename.to_owned(),
             response_etag: None,
             total_size: info.content_length,
@@ -617,6 +618,7 @@ impl HttpRangeFetcher {
         })?;
 
         let range_value = format!("bytes={start}-{end_inclusive}");
+        // BORROW: explicit .as_str() instead of Deref coercion
         let filename = self.filename.as_str();
         let total_size = self.total_size;
 

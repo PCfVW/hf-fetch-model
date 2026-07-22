@@ -849,8 +849,9 @@ pub fn inspect_gguf_cached(
 /// `TensorInfo::data_offsets` is synthesised as cumulative `(start, end)`
 /// pairs — `start = sum of previous byte_lens` — so `byte_len()`
 /// (= `end - start`) renders the actual storage size. The synthetic
-/// offsets are NOT on-disk truth; consumers that need real offsets
-/// should defer to v0.11.x once remote-inspect lands.
+/// offsets are NOT on-disk truth — and the remote path ([`inspect_npz`],
+/// v0.11.0) synthesises them identically, since anamnesis's inspect
+/// surface does not expose archive offsets for either path.
 ///
 /// **Metadata.** `metadata: None` — NPZ has no metadata block analogous
 /// to safetensors's `__metadata__` or GGUF's KV table.
@@ -944,8 +945,9 @@ fn npz_info_to_header_info(
 ///
 /// The third tuple element reports the remote transfer statistics
 /// ([`RangeStats`]: request count + bytes fetched); `None` on the cached
-/// path. The `hf-fm` CLI renders it as provenance
-/// (`remote (7 range requests, 84.3 KiB fetched)`).
+/// path. The `hf-fm` CLI renders it as provenance — e.g.
+/// `remote (6 range requests, 136.0 KiB fetched)`, the live-measured cost
+/// against a 72 MiB `GemmaScope` `params.npz`.
 ///
 /// # Errors
 ///
@@ -1205,9 +1207,9 @@ pub async fn inspect_repo_safetensors(
 ///
 /// Single source of truth shared by the cached listing
 /// ([`list_cached_tensor_files`]) and the CLI's remote listing / numeric
-/// index / `--pick` candidate set. Matches the v0.10.3 per-file dispatch in
-/// `hf-fm inspect` (`.safetensors` remote or cached; `.gguf` / `.npz` /
-/// `.pth` cached-only until the v0.11 remote-inspect line).
+/// index / `--pick` candidate set. Matches the per-file dispatch in
+/// `hf-fm inspect` (`.safetensors` / `.npz` remote or cached since
+/// v0.11.0; `.gguf` / `.pth` cached-only until v0.11.2 / v0.11.3).
 pub const SUPPORTED_TENSOR_EXTENSIONS: [&str; 4] = ["safetensors", "gguf", "npz", "pth"];
 
 /// Returns `true` when `filename`'s extension matches one of
