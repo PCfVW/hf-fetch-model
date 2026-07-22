@@ -43,8 +43,9 @@
 //!
 //! ## Inspect Before Downloading
 //!
-//! Read tensor metadata from `.safetensors` headers via HTTP Range requests —
-//! no weight data downloaded. Sharded repos (those with
+//! Read tensor metadata from `.safetensors` headers — and, since v0.11.0,
+//! `NumPy` `.npz` archive directories — via HTTP Range requests, no weight
+//! data downloaded. Sharded repos (those with
 //! `model.safetensors.index.json`) work transparently —
 //! [`inspect::inspect_repo_safetensors`] reads every shard's header in parallel
 //! and returns a flat per-file result list. See
@@ -83,7 +84,7 @@
 //!
 //! ## Cached-file Inspection
 //!
-//! Beyond the remote-or-cached `.safetensors` path above,
+//! Beyond the remote-or-cached `.safetensors` / `.npz` paths above,
 //! [`inspect::inspect_gguf_cached`] (v0.10.2),
 //! [`inspect::inspect_npz_cached`], and [`inspect::inspect_pth_cached`]
 //! (both v0.10.3) extend inspect to `GGUF` / `NumPy` `.npz` / `PyTorch`
