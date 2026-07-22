@@ -4,10 +4,12 @@
 //!
 //! Reads tensor metadata (names, shapes, dtypes, byte offsets) without
 //! downloading full weight data. `.safetensors` files resolve cache-first
-//! with HTTP Range request fallback; `.gguf` / `.npz` / `.pth` files are
-//! inspected from the local cache via the `anamnesis` parser crate
-//! ([`inspect_gguf_cached`] / [`inspect_npz_cached`] / [`inspect_pth_cached`],
-//! v0.10.2–v0.10.3 — remote inspect for those three is planned for v0.11).
+//! with HTTP Range request fallback; `.npz` files likewise (v0.11.0 —
+//! [`inspect_npz`] drives `anamnesis::inspect_npz_from_reader` over an
+//! [`HttpRangeReader`]); `.gguf` / `.pth` files are inspected from the
+//! local cache via the `anamnesis` parser crate ([`inspect_gguf_cached`] /
+//! [`inspect_pth_cached`] — remote inspect for those two is planned for
+//! v0.11.2 / v0.11.3).
 //!
 //! The primary types are [`TensorInfo`] (per-tensor metadata),
 //! [`SafetensorsHeaderInfo`] (the format-agnostic parsed-header shape all
@@ -33,6 +35,7 @@ use crate::cache;
 use crate::cache_layout;
 use crate::chunked;
 use crate::error::FetchError;
+use crate::http_range::{HttpRangeReader, RangeStats};
 
 // -----------------------------------------------------------------------
 // Types
@@ -888,6 +891,20 @@ pub fn inspect_npz_cached(
             reason: format!("failed to parse NPZ: {e}"),
         })?;
 
+    Ok(npz_info_to_header_info(parsed, file_size))
+}
+
+/// Maps an anamnesis `NPZ` inspect result into the format-agnostic
+/// [`SafetensorsHeaderInfo`] shape used by hf-fm's render path.
+///
+/// Shared by the cached ([`inspect_npz_cached`]) and remote
+/// ([`inspect_npz`]) paths, so the two cannot drift. See
+/// [`inspect_npz_cached`] for the synthesised-offsets, metadata, and
+/// header-size conventions this mapping implements.
+fn npz_info_to_header_info(
+    parsed: anamnesis::NpzInspectInfo,
+    file_size: Option<u64>,
+) -> SafetensorsHeaderInfo {
     let mut tensors: Vec<TensorInfo> = Vec::with_capacity(parsed.tensors.len());
     let mut cursor: u64 = 0;
     for t in parsed.tensors {
@@ -906,14 +923,84 @@ pub fn inspect_npz_cached(
         });
     }
 
-    Ok(SafetensorsHeaderInfo {
+    SafetensorsHeaderInfo {
         tensors,
         metadata: None,
         header_size: 0,
         file_size,
         // NPZ has no quant-method metadata; quant_info stays None.
         quant_info: None,
+    }
+}
+
+/// Inspects a single `.npz` file's metadata (cache-first, remote fallback).
+///
+/// Checks the local `HF` cache first. If the file is cached, reads the `ZIP`
+/// central directory + per-entry `NPY` headers from disk with zero network
+/// requests. Otherwise, opens an [`HttpRangeReader`] over the file and runs
+/// `anamnesis::inspect_npz_from_reader` against it on a blocking thread —
+/// a handful of HTTP Range requests fetch the archive directory and array
+/// headers; no tensor data is downloaded in either case.
+///
+/// The third tuple element reports the remote transfer statistics
+/// ([`RangeStats`]: request count + bytes fetched); `None` on the cached
+/// path. The `hf-fm` CLI renders it as provenance
+/// (`remote (7 range requests, 84.3 KiB fetched)`).
+///
+/// # Errors
+///
+/// Returns [`FetchError::Http`] if the Range probe or a range request
+/// fails — including gated repos, which surface as `returned status
+/// 401/403` errors (the `hf-fm` CLI upgrades those into a gated-repo
+/// diagnosis).
+/// Returns [`FetchError::SafetensorsHeader`] if the `NPZ` archive is
+/// malformed (cached or remote).
+pub async fn inspect_npz(
+    repo_id: &str,
+    filename: &str,
+    token: Option<&str>,
+    revision: Option<&str>,
+) -> Result<(SafetensorsHeaderInfo, InspectSource, Option<RangeStats>), FetchError> {
+    let rev = revision.unwrap_or("main");
+
+    // Try local cache first (mirrors `inspect_safetensors`).
+    if resolve_cached_path(repo_id, rev, filename).is_some() {
+        let info = inspect_npz_cached(repo_id, filename, revision)?;
+        return Ok((info, InspectSource::Cached, None));
+    }
+
+    // Fall back to HTTP Range requests: probe eagerly (typed errors here),
+    // then hand the reader to a blocking thread for the sync parse.
+    let reader = HttpRangeReader::open(repo_id, revision, filename, token).await?;
+    let file_size = reader.total_size();
+
+    let (parse_result, stats, transport_error) = tokio::task::spawn_blocking(move || {
+        let mut reader = reader;
+        // `&mut` keeps ownership here so stats and the typed transport
+        // error survive the parse (std's blanket `Read`/`Seek` for `&mut R`).
+        let result = anamnesis::inspect_npz_from_reader(&mut reader);
+        (result, reader.stats(), reader.take_last_error())
     })
+    .await
+    .map_err(|e| FetchError::Http(format!("failed to join NPZ inspect task: {e}")))?;
+
+    match parse_result {
+        Ok(parsed) => Ok((
+            npz_info_to_header_info(parsed, Some(file_size)),
+            InspectSource::Remote,
+            Some(stats),
+        )),
+        // Prefer the typed transport error over anamnesis's io-flattened
+        // wrapper — an HTTP 401/403 must stay recognisable for the CLI's
+        // gated-repo diagnosis.
+        Err(e) => Err(
+            transport_error.unwrap_or_else(|| FetchError::SafetensorsHeader {
+                // BORROW: explicit .to_owned() for owned String in the error variant
+                filename: filename.to_owned(),
+                reason: format!("failed to parse NPZ: {e}"),
+            }),
+        ),
+    }
 }
 
 /// Inspects a `.pth` file's metadata from the local `HuggingFace` cache.
@@ -1824,6 +1911,46 @@ mod tests {
     #![allow(clippy::panic)]
 
     use super::is_supported_tensor_file;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn npz_info_to_header_info_synthesises_cumulative_offsets() {
+        // The mapping shared by `inspect_npz_cached` (v0.10.3) and the
+        // remote `inspect_npz` (v0.11.0): synthesised cumulative offsets
+        // from per-tensor `byte_len`, no metadata block, zero header size.
+        let parsed = anamnesis::NpzInspectInfo {
+            tensors: vec![
+                anamnesis::NpzTensorInfo {
+                    name: "w_enc".to_owned(),
+                    shape: vec![2, 3],
+                    dtype: anamnesis::NpzDtype::F32,
+                    byte_len: 24,
+                },
+                anamnesis::NpzTensorInfo {
+                    name: "b_dec".to_owned(),
+                    shape: vec![4],
+                    dtype: anamnesis::NpzDtype::F32,
+                    byte_len: 16,
+                },
+            ],
+            total_bytes: 40,
+            dtypes: vec![anamnesis::NpzDtype::F32],
+        };
+
+        let info = super::npz_info_to_header_info(parsed, Some(1234));
+
+        assert_eq!(info.tensors.len(), 2);
+        let first = info.tensors.first().unwrap();
+        let second = info.tensors.get(1).unwrap();
+        assert_eq!(first.data_offsets, (0, 24));
+        assert_eq!(second.data_offsets, (24, 40));
+        assert_eq!(first.dtype, "F32");
+        assert_eq!(second.shape, vec![4]);
+        assert_eq!(info.header_size, 0);
+        assert_eq!(info.file_size, Some(1234));
+        assert!(info.metadata.is_none());
+        assert!(info.quant_info.is_none());
+    }
 
     #[test]
     fn is_supported_tensor_file_accepts_all_four_formats() {

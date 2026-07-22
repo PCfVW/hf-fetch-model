@@ -2000,6 +2000,31 @@ fn inspect_cached_pth_renders() {
 }
 
 #[test]
+fn inspect_remote_gguf_and_pth_error_names_their_release() {
+    // v0.11.0: `.npz` left the cached-only gate (remote NPZ rides the new
+    // `HttpRangeReader` adapter); `.gguf` / `.pth` remain cached-only and
+    // the rejection now names each format's actual planned release. The
+    // dispatch rejects before any network I/O, so this test runs offline.
+    let (_stdout, stderr, success) =
+        run(hf_fm().args(["inspect", "some-org/some-model", "model.gguf"]));
+    assert!(!success, "remote GGUF inspect must be rejected");
+    assert!(
+        stderr.contains("remote GGUF inspect not yet supported")
+            && stderr.contains("planned for v0.11.2"),
+        "GGUF rejection should name v0.11.2, got:\n{stderr}"
+    );
+
+    let (_stdout, stderr, success) =
+        run(hf_fm().args(["inspect", "some-org/some-model", "weights.pth"]));
+    assert!(!success, "remote PTH inspect must be rejected");
+    assert!(
+        stderr.contains("remote PTH inspect not yet supported")
+            && stderr.contains("planned for v0.11.3"),
+        "PTH rejection should name v0.11.3, got:\n{stderr}"
+    );
+}
+
+#[test]
 fn inspect_cached_quantized_renders_format_line() {
     // v0.10.3 Phase C: confirm the `Format:` + `Size: <stored> stored -> <deq> (BF16)`
     // lines appear on quantized safetensors. `find_cached_safetensors_with_metadata`

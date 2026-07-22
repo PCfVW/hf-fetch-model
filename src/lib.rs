@@ -117,9 +117,13 @@
 //! # }
 //! ```
 //!
-//! Remote inspect for `GGUF` / `NPZ` / `PTH` (via HTTP Range, without
-//! going through the cache) is planned for v0.11; until then those formats
-//! error early with a "pass --cached after downloading" recovery hint.
+//! Remote inspect for `NPZ` (via HTTP Range, without going through the
+//! cache) shipped in v0.11.0: [`inspect::inspect_npz`] drives anamnesis's
+//! reader-based parser over an [`HttpRangeReader`] — see the [`http_range`]
+//! module for the substrate (tail prefetch, read-ahead, hard transfer
+//! budgets, token-free CDN requests). `GGUF` / `PTH` remain cached-only
+//! (planned for v0.11.2 / v0.11.3) and error early with a "pass --cached
+//! after downloading" recovery hint.
 //!
 //! For discovery — "what tensor files does this cached repo hold?" —
 //! [`inspect::list_cached_tensor_files`] (v0.10.5) enumerates

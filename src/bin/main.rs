@@ -384,13 +384,15 @@ See also: hf-fm list-families, hf-fm discover")]
         #[arg(long)]
         json: bool,
     },
-    /// Inspect tensor file headers (`.safetensors` remote/cached; `.gguf` / `.npz` / `.pth` cached).
+    /// Inspect tensor file headers (`.safetensors` / `.npz` remote/cached; `.gguf` / `.pth` cached).
     ///
     /// Reads tensor metadata without downloading full weight data. For
-    /// `.safetensors`, checks the local cache first and falls back to HTTP
-    /// Range requests. For `.gguf` / `.npz` / `.pth`, only cached inspect
-    /// is supported in v0.10.x (remote inspect for those formats is planned
-    /// for v0.11); pass `--cached` after downloading the file.
+    /// `.safetensors` and `.npz`, checks the local cache first and falls
+    /// back to HTTP Range requests (`.npz` fetches only the archive
+    /// directory and array headers — a few dozen KiB even on multi-hundred
+    /// MiB archives). For `.gguf` / `.pth`, only cached inspect is
+    /// supported (remote inspect is planned for v0.11.2 / v0.11.3); pass
+    /// `--cached` after downloading the file.
     #[command(after_help = "Examples:\n  \
         hf-fm inspect <repo>                                    # inspect every .safetensors in the repo\n  \
         hf-fm inspect <repo> --filter blocks.0.                 # matched tensor names (per shard/file)\n  \
@@ -400,7 +402,8 @@ See also: hf-fm list-families, hf-fm discover")]
         hf-fm inspect <repo> fluxV13 --pick --dtypes            # substring narrows, then pick\n  \
         hf-fm inspect <repo> model.safetensors --tree           # hierarchical view of one file\n  \
         hf-fm inspect <repo> --check-gpu                        # GPU-fit verdict for the whole repo\n  \
-        hf-fm inspect <repo> model.gguf --cached                # inspect a cached GGUF file (v0.10.2+)\n\n\
+        hf-fm inspect <repo> model.gguf --cached                # inspect a cached GGUF file (v0.10.2+)\n  \
+        hf-fm inspect <repo> layer_9/width_16k/.../params.npz   # remote NPZ, no download (v0.11.0+)\n\n\
         Indices returned by --list are stable as long as the repo has not\n\
         changed remotely between invocations. Pass --revision <sha> on both\n\
         --list and the follow-up run to lock the view end-to-end.\n\n\
@@ -5888,10 +5891,10 @@ fn run_inspect_single(
     check_gpu: Option<u32>,
     context: Option<u32>,
 ) -> Result<(), FetchError> {
-    // Classify extension once; v0.10.3 dispatches across .safetensors (remote
-    // or cached) and .gguf / .npz / .pth (cached only — remote inspect for
-    // these three formats arrives in v0.11 via the planned `HttpRangeReader`
-    // adapter).
+    // Classify extension once; v0.11.0 dispatches across .safetensors and
+    // .npz (remote or cached — .npz rides the `HttpRangeReader` adapter) and
+    // .gguf / .pth (cached only — remote inspect for these two arrives in
+    // v0.11.2 / v0.11.3 on the same adapter).
     let ext_lc = Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())
@@ -5910,21 +5913,19 @@ fn run_inspect_single(
         });
     }
 
-    if (is_gguf || is_npz || is_pth) && !cached {
-        let format_label = if is_pth {
-            "PTH"
-        } else if is_npz {
-            "NPZ"
+    if (is_gguf || is_pth) && !cached {
+        let (format_label, planned) = if is_pth {
+            ("PTH", "v0.11.3")
         } else {
-            "GGUF"
+            ("GGUF", "v0.11.2")
         };
         return Err(FetchError::InvalidArgument(format!(
-            "remote {format_label} inspect not yet supported (planned for v0.11): \
+            "remote {format_label} inspect not yet supported (planned for {planned}): \
              pass --cached after downloading {filename} with `hf-fm download`"
         )));
     }
 
-    let (mut info, source) = if cached {
+    let (mut info, source, range_stats) = if cached {
         let info = if is_gguf {
             inspect::inspect_gguf_cached(repo_id, filename, revision)?
         } else if is_npz {
@@ -5934,9 +5935,9 @@ fn run_inspect_single(
         } else {
             inspect::inspect_safetensors_cached(repo_id, filename, revision)?
         };
-        (info, inspect::InspectSource::Cached)
+        (info, inspect::InspectSource::Cached, None)
     } else {
-        // Reachable only when is_safetensors == true (the .gguf/.npz/.pth
+        // Reachable only when is_safetensors or is_npz (the .gguf/.pth
         // cached-only branch returned earlier; the unclassified branch
         // returned earlier).
         // BORROW: explicit String::from for Option<&str> → Option<String>
@@ -5948,13 +5949,24 @@ fn run_inspect_single(
             path: PathBuf::from("<runtime>"),
             source: e,
         })?;
-        // BORROW: explicit .as_deref() for Option<String> → Option<&str>
-        rt.block_on(inspect::inspect_safetensors(
-            repo_id,
-            filename,
-            token.as_deref(),
-            revision,
-        ))?
+        if is_npz {
+            // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+            rt.block_on(inspect::inspect_npz(
+                repo_id,
+                filename,
+                token.as_deref(),
+                revision,
+            ))?
+        } else {
+            // BORROW: explicit .as_deref() for Option<String> → Option<&str>
+            let (info, source) = rt.block_on(inspect::inspect_safetensors(
+                repo_id,
+                filename,
+                token.as_deref(),
+                revision,
+            ))?;
+            (info, source, None)
+        }
     };
 
     // `--check-gpu` uses the unfiltered model totals — fit is a whole-model
@@ -6041,11 +6053,19 @@ fn run_inspect_single(
         return Ok(());
     }
 
-    // Human-readable output.
-    let source_label = match source {
-        inspect::InspectSource::Cached => "cached",
-        inspect::InspectSource::Remote => "remote (2 HTTP requests)",
-        _ => "unknown",
+    // Human-readable output. Remote NPZ (v0.11.0 `HttpRangeReader` path)
+    // reports honest transfer stats — the on-screen proof that the inspect
+    // read metadata, not weights; remote safetensors stays on its bespoke
+    // fixed two-request path until v0.11.1.
+    let source_label = match (source, range_stats) {
+        (inspect::InspectSource::Cached, _) => "cached".to_owned(),
+        (inspect::InspectSource::Remote, Some(stats)) => format!(
+            "remote ({} range requests, {} fetched)",
+            stats.requests,
+            format_size(stats.bytes_fetched)
+        ),
+        (inspect::InspectSource::Remote, None) => "remote (2 HTTP requests)".to_owned(),
+        _ => "unknown".to_owned(),
     };
     println!("  Repo:     {repo_id}");
     println!("  File:     {filename}");
