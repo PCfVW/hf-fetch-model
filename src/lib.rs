@@ -228,6 +228,7 @@ pub mod config;
 pub mod discover;
 pub mod download;
 pub mod error;
+pub mod http_range;
 pub mod inspect;
 pub mod plan;
 pub mod progress;
@@ -241,6 +242,7 @@ pub use config::{
 pub use discover::{DiscoveredFamily, GateStatus, ModelCardMetadata, SearchResult};
 pub use download::DownloadOutcome;
 pub use error::{FetchError, FileFailure};
+pub use http_range::{HttpRangeReader, RangeFetcher, RangeReader, RangeStats};
 pub use inspect::{AdapterConfig, ModelConfig};
 pub use plan::{download_plan, DownloadPlan, FilePlan};
 pub use progress::{ProgressEvent, ProgressReceiver};
