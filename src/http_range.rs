@@ -44,7 +44,7 @@
 //! gated-repo diagnosis).
 
 use std::io::{self, Read, Seek, SeekFrom};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -438,12 +438,20 @@ pub type HttpRangeReader = RangeReader<HttpRangeFetcher>;
 /// HTTP Range transport against a `HuggingFace`-hosted file.
 ///
 /// Opened via [`HttpRangeReader::open`]. One authenticated, redirect-free
-/// probe (reusing the chunked-download probe) resolves the signed CDN URL,
-/// the file size, the `ETag`, and the CDN expiry; every subsequent range
-/// request then goes **single-hop to the CDN with a token-free client** —
-/// the `Bearer` token is never sent to the CDN host. When the probe gets a
-/// direct `206` instead of a redirect (small git-stored files served by the
-/// HF host itself), the authenticated client is used against that host.
+/// probe (reusing the chunked-download probe) resolves the file size and
+/// classifies access failures eagerly (gated repos, no Range support).
+/// **Every range request then targets the HF `/resolve` URL** and follows
+/// the redirect to a freshly-signed CDN URL; `reqwest` strips the
+/// `Authorization` header on the cross-host redirect, so the `Bearer`
+/// token is never sent to the CDN host.
+///
+/// Per-request re-resolution is **required**, not just convenient:
+/// Xet-backed repos sign each CDN URL for the *exact* `Range` header that
+/// minted it (a `ByteRange` policy condition in the signed URL), so a CDN
+/// URL stored from the probe can never serve any other range. Re-resolving
+/// also makes signed-URL expiry a non-issue — every request gets a fresh
+/// signature. Discovered live against `google/gemma-scope-2b-pt-res`
+/// (v0.11.0 dogfooding).
 ///
 /// # Response validation (every request)
 ///
@@ -456,45 +464,25 @@ pub type HttpRangeReader = RangeReader<HttpRangeFetcher>;
 ///   over- or under-delivery is an error.
 /// - The response `ETag` (when present) must stay identical across
 ///   requests — a mid-inspect change upstream aborts with a clear error.
-///
-/// # Expiry handling
-///
-/// A signed CDN URL that expires mid-inspect (or returns `403`) triggers
-/// **one** re-probe; the refreshed `ETag` and size must match the original
-/// probe or the inspect aborts. The re-probe's requests are counted in
-/// [`RangeStats::requests`].
 pub struct HttpRangeFetcher {
     /// Runtime handle used to drive async `reqwest` calls from the
     /// blocking `Read` context (`spawn_blocking` thread).
     handle: tokio::runtime::Handle,
-    /// Authenticated client (auth header as a default header) — used only
-    /// against the HF host (direct-serve fallback and re-probes).
-    authed_client: reqwest::Client,
-    /// Token-free client — used for all CDN requests.
-    anon_client: reqwest::Client,
-    /// Token retained for re-probes.
-    token: Option<String>,
-    /// The original `HF` `/resolve` URL (re-probe target).
+    /// Authenticated, redirect-following client. The auth header rides
+    /// only to the HF host — `reqwest` removes sensitive headers when a
+    /// redirect crosses hosts.
+    client: reqwest::Client,
+    /// The `HF` `/resolve` URL every range request targets.
     hf_url: String,
     /// Filename for error messages.
     filename: String,
-    /// Current range-request target (signed CDN URL, or `hf_url` when the
-    /// probe got a direct `206`).
-    fetch_url: String,
-    /// When the signed CDN URL expires (`None`: no recognised expiry).
-    cdn_expires_at: Option<Instant>,
-    /// `ETag` from the probe (`x-linked-etag` / `etag`, quotes stripped) —
-    /// the invariant a re-probe must preserve.
-    probe_etag: String,
     /// First `ETag` observed on a range response — later responses must
     /// match it (self-consistency across requests).
     response_etag: Option<String>,
     /// Total file size from the probe's `Content-Range`.
     total_size: u64,
-    /// Probe requests spent (2 per probe: no-redirect probe + size fetch).
+    /// Probe requests spent (no-redirect probe + CDN size fetch).
     extra: u32,
-    /// Whether the single allowed re-probe has been consumed.
-    reprobed: bool,
 }
 
 impl HttpRangeReader {
@@ -543,35 +531,27 @@ impl HttpRangeFetcher {
     ) -> Result<Self, FetchError> {
         let rev = revision.unwrap_or("main");
         let hf_url = chunked::build_download_url(repo_id, rev, filename);
-        let authed_client = chunked::build_client(token)?;
-        let anon_client = chunked::build_client(None)?;
+        let client = chunked::build_client(token)?;
 
         let info = chunked::probe_range_support(
-            authed_client.clone(),
+            client.clone(),
             hf_url.clone(),
             // BORROW: explicit String::from for Option<&str> → Option<String>
             token.map(String::from),
         )
         .await?;
         let Some(info) = info else {
-            return Err(Self::classify_no_range_support(&authed_client, &hf_url, filename).await);
+            return Err(Self::classify_no_range_support(&client, &hf_url, filename).await);
         };
 
         Ok(Self {
             handle: tokio::runtime::Handle::current(),
-            authed_client,
-            anon_client,
-            // BORROW: explicit String::from for Option<&str> → Option<String>
-            token: token.map(String::from),
+            client,
             hf_url,
             filename: filename.to_owned(),
-            fetch_url: info.cdn_url,
-            cdn_expires_at: info.cdn_expires_at,
-            probe_etag: info.etag,
             response_etag: None,
             total_size: info.content_length,
             extra: 2, // no-redirect probe + CDN size fetch
-            reprobed: false,
         })
     }
 
@@ -583,11 +563,11 @@ impl HttpRangeFetcher {
     /// follow-up request recovers the real status so gated repos get the
     /// actionable diagnosis instead of a misleading "no Range support".
     async fn classify_no_range_support(
-        authed_client: &reqwest::Client,
+        client: &reqwest::Client,
         url: &str,
         filename: &str,
     ) -> FetchError {
-        let result = authed_client
+        let result = client
             .get(url)
             .header(reqwest::header::RANGE, "bytes=0-0")
             .timeout(RANGE_REQUEST_TIMEOUT)
@@ -610,57 +590,8 @@ impl HttpRangeFetcher {
         }
     }
 
-    /// Whether range requests go to the `HF` host directly (probe returned
-    /// `206` without a redirect) rather than to a signed CDN URL.
-    fn is_direct(&self) -> bool {
-        self.fetch_url == self.hf_url
-    }
-
-    /// Whether the signed CDN URL has expired.
-    fn cdn_expired(&self) -> bool {
-        self.cdn_expires_at
-            .is_some_and(|deadline| Instant::now() >= deadline)
-    }
-
-    /// Re-resolves the signed CDN URL after expiry or a CDN `403`.
-    ///
-    /// Consumes the single allowed re-probe. The refreshed `ETag` and size
-    /// must match the original probe, otherwise the file changed upstream
-    /// mid-inspect and the operation aborts.
-    fn reprobe(&mut self) -> Result<(), FetchError> {
-        self.reprobed = true;
-        self.extra = self.extra.saturating_add(2);
-        let info = self
-            .handle
-            .block_on(chunked::probe_range_support(
-                self.authed_client.clone(),
-                self.hf_url.clone(),
-                self.token.clone(),
-            ))?
-            .ok_or_else(|| {
-                FetchError::Http(format!(
-                    "server does not support Range requests for {}",
-                    self.filename
-                ))
-            })?;
-        if info.etag != self.probe_etag {
-            return Err(FetchError::Http(format!(
-                "{} changed upstream during inspect (etag {} became {})",
-                self.filename, self.probe_etag, info.etag
-            )));
-        }
-        if info.content_length != self.total_size {
-            return Err(FetchError::Http(format!(
-                "{} changed upstream during inspect (size {} became {})",
-                self.filename, self.total_size, info.content_length
-            )));
-        }
-        self.fetch_url = info.cdn_url;
-        self.cdn_expires_at = info.cdn_expires_at;
-        Ok(())
-    }
-
-    /// Issues one validated range request (no re-probe logic).
+    /// Issues one validated range request against the `/resolve` URL,
+    /// following the redirect to a freshly-signed CDN URL.
     ///
     /// Returns the body plus the response `ETag` (cleaned), which the
     /// caller records for cross-request consistency.
@@ -685,18 +616,14 @@ impl HttpRangeFetcher {
             ))
         })?;
 
-        let client = if self.is_direct() {
-            &self.authed_client
-        } else {
-            &self.anon_client
-        };
         let range_value = format!("bytes={start}-{end_inclusive}");
         let filename = self.filename.as_str();
         let total_size = self.total_size;
 
         self.handle.block_on(async {
-            let resp = client
-                .get(self.fetch_url.as_str())
+            let resp = self
+                .client
+                .get(self.hf_url.as_str())
                 // BORROW: explicit .as_str() instead of Deref coercion
                 .header(reqwest::header::RANGE, range_value.as_str())
                 .timeout(RANGE_REQUEST_TIMEOUT)
@@ -796,23 +723,10 @@ impl HttpRangeFetcher {
 
 impl RangeFetcher for HttpRangeFetcher {
     fn fetch(&mut self, start: u64, end_inclusive: u64) -> Result<Vec<u8>, FetchError> {
-        // Proactive refresh when the signed URL is known to have expired.
-        if self.cdn_expired() && !self.reprobed {
-            self.reprobe()?;
-        }
-        let first = self.fetch_once(start, end_inclusive);
-        let (data, etag) = match first {
-            Ok(ok) => ok,
-            // Reactive refresh: a CDN 403 usually means the signature
-            // expired between the proactive check and the request.
-            Err(FetchError::Http(msg))
-                if msg.contains("returned status 403") && !self.is_direct() && !self.reprobed =>
-            {
-                self.reprobe()?;
-                self.fetch_once(start, end_inclusive)?
-            }
-            Err(e) => return Err(e),
-        };
+        // Each fetch re-resolves through /resolve (fresh signed CDN URL),
+        // so there is no stored-signature expiry to manage; failures
+        // surface directly with their real HTTP status.
+        let (data, etag) = self.fetch_once(start, end_inclusive)?;
         self.check_response_etag(etag)?;
         Ok(data)
     }
