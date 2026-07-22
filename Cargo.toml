@@ -25,13 +25,13 @@ cli = ["dep:clap", "dep:tracing-subscriber", "indicatif"]
 # lines fire on cached BnB / GPTQ / AWQ safetensors (without them the
 # tensors classify as `Passthrough` and `detect_scheme` returns
 # `Unquantized` — silently no-op for the families the feature targets).
-anamnesis = { version = "0.6.7", features = ["gguf", "npz", "pth", "bnb", "gptq", "awq"] }
+anamnesis = { version = "0.6.9", features = ["gguf", "npz", "pth", "bnb", "gptq", "awq"] }
 clap = { version = "4", features = ["derive"], optional = true }
 dirs = "6"
 fs2 = "0.4"
 globset = "0.4"
 hf-hub = { version = "0.5", features = ["tokio"] }
-hypomnesis = "0.2.3"
+hypomnesis = "0.2.5"
 indicatif = { version = "0.18", optional = true }
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -63,7 +63,7 @@ required-features = ["indicatif"]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # `test-helpers` exposes `GpuDeviceInfo::builder()` for synthetic fixtures
 # in tests that exercise the fit / miss JSON path. Default-off in runtime.
-hypomnesis = { version = "0.2.3", features = ["test-helpers"] }
+hypomnesis = { version = "0.2.5", features = ["test-helpers"] }
 # `serde_json` (already a runtime dependency, version-matched and in the
 # lockfile) lets CLI tests parse `--json` output and assert its schema and
 # invariants rather than substring-matching the rendered text.

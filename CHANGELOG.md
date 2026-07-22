@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`anamnesis` `0.6.7` → `0.6.9`.** Picks up the Phase 6.14 convert-matrix completion (a `BF16` conversion hub, `amn convert` coverage, lower convert peak heap). Inert for hf-fm's inspect-only usage — the `inspect_*_from_reader` / `inspect_*_cached` API surface hf-fm drives is unchanged; the full test suite passes untouched. Keeps the dependency current ahead of the v0.11.0 remote-NPZ work, which builds directly on `anamnesis::inspect_npz_from_reader`.
+- **`hypomnesis` `0.2.3` → `0.2.5`.** Picks up the new spilling-detection surface (VRAM over-commit reporting). Additive upstream — hf-fm's `--check-gpu` verdict path (`device_info` / `device_count` / `GpuDeviceInfo`) compiles and tests unchanged; adopting the spilling signal in the fit verdict is future work, not part of this bump.
+
 ## [0.10.7] — CLI parity & scriptability
 
 ### Added
