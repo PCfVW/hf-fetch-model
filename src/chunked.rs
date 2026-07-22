@@ -12,7 +12,7 @@ use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -51,12 +51,17 @@ pub(crate) struct RangeInfo {
     pub commit_hash: String,
     /// The etag used for the blob path in the `hf-hub` cache.
     pub etag: String,
-    /// The CDN URL to use for Range requests (after redirect).
-    pub cdn_url: String,
-    /// When the CDN signed URL expires, parsed from `X-Amz-Expires`.
+    /// The `HF` `/resolve` URL every chunk request targets.
     ///
-    /// `None` if the URL has no recognizable expiry parameter.
-    pub cdn_expires_at: Option<Instant>,
+    /// Chunk requests deliberately do **not** reuse the CDN URL the probe
+    /// was redirected to: Xet-backed repos sign each CDN URL for the exact
+    /// `Range` header that minted it (a `ByteRange` policy condition), so a
+    /// URL minted by the `bytes=0-0` probe 403s on every other range.
+    /// Following the redirect per chunk request mints a fresh signature
+    /// bound to that chunk's own range — and makes signed-URL expiry a
+    /// non-issue. `reqwest` strips the `Authorization` header on the
+    /// cross-host redirect, so the `Bearer` token never reaches the CDN.
+    pub resolve_url: String,
 }
 
 /// Constructs the HF download URL for a model file.
@@ -129,8 +134,9 @@ pub fn build_client(token: Option<&str>) -> Result<Client, FetchError> {
 /// Sends a `Range: bytes=0-0` request mirroring `hf-hub`'s `metadata()` method.
 /// Extracts `x-repo-commit` (commit hash) and `x-linked-etag`/`etag` from the
 /// HF API response, then follows the redirect to the CDN to get the file size
-/// from `Content-Range`. Also parses `X-Amz-Expires` from the CDN signed URL
-/// to populate [`RangeInfo::cdn_expires_at`].
+/// from `Content-Range`. The returned [`RangeInfo::resolve_url`] is the
+/// original `/resolve` URL — chunk requests re-resolve through it per
+/// request (see the field docs for the Xet rationale).
 ///
 /// Returns `None` if Range requests are not supported.
 ///
@@ -191,8 +197,10 @@ pub(crate) async fn probe_range_support(
     // Clean extra quotes (same as hf-hub does).
     let etag = etag.replace('"', "");
 
-    // Follow redirect to CDN and get Content-Range for file size.
-    let (cdn_url, content_length) = if let Some(ref loc) = redirect_url {
+    // Follow redirect to CDN (or re-request directly) to get Content-Range
+    // for the file size. The redirected URL itself is deliberately not
+    // retained — see `RangeInfo::resolve_url`.
+    let content_length = if let Some(ref loc) = redirect_url {
         // BORROW: explicit .as_str() for request URL
         let cdn_response = client
             .get(loc.as_str())
@@ -201,9 +209,7 @@ pub(crate) async fn probe_range_support(
             .await
             .map_err(|e| FetchError::Http(e.to_string()))?;
 
-        let size = parse_content_length_from_range(&cdn_response)?;
-        // BORROW: explicit .clone() for owned String
-        (loc.clone(), size)
+        parse_content_length_from_range(&cdn_response)?
     } else {
         // No redirect — parse size from the direct response headers.
         // We need to re-request since we consumed the response.
@@ -214,18 +220,14 @@ pub(crate) async fn probe_range_support(
             .await
             .map_err(|e| FetchError::Http(e.to_string()))?;
 
-        let size = parse_content_length_from_range(&direct_response)?;
-        (url, size)
+        parse_content_length_from_range(&direct_response)?
     };
-
-    let cdn_expires_at = parse_cdn_expiry(&cdn_url);
 
     Ok(Some(RangeInfo {
         content_length,
         commit_hash,
         etag,
-        cdn_url,
-        cdn_expires_at,
+        resolve_url: url,
     }))
 }
 
@@ -243,21 +245,6 @@ fn parse_content_length_from_range(response: &reqwest::Response) -> Result<u64, 
         .next_back()
         .and_then(|s| s.parse::<u64>().ok())
         .ok_or_else(|| FetchError::Http(format!("invalid Content-Range header: {content_range}")))
-}
-
-/// Parses the expiry deadline from an AWS presigned URL's `X-Amz-Expires` parameter.
-///
-/// Returns the approximate expiry instant, assuming the URL was just issued by
-/// the CDN. Returns `None` if the parameter is absent or unparseable — this
-/// includes non-AWS CDNs (e.g., GCS uses `X-Goog-Expires`, Cloudflare uses
-/// proprietary tokens) where the re-probe path is silently skipped.
-fn parse_cdn_expiry(url: &str) -> Option<Instant> {
-    let query = url.split('?').nth(1)?;
-    let expires_str = query
-        .split('&')
-        .find_map(|param| param.strip_prefix("X-Amz-Expires="))?;
-    let seconds: u64 = expires_str.parse().ok()?;
-    Some(Instant::now() + Duration::from_secs(seconds))
 }
 
 /// Downloads a file using parallel Range requests and writes it to the `hf-hub` cache.
@@ -390,8 +377,11 @@ pub(crate) async fn download_chunked(
     let mut join_set = JoinSet::new();
     for (chunk_idx, start, end) in chunks_layout {
         let task_client = client.clone();
+        // Each chunk targets the /resolve URL and follows the redirect,
+        // minting a signed CDN URL bound to its own Range header (required
+        // by Xet-backed repos; see `RangeInfo::resolve_url`).
         // BORROW: explicit .clone() for owned String
-        let task_url = range_info.cdn_url.clone();
+        let task_url = range_info.resolve_url.clone();
         // BORROW: explicit .clone() for owned PathBuf
         let task_temp = temp_path.clone();
         let task_state_path = state_path.clone();

@@ -420,9 +420,11 @@ async fn download_single_file(
 
 /// Downloads a large file using multi-connection chunked download with retry and checksum.
 ///
-/// Before starting the download, checks the CDN signed URL's `X-Amz-Expires`
-/// parameter. If the estimated download time exceeds the remaining URL validity,
-/// logs a warning and re-probes for a fresh URL.
+/// Every chunk request re-resolves through the `HF` `/resolve` URL and
+/// follows the redirect to a freshly-signed CDN URL (required by Xet-backed
+/// repos, whose signatures are bound to the exact `Range` header that
+/// minted them — see `RangeInfo::resolve_url`), so no signed-URL expiry
+/// management is needed regardless of download duration.
 #[allow(clippy::too_many_arguments)]
 async fn download_single_file_chunked(
     client: &reqwest::Client,
@@ -443,11 +445,9 @@ async fn download_single_file_chunked(
     // Probe for Range support.
     // BORROW: explicit .as_str() for URL construction
     let url = chunked::build_download_url(repo_id, revision, file.filename.as_str());
-    // BORROW: explicit .clone() for potential re-probe on CDN URL expiry
-    let token_for_reprobe = token.clone();
     let range_info = chunked::probe_range_support(client.clone(), url, token).await?;
 
-    let Some(mut range_info) = range_info else {
+    let Some(range_info) = range_info else {
         // Range not supported — this shouldn't happen for LFS files, but fall back
         // gracefully. Return an error that will be caught and retried via the standard path.
         return Err(FetchError::ChunkedDownload {
@@ -457,40 +457,10 @@ async fn download_single_file_chunked(
         });
     };
 
-    // Check if the CDN signed URL has enough remaining validity for the download.
-    // Conservative estimate: 5 MB/s per connection.
-    if let Some(expires_at) = range_info.cdn_expires_at {
-        let remaining = expires_at.saturating_duration_since(std::time::Instant::now());
-        let throughput = u64::try_from(connections)
-            .unwrap_or(1)
-            .saturating_mul(5_000_000);
-        let estimated = Duration::from_secs(range_info.content_length / throughput.max(1));
-        tracing::debug!(
-            filename = %file.filename,
-            cdn_expires_in_secs = remaining.as_secs(),
-            estimated_download_secs = estimated.as_secs(),
-            "CDN URL expiry parsed"
-        );
-        if remaining < estimated + Duration::from_secs(60) {
-            tracing::warn!(
-                filename = %file.filename,
-                remaining_secs = remaining.as_secs(),
-                estimated_secs = estimated.as_secs(),
-                "CDN URL may expire before download completes, re-probing for fresh URL"
-            );
-            let fresh_url = chunked::build_download_url(repo_id, revision, file.filename.as_str());
-            if let Some(fresh_info) =
-                chunked::probe_range_support(client.clone(), fresh_url, token_for_reprobe).await?
-            {
-                range_info = fresh_info;
-            } else {
-                tracing::warn!(
-                    filename = %file.filename,
-                    "re-probe returned no Range support, proceeding with original URL"
-                );
-            }
-        }
-    }
+    // No signed-URL expiry management is needed here: every chunk request
+    // re-resolves through the `/resolve` URL and follows the redirect to a
+    // freshly-signed CDN URL (see `RangeInfo::resolve_url`), so each request
+    // carries its own new signature regardless of download duration.
 
     let path = chunked::download_chunked(
         client.clone(),
