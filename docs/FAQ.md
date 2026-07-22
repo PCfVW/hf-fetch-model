@@ -85,7 +85,7 @@ A living list of the questions we and our early users have actually run into. If
 
 1. `safetensors_explorer` is an interactive **TUI** that shines at exploring a model locally with the keyboard; `hf-fm inspect` is a **CLI** that produces printable output (pipeable into other tools, pasteable into bug reports),
 2. `safetensors_explorer` reads **local files only**; `hf-fm inspect` additionally reads the tensor metadata of a **remote** model via HTTP Range, before anything is downloaded,
-3. `safetensors_explorer` currently covers **safetensors and GGUF**; hf-fm covers **safetensors** (remote or cached) plus **GGUF / NumPy `.npz` / PyTorch `.pth`** for cached files (since v0.10.2–v0.10.3), with remote inspect for those three on the roadmap (v0.11).
+3. `safetensors_explorer` currently covers **safetensors and GGUF**; hf-fm covers **safetensors and NumPy `.npz`** (remote or cached — remote NPZ since v0.11.0) plus **GGUF / PyTorch `.pth`** for cached files (since v0.10.2–v0.10.3), with remote inspect for those two on the roadmap (v0.11.2 / v0.11.3).
 
 Reach for `safetensors_explorer` when you want to sit at a TUI and explore a model locally; reach for `hf-fm inspect` when you want to preview a remote model before downloading, or when you want text output you can pipe and paste.
 
@@ -330,7 +330,7 @@ No. As of v0.9.8, hf-fm preserves the partial `.chunked.part` file plus a small 
 
 ### Which file formats can `inspect` read?
 
-Four tensor formats: `.safetensors` (remote via HTTP Range, or cached) and `.gguf` / NumPy `.npz` / PyTorch `.pth` (cached only — pass `--cached` after downloading; remote inspect for these three is on the roadmap for v0.11). Two errors point at the edges of that support: an unsupported extension (`.bin`, etc.) gives `hf-fm inspect supports .safetensors, .gguf, .npz, or .pth (got .bin for …)`, and inspecting a `.gguf` / `.npz` / `.pth` *without* `--cached` gives `remote <FORMAT> inspect not yet supported (planned for v0.11): pass --cached after downloading`. On a repo you have not fetched yet, `hf-fm list-files <repo>` shows what is available first.
+Four tensor formats: `.safetensors` and NumPy `.npz` (remote via HTTP Range, or cached — remote NPZ since v0.11.0) and `.gguf` / PyTorch `.pth` (cached only — pass `--cached` after downloading; remote inspect for these two is on the roadmap for v0.11.2 / v0.11.3). Two errors point at the edges of that support: an unsupported extension (`.bin`, etc.) gives `hf-fm inspect supports .safetensors, .gguf, .npz, or .pth (got .bin for …)`, and inspecting a `.gguf` / `.pth` *without* `--cached` gives `remote <FORMAT> inspect not yet supported (planned for v0.11.2/v0.11.3): pass --cached after downloading`. On a repo you have not fetched yet, `hf-fm list-files <repo>` shows what is available first.
 
 ### I got a `checksum mismatch` error — what do I do?
 
@@ -339,6 +339,8 @@ A `checksum mismatch` means the file's computed SHA256 does not match the hash H
 ### Why does `inspect` say `Source: remote (2 HTTP requests)`?
 
 Reading a safetensors header remotely takes two ranged HTTP requests: the first fetches the 8-byte little-endian `u64` at the start of the file that encodes the header's length, and the second fetches exactly that many bytes of JSON. That is the entire network cost of an `inspect` run — the multi-gigabyte weight data is never touched. When the file is already in your local cache, the line reads `Source: cached` instead and there are no HTTP requests at all.
+
+For a remote `.npz` (v0.11.0+) the same line reports the measured cost instead of a fixed count — e.g. `Source: remote (6 range requests, 136.0 KiB fetched)` against a 72 MiB GemmaScope archive: the requests fetch the `ZIP` central directory and the per-array `NPY` headers, never the tensor data. The reader also enforces hard budgets (256 requests / 32 MiB per inspect), so even a hostile or corrupted archive cannot silently turn an inspect into a full download.
 
 ### Why didn't my pipeline catch a download failure?
 
